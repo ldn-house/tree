@@ -10,11 +10,21 @@ RGB LED strip controller for a 6ft Christmas tree, inspired by [Matt Parker's 3D
 
 ## Usage
 
+**Raspberry Pi (current):**
 ```bash
 sudo python script.py
 ```
 
-Requires root for hardware access. Ctrl+C to stop.
+**Pi Pico 2W (with uv):**
+```bash
+# Flash to Pico (saves as main.py, auto-runs on boot)
+./flash.py
+
+# Or just run without flashing
+./flash.py --run
+```
+
+uv automatically handles the mpremote dependency.
 
 ## Roadmap
 
