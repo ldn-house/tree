@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["mpremote"]
 # ///
-"""Flash pico_poc.py to Pico as main.py and optionally run it."""
+"""Flash main.py to Pico and optionally run it."""
 
 import subprocess
 import sys
@@ -14,9 +14,9 @@ def run(*args):
 if __name__ == "__main__":
     if "--run" in sys.argv:
         print("Running script on Pico...")
-        run("run", "pico_poc.py")
+        run("run", "main.py")
     else:
-        print("Copying pico_poc.py -> main.py on Pico...")
-        run("cp", "pico_poc.py", ":main.py")
+        print("Copying main.py to Pico...")
+        run("cp", "main.py", ":main.py")
         print("Done! Script will auto-run on boot.")
         print("Use --run to execute immediately without flashing.")

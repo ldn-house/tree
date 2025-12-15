@@ -1,21 +1,16 @@
 # Christmas Tree LED Controller
 
-RGB LED strip controller for a 6ft Christmas tree, inspired by [Matt Parker's 3D Christmas tree](https://www.youtube.com/watch?v=TvlpIojusBE).
+RGB LED strip controller for a 6ft Christmas tree with 500 WS2811 LEDs, inspired by [Matt Parker's 3D Christmas tree](https://www.youtube.com/watch?v=TvlpIojusBE).
 
-## Current Setup
+## Hardware
 
-- Raspberry Pi with `rpi_ws281x` library
-- WS2811/WS2812 LED strip (planning for 500 LEDs)
-- SPI MOSI (GPIO 10) for data
+- Pi Pico 2W running MicroPython
+- 500x WS2811 12V RGB LEDs
+- Logic level shifter (3.3V → 5V for data signal)
+- 12V power supply for LEDs
 
 ## Usage
 
-**Raspberry Pi (current):**
-```bash
-sudo python script.py
-```
-
-**Pi Pico 2W (with uv):**
 ```bash
 # Flash to Pico (saves as main.py, auto-runs on boot)
 ./flash.py
@@ -26,8 +21,15 @@ sudo python script.py
 
 uv automatically handles the mpremote dependency.
 
+## Animations
+
+- Rainbow cycle
+- Theater chase (red/green)
+- White sparkle
+- Comet with tail (blue/gold)
+- Candy cane stripes
+- Multicolor twinkle
+
 ## Roadmap
 
-- [ ] Migrate to MicroPython on Pi Pico 2W (PIO for precise timing)
-- [ ] Add more animation patterns
 - [ ] 3D coordinate mapping for volumetric animations
