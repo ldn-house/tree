@@ -28,6 +28,19 @@ current_animation = None
 animation_index = 0
 total_animations = 0
 
+# Calibration state (checked by main.py, set by HTTP endpoints)
+calibration_mode = False
+calibration_led = -1  # -1 = all off, -2 = binary mode, 0+ = specific LED
+calibration_binary_bit = 0
+
+# These will be set by main.py after import
+strip = None
+LED_COUNT = 500
+
+# Note: Calibration LED writing is handled by main.py's update_calibration_leds()
+# to ensure thread safety (NeoPixel PIO isn't thread-safe)
+
+
 # mDNS constants
 MDNS_ADDR = "224.0.0.251"
 MDNS_PORT = 5353
@@ -265,18 +278,19 @@ def _get_status():
 }}"""
 
 
-def _handle_update(body, filename="main.py"):
-    """Write new code to specified file and schedule reboot."""
+def _handle_update(body, filename="main.py", reboot=True):
+    """Write new code to specified file and optionally reboot."""
     if not body:
         return False, "No content received"
 
-    # Basic security: only allow .py files in root
-    if "/" in filename or not filename.endswith(".py"):
-        return False, "Invalid filename (must be *.py in root)"
+    # Basic security: only allow safe file extensions in root
+    allowed_extensions = (".py", ".txt", ".json", ".csv")
+    if "/" in filename or not any(filename.endswith(ext) for ext in allowed_extensions):
+        return False, f"Invalid filename (must be {'/'.join(allowed_extensions)} in root)"
 
     try:
         # Write to temp file first
-        temp_name = "_ota_tmp.py"
+        temp_name = "_ota_tmp"
         with open(temp_name, "wb") as f:
             f.write(body)
 
@@ -288,7 +302,10 @@ def _handle_update(body, filename="main.py"):
             pass
         os.rename(temp_name, filename)
 
-        return True, f"Updated {filename} ({len(body)} bytes). Rebooting..."
+        if reboot:
+            return True, f"Updated {filename} ({len(body)} bytes). Rebooting..."
+        else:
+            return True, f"Updated {filename} ({len(body)} bytes)."
     except Exception as e:
         return False, f"Update failed: {e}"
 
@@ -308,13 +325,19 @@ def _handle_client(client, addr):
 
         elif path == "/update" and method == "POST":
             filename = query_params.get("file", "main.py")
-            success, message = _handle_update(body, filename)
+            # Default: reboot for .py files, no reboot for data files
+            should_reboot = filename.endswith(".py")
+            if "reboot" in query_params:
+                should_reboot = query_params["reboot"].lower() in ("1", "true", "yes")
+
+            success, message = _handle_update(body, filename, reboot=should_reboot)
             if success:
                 response = f'{{"success": true, "message": "{message}"}}'
                 _send_response(client, "200 OK", "application/json", response)
-                client.close()
-                time.sleep(1)
-                machine.reset()
+                if should_reboot:
+                    client.close()
+                    time.sleep(1)
+                    machine.reset()
             else:
                 response = f'{{"success": false, "error": "{message}"}}'
                 _send_response(client, "400 Bad Request", "application/json", response)
@@ -338,6 +361,54 @@ def _handle_client(client, addr):
                 _send_response(client, "200 OK", "application/json", str(info).replace("'", '"'))
             except Exception as e:
                 _send_response(client, "200 OK", "application/json", f'{{"error": "{e}"}}')
+
+        elif path == "/calibrate/start":
+            # Enter calibration mode
+            global calibration_mode, calibration_led
+            calibration_mode = True
+            calibration_led = -1
+            print("Entered calibration mode")
+            _send_response(client, "200 OK", "application/json",
+                          '{"success": true, "mode": "calibration"}')
+
+        elif path == "/calibrate/stop":
+            # Exit calibration mode
+            global calibration_mode, calibration_led
+            calibration_mode = False
+            calibration_led = -1
+            print("Exited calibration mode")
+            _send_response(client, "200 OK", "application/json",
+                          '{"success": true, "mode": "normal"}')
+
+        elif path == "/calibrate/led":
+            # Set specific LED on (n=index) or all off (n=-1)
+            global calibration_led
+            if not calibration_mode:
+                _send_response(client, "400 Bad Request", "application/json",
+                              '{"error": "Not in calibration mode. Call /calibrate/start first"}')
+            else:
+                calibration_led = int(query_params.get("n", -1))
+                _send_response(client, "200 OK", "application/json",
+                              f'{{"success": true, "led": {calibration_led}}}')
+
+        elif path == "/calibrate/binary":
+            # Set binary pattern (bit=N means LEDs with bit N set are ON)
+            global calibration_led, calibration_binary_bit
+            if not calibration_mode:
+                _send_response(client, "400 Bad Request", "application/json",
+                              '{"error": "Not in calibration mode. Call /calibrate/start first"}')
+            else:
+                calibration_binary_bit = int(query_params.get("bit", 0))
+                calibration_led = -2  # Special marker for binary mode
+                on_count = sum(1 for i in range(LED_COUNT) if (i >> calibration_binary_bit) & 1)
+                print(f"Set binary bit {calibration_binary_bit}, {on_count} LEDs")
+                _send_response(client, "200 OK", "application/json",
+                              f'{{"success": true, "bit": {calibration_binary_bit}, "leds_on": {on_count}}}')
+
+        elif path == "/calibrate/status":
+            # Get calibration status
+            _send_response(client, "200 OK", "application/json",
+                          f'{{"calibration_mode": {"true" if calibration_mode else "false"}, "current_led": {calibration_led}, "total_leds": 500}}')
 
         else:
             _send_response(client, "404 Not Found", "text/plain", "Not Found")

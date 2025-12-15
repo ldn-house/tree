@@ -30,6 +30,25 @@
     #status.loading { background: #553; }
     #status.running { background: #353; }
     #status.error { background: #533; }
+    .view-toggle {
+      display: flex;
+      gap: 0.25rem;
+      background: #333;
+      border-radius: 4px;
+      padding: 0.2rem;
+    }
+    .view-toggle button {
+      padding: 0.25rem 0.5rem;
+      font-size: 0.8rem;
+      background: transparent;
+    }
+    .view-toggle button.active {
+      background: #555;
+    }
+    #coords-status {
+      font-size: 0.75rem;
+      color: #666;
+    }
     #animation-name {
       margin-left: auto;
       font-size: 0.9rem;
@@ -47,10 +66,14 @@
       width: 400px;
       height: 500px;
     }
-    canvas {
+    #canvas-2d, #canvas-3d {
+      position: absolute;
+      top: 0;
+      left: 0;
       width: 100%;
       height: 100%;
     }
+    #canvas-3d { display: none; }
     footer {
       padding: 1rem;
       background: #222;
@@ -77,16 +100,24 @@
     }
     #fps { color: #666; margin-left: auto; font-size: 0.8rem; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
   <header>
     <h1>🎄 Tree Simulator</h1>
     <span id="status" class="loading">Loading...</span>
+    <div class="view-toggle">
+      <button id="view-2d" class="active">2D</button>
+      <button id="view-3d">3D</button>
+    </div>
+    <span id="coords-status"></span>
     <span id="animation-name"></span>
   </header>
   <main>
     <div id="tree-container">
-      <canvas id="canvas"></canvas>
+      <canvas id="canvas-2d"></canvas>
+      <canvas id="canvas-3d"></canvas>
     </div>
   </main>
   <footer>
@@ -98,12 +129,14 @@
 
   <script>
     const LED_COUNT = 500;
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+    const canvas2d = document.getElementById('canvas-2d');
+    const canvas3d = document.getElementById('canvas-3d');
+    const ctx = canvas2d.getContext('2d');
     const statusEl = document.getElementById('status');
     const animNameEl = document.getElementById('animation-name');
     const selectEl = document.getElementById('animation-select');
     const fpsEl = document.getElementById('fps');
+    const coordsStatusEl = document.getElementById('coords-status');
 
     // LED state
     let leds = new Uint8Array(LED_COUNT * 3);
@@ -113,21 +146,104 @@
     let frameCount = 0;
     let lastFpsUpdate = performance.now();
 
+    // View mode
+    let viewMode = '2d';
+    let coords3d = null;  // Will be loaded from coords.json
+
+    // Three.js objects
+    let scene, camera, renderer, controls;
+    let ledMeshes = [];
+
     // Set canvas size
     function resize() {
       const container = document.getElementById('tree-container');
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = container.clientWidth * dpr;
-      canvas.height = container.clientHeight * dpr;
+      canvas2d.width = container.clientWidth * dpr;
+      canvas2d.height = container.clientHeight * dpr;
       ctx.scale(dpr, dpr);
+
+      if (renderer) {
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+      }
     }
     resize();
     window.addEventListener('resize', resize);
 
-    // Render LEDs as a tree shape
-    function render() {
-      const w = canvas.width / (window.devicePixelRatio || 1);
-      const h = canvas.height / (window.devicePixelRatio || 1);
+    // Load 3D coordinates
+    async function loadCoordinates() {
+      try {
+        const resp = await fetch('coordinates/coords.json');
+        if (!resp.ok) throw new Error('Not found');
+        const data = await resp.json();
+        coords3d = data.coordinates;
+        coordsStatusEl.textContent = `3D coords: ${data.found_count}/${LED_COUNT}`;
+        coordsStatusEl.style.color = '#5a5';
+        return true;
+      } catch (e) {
+        coordsStatusEl.textContent = '3D coords: not found';
+        coordsStatusEl.style.color = '#666';
+        // Generate default spiral coords for demo
+        coords3d = [];
+        for (let i = 0; i < LED_COUNT; i++) {
+          const t = i / LED_COUNT;
+          const angle = t * Math.PI * 10;
+          const radius = (1 - t * 0.8) * 0.8;
+          coords3d.push({
+            x: Math.cos(angle) * radius,
+            y: t * 2 - 0.2,  // 0 to ~1.8
+            z: Math.sin(angle) * radius
+          });
+        }
+        return false;
+      }
+    }
+
+    // Initialize Three.js
+    function init3d() {
+      const container = document.getElementById('tree-container');
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 100);
+      camera.position.set(3, 2, 3);
+
+      renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.target.set(0, 1, 0);
+      controls.update();
+
+      // Create LED spheres
+      const geometry = new THREE.SphereGeometry(0.02, 8, 6);
+
+      for (let i = 0; i < LED_COUNT; i++) {
+        const material = new THREE.MeshBasicMaterial({ color: 0x000000 });
+        const mesh = new THREE.Mesh(geometry, material);
+
+        if (coords3d && coords3d[i]) {
+          mesh.position.set(coords3d[i].x, coords3d[i].y, coords3d[i].z);
+        }
+
+        scene.add(mesh);
+        ledMeshes.push(mesh);
+      }
+
+      // Add subtle grid for reference
+      const gridHelper = new THREE.GridHelper(4, 20, 0x333333, 0x222222);
+      scene.add(gridHelper);
+    }
+
+    // Render 2D view
+    function render2d() {
+      const w = canvas2d.width / (window.devicePixelRatio || 1);
+      const h = canvas2d.height / (window.devicePixelRatio || 1);
 
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, w, h);
@@ -163,6 +279,39 @@
         ctx.fillStyle = `rgb(${r},${g},${b})`;
         ctx.fill();
       }
+    }
+
+    // Render 3D view
+    function render3d() {
+      if (!renderer || ledMeshes.length === 0) return;
+
+      // Update LED colors
+      for (let i = 0; i < LED_COUNT; i++) {
+        if (!ledMeshes[i]) continue;
+
+        const r = leds[i * 3] / 255;
+        const g = leds[i * 3 + 1] / 255;
+        const b = leds[i * 3 + 2] / 255;
+
+        ledMeshes[i].material.color.setRGB(r, g, b);
+
+        // Scale based on brightness for glow effect
+        const brightness = (r + g + b) / 3;
+        const scale = 1 + brightness * 2;
+        ledMeshes[i].scale.setScalar(scale);
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    // Main render loop
+    function render() {
+      if (viewMode === '2d') {
+        render2d();
+      } else {
+        render3d();
+      }
 
       frameCount++;
       const now = performance.now();
@@ -174,6 +323,28 @@
 
       requestAnimationFrame(render);
     }
+
+    // View toggle handlers
+    document.getElementById('view-2d').onclick = () => {
+      viewMode = '2d';
+      document.getElementById('view-2d').classList.add('active');
+      document.getElementById('view-3d').classList.remove('active');
+      canvas2d.style.display = 'block';
+      canvas3d.style.display = 'none';
+    };
+
+    document.getElementById('view-3d').onclick = async () => {
+      viewMode = '3d';
+      document.getElementById('view-3d').classList.add('active');
+      document.getElementById('view-2d').classList.remove('active');
+      canvas2d.style.display = 'none';
+      canvas3d.style.display = 'block';
+
+      if (!scene) {
+        await loadCoordinates();
+        init3d();
+      }
+    };
 
     // Worker code as blob
     const workerCode = `
@@ -266,6 +437,12 @@ import random
             self.postMessage({ type: 'status', data: 'Initializing...' });
             await pyodide.runPythonAsync(mockModules);
 
+            // Write 3D coordinates file to virtual filesystem
+            if (data.coordsCompact) {
+              pyodide.FS.writeFile('coords_compact.txt', data.coordsCompact);
+              console.log('Wrote coords_compact.txt to Pyodide FS');
+            }
+
             // Load main.py
             const mainPy = data.mainPy;
             console.log('Loading main.py:', mainPy.substring(0, 500));
@@ -291,8 +468,18 @@ import random
           try {
             await pyodide.runPythonAsync(\`
 name, func = ANIMATIONS[\${idx}]
-while True:
-    func()
+if name == "auto":
+    # Auto mode: cycle through all non-auto animations
+    auto_idx = 1
+    while True:
+        _, auto_func = ANIMATIONS[auto_idx]
+        if auto_func:
+            auto_func()
+        auto_idx = (auto_idx % (len(ANIMATIONS) - 1)) + 1
+else:
+    while True:
+        if func:
+            func()
 \`);
           } catch (err) {
             if (!err.message.includes('interrupted')) {
@@ -340,11 +527,31 @@ while True:
       return content;
     }
 
+    async function loadCoordsCompact() {
+      // Try to load coords_compact.txt, or generate from coords.json
+      try {
+        const resp = await fetch('coordinates/coords_compact.txt');
+        if (resp.ok) {
+          return await resp.text();
+        }
+      } catch (e) {}
+
+      // Generate from coords.json
+      if (coords3d && coords3d.length > 0) {
+        return coords3d.map(c =>
+          c ? `${c.x.toFixed(4)},${c.y.toFixed(4)},${c.z.toFixed(4)}` : 'null'
+        ).join('\n');
+      }
+
+      return null;
+    }
+
     async function init() {
       statusEl.textContent = 'Loading...';
       statusEl.className = 'loading';
 
       const mainPy = await loadMainPy();
+      const coordsCompact = await loadCoordsCompact();
 
       // Create worker
       const blob = new Blob([workerCode], { type: 'application/javascript' });
@@ -362,8 +569,11 @@ while True:
         }
 
         if (type === 'leds') {
-          for (let i = 0; i < data.length && i < leds.length; i++) {
-            leds[i] = data[i];
+          // Data is in GRB order (WS2811), swap back to RGB for display
+          for (let i = 0; i < data.length && i < leds.length; i += 3) {
+            leds[i] = data[i + 1];     // R = G position
+            leds[i + 1] = data[i];     // G = R position
+            leds[i + 2] = data[i + 2]; // B = B position
           }
         }
 
@@ -391,7 +601,7 @@ while True:
         }
       };
 
-      worker.postMessage({ type: 'init', data: { mainPy } });
+      worker.postMessage({ type: 'init', data: { mainPy, coordsCompact } });
 
       // Start render loop
       render();
@@ -428,7 +638,8 @@ while True:
       currentAnimation = parseInt(params.get('anim')) || 0;
     }
 
-    init();
+    // Load coordinates first (for 3D view and Python animations), then init
+    loadCoordinates().then(() => init());
   </script>
 </body>
 </html>

@@ -34,8 +34,56 @@ MAX_POWER = int(LED_COUNT * 255 * 3 * 0.15)
 
 strip = NeoPixel(Pin(LED_PIN), LED_COUNT)
 
+# Expose strip to ota module for direct calibration writes
+if OTA_AVAILABLE:
+    ota.strip = strip
+    ota.LED_COUNT = LED_COUNT
+
 # Current brightness level (updated by MQTT)
 _brightness = BRIGHTNESS
+
+# Calibration mode - state is stored in ota module, we just handle LED updates here
+_last_calibration_state = None  # Track last state (cal_led, binary_bit) to avoid unnecessary updates
+
+
+def reset_calibration_state():
+    """Reset calibration tracking state."""
+    global _last_calibration_state
+    _last_calibration_state = None
+
+
+def update_calibration_leds():
+    """Write calibration pattern to strip (called from main loop for thread safety)."""
+    global _last_calibration_state
+    if not OTA_AVAILABLE:
+        return
+
+    cal_led = ota.calibration_led
+    bit = ota.calibration_binary_bit if cal_led == -2 else 0
+    state = (cal_led, bit)
+
+    # Only write when state changes
+    if state == _last_calibration_state:
+        return
+    _last_calibration_state = state
+
+    # Moderate brightness - enough for camera, safe for PSU (GRB order)
+    cal_color = (80, 80, 80)
+
+    if cal_led == -1:
+        for i in range(LED_COUNT):
+            strip[i] = (0, 0, 0)
+    elif cal_led == -2:
+        for i in range(LED_COUNT):
+            if (i >> bit) & 1:
+                strip[i] = cal_color
+            else:
+                strip[i] = (0, 0, 0)
+    elif 0 <= cal_led < LED_COUNT:
+        for i in range(LED_COUNT):
+            strip[i] = (255, 255, 255) if i == cal_led else (0, 0, 0)
+
+    strip.write()
 
 
 def scale(color):
@@ -49,6 +97,11 @@ _last_power_log = 0
 def safe_write():
     """Write to strip with automatic power limiting (like HDR)."""
     global _last_power_log
+
+    # Skip if in calibration mode (calibration handles its own writes)
+    if OTA_AVAILABLE and ota.calibration_mode:
+        return
+
     # Calculate total power (sum of all RGB values)
     total = 0
     for i in range(LED_COUNT):
@@ -83,8 +136,12 @@ def wheel(pos):
 
 
 def check_interrupt():
-    """Check if animation should be interrupted (e.g., power off from HA).
+    """Check if animation should be interrupted (e.g., power off from HA, or calibration mode).
     Also updates brightness dynamically."""
+    # Check for calibration mode - interrupt immediately
+    if OTA_AVAILABLE and ota.calibration_mode:
+        return True
+
     if MQTT_AVAILABLE and mqtt.connected:
         result = mqtt.should_interrupt()
         update_brightness()  # Update brightness on every check
@@ -92,8 +149,11 @@ def check_interrupt():
     return False
 
 
-def clear():
+def clear(force=False):
     """Turn off all LEDs."""
+    # Skip if in calibration mode (unless forced by calibration code itself)
+    if not force and OTA_AVAILABLE and ota.calibration_mode:
+        return
     for i in range(LED_COUNT):
         strip[i] = (0, 0, 0)
     strip.write()  # No power limiting needed for off
@@ -254,6 +314,164 @@ def warm_white(duration_ms=10000):
         time.sleep_ms(100)
 
 
+# ─── 3D Animations ────────────────────────────────────────────────────────────
+
+# 3D coordinates: list of (x, y, z) tuples, None for missing LEDs
+_coords_3d = None
+
+
+def load_coords():
+    """Load 3D coordinates from compact file."""
+    global _coords_3d
+    if _coords_3d is not None:
+        return _coords_3d
+
+    try:
+        _coords_3d = []
+        with open("coords_compact.txt", "r") as f:
+            for line in f:
+                line = line.strip()
+                if line == "null" or not line:
+                    _coords_3d.append(None)
+                else:
+                    parts = line.split(",")
+                    _coords_3d.append((float(parts[0]), float(parts[1]), float(parts[2])))
+        print(f"Loaded {sum(1 for c in _coords_3d if c)} 3D coordinates")
+    except Exception as e:
+        print(f"Could not load 3D coords: {e}")
+        _coords_3d = [None] * LED_COUNT
+
+    return _coords_3d
+
+
+def plane_sweep(color=(0, 255, 0), wait_ms=10, cycles=3):
+    """Horizontal plane sweeps up and down the tree."""
+    coords = load_coords()
+    if not any(coords):
+        return
+
+    # Get Y range
+    y_vals = [c[1] for c in coords if c]
+    y_min, y_max = min(y_vals), max(y_vals)
+    y_range = y_max - y_min
+
+    for _ in range(cycles):
+        # Sweep up
+        for step in range(50):
+            if check_interrupt():
+                return
+            plane_y = y_min + (step / 50) * y_range
+            thickness = y_range * 0.03  # 3% of tree height (~2 inches)
+
+            for i in range(LED_COUNT):
+                if coords[i]:
+                    dist = abs(coords[i][1] - plane_y)
+                    if dist < thickness:
+                        brightness = 1.0 - (dist / thickness)
+                        strip[i] = scale(tuple(int(c * brightness) for c in color))
+                    else:
+                        strip[i] = (0, 0, 0)
+                else:
+                    strip[i] = (0, 0, 0)
+            safe_write()
+            time.sleep_ms(wait_ms)
+
+        # Sweep down
+        for step in range(50, 0, -1):
+            if check_interrupt():
+                return
+            plane_y = y_min + (step / 50) * y_range
+            thickness = y_range * 0.03
+
+            for i in range(LED_COUNT):
+                if coords[i]:
+                    dist = abs(coords[i][1] - plane_y)
+                    if dist < thickness:
+                        brightness = 1.0 - (dist / thickness)
+                        strip[i] = scale(tuple(int(c * brightness) for c in color))
+                    else:
+                        strip[i] = (0, 0, 0)
+                else:
+                    strip[i] = (0, 0, 0)
+            safe_write()
+            time.sleep_ms(wait_ms)
+
+
+def radial_burst(wait_ms=20, cycles=3):
+    """Expanding rings from center of tree."""
+    coords = load_coords()
+    if not any(coords):
+        return
+
+    import math
+
+    for _ in range(cycles):
+        for radius in range(0, 120, 2):  # Expand outward
+            if check_interrupt():
+                return
+            r_norm = radius / 100.0  # Normalize to ~1.0 max
+
+            for i in range(LED_COUNT):
+                if coords[i]:
+                    x, y, z = coords[i]
+                    # Distance from vertical axis (center of tree)
+                    dist = math.sqrt(x * x + z * z)
+                    diff = abs(dist - r_norm)
+
+                    if diff < 0.15:  # Ring thickness
+                        brightness = 1.0 - (diff / 0.15)
+                        # Color based on height
+                        hue = y / 2.0  # Assumes y is 0-2 range
+                        strip[i] = scale(wheel(int(hue * 255) % 256))
+                    else:
+                        strip[i] = (0, 0, 0)
+                else:
+                    strip[i] = (0, 0, 0)
+            safe_write()
+            time.sleep_ms(wait_ms)
+
+
+def spiral_3d(wait_ms=30, cycles=2):
+    """Spiral pattern that rotates around the tree."""
+    coords = load_coords()
+    if not any(coords):
+        return
+
+    import math
+
+    for _ in range(cycles):
+        for angle_offset in range(0, 360, 5):
+            if check_interrupt():
+                return
+            offset_rad = math.radians(angle_offset)
+
+            for i in range(LED_COUNT):
+                if coords[i]:
+                    x, y, z = coords[i]
+                    # Angle of this LED around the tree
+                    led_angle = math.atan2(z, x)
+                    # Spiral: angle depends on height
+                    target_angle = (y * 3) + offset_rad  # 3 twists up the tree
+
+                    # Angular distance
+                    diff = abs(((led_angle - target_angle + math.pi) % (2 * math.pi)) - math.pi)
+
+                    if diff < 0.5:  # Spiral width
+                        brightness = 1.0 - (diff / 0.5)
+                        # Christmas colors based on which spiral arm
+                        if (angle_offset // 60) % 2 == 0:
+                            color = (255, 0, 0)  # Red
+                        else:
+                            color = (0, 255, 0)  # Green
+                        strip[i] = scale(tuple(int(c * brightness) for c in color))
+                    else:
+                        strip[i] = (0, 0, 0)
+                else:
+                    strip[i] = (0, 0, 0)
+            safe_write()
+            time.sleep_ms(wait_ms)
+
+
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 
 
@@ -266,6 +484,9 @@ ANIMATIONS = [
     ("candy_cane", lambda: candy_cane(80, 100)),
     ("twinkle_multi", lambda: twinkle_multi(80, 10000)),
     ("warm_white", lambda: warm_white(10000)),
+    ("plane_sweep", lambda: plane_sweep((0, 255, 0), 15, 3)),
+    ("radial_burst", lambda: radial_burst(20, 3)),
+    ("spiral_3d", lambda: spiral_3d(30, 2)),
 ]
 
 
@@ -306,8 +527,28 @@ try:
     auto_mode = True  # Start in auto-cycle mode
     auto_index = 1    # Current position in auto cycle (skip index 0 which is "auto")
     locked_index = 0  # Which effect we're locked to (if not auto)
+    was_calibrating = False  # Track calibration state transitions
+    was_off = False  # Track power state to only clear once
 
+    _cal_debug_counter = 0
     while True:
+        # Handle calibration mode - skip normal animation processing
+        if OTA_AVAILABLE and ota.calibration_mode:
+            was_calibrating = True
+            # Update LEDs based on calibration commands
+            update_calibration_leds()
+
+            # Minimal loop - just refresh LEDs, no MQTT during calibration
+            time.sleep_ms(100)  # 100ms between refreshes
+            continue
+
+        # Reset calibration state when exiting calibration mode
+        if was_calibrating:
+            reset_calibration_state()
+            was_calibrating = False
+            clear()
+            print("Exited calibration mode, resuming animations")
+
         # Check MQTT commands and handle effect changes
         if MQTT_AVAILABLE and mqtt.connected:
             mqtt.check_messages()
@@ -329,11 +570,16 @@ try:
                             except ValueError:
                                 pass
 
-        # Handle power off state
+        # Handle power off state - only clear once, then just wait
         if MQTT_AVAILABLE and mqtt.connected and not mqtt.state["power"]:
-            clear()
+            if not was_off:
+                clear()
+                was_off = True
+                print("Power off - LEDs cleared")
             time.sleep_ms(100)
             continue
+        else:
+            was_off = False
 
         # Update brightness before animation
         update_brightness()
