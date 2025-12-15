@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Christmas Tree Simulator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #111;
+      color: #fff;
+      font-family: system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem;
+      background: #222;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header h1 { font-size: 1.2rem; }
+    #status {
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      background: #333;
+    }
+    #status.loading { background: #553; }
+    #status.running { background: #353; }
+    #status.error { background: #533; }
+    #animation-name {
+      margin-left: auto;
+      font-size: 0.9rem;
+      color: #aaa;
+    }
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 2rem;
+    }
+    #tree-container {
+      position: relative;
+      width: 400px;
+      height: 500px;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+    }
+    footer {
+      padding: 1rem;
+      background: #222;
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 4px;
+      background: #444;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:hover { background: #555; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    select {
+      padding: 0.5rem;
+      border: none;
+      border-radius: 4px;
+      background: #444;
+      color: #fff;
+    }
+    #fps { color: #666; margin-left: auto; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🎄 Tree Simulator</h1>
+    <span id="status" class="loading">Loading...</span>
+    <span id="animation-name"></span>
+  </header>
+  <main>
+    <div id="tree-container">
+      <canvas id="canvas"></canvas>
+    </div>
+  </main>
+  <footer>
+    <button id="prev-btn" disabled>◀ Prev</button>
+    <select id="animation-select" disabled></select>
+    <button id="next-btn" disabled>Next ▶</button>
+    <span id="fps"></span>
+  </footer>
+
+  <script>
+    const LED_COUNT = 500;
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const animNameEl = document.getElementById('animation-name');
+    const selectEl = document.getElementById('animation-select');
+    const fpsEl = document.getElementById('fps');
+
+    // LED state
+    let leds = new Uint8Array(LED_COUNT * 3);
+    let animationNames = [];
+    let currentAnimation = 0;
+    let worker = null;
+    let frameCount = 0;
+    let lastFpsUpdate = performance.now();
+
+    // Set canvas size
+    function resize() {
+      const container = document.getElementById('tree-container');
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = container.clientWidth * dpr;
+      canvas.height = container.clientHeight * dpr;
+      ctx.scale(dpr, dpr);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Render LEDs as a tree shape
+    function render() {
+      const w = canvas.width / (window.devicePixelRatio || 1);
+      const h = canvas.height / (window.devicePixelRatio || 1);
+
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, w, h);
+
+      const centerX = w / 2;
+      const topY = 30;
+      const bottomY = h - 40;
+      const treeHeight = bottomY - topY;
+      const maxRadius = w / 2 - 20;
+
+      for (let i = 0; i < LED_COUNT; i++) {
+        const t = i / LED_COUNT;
+        const y = bottomY - t * treeHeight;
+        const layerRadius = maxRadius * (1 - t * 0.85);
+        const angle = t * Math.PI * 20;
+        const x = centerX + Math.cos(angle) * layerRadius;
+
+        const r = leds[i * 3];
+        const g = leds[i * 3 + 1];
+        const b = leds[i * 3 + 2];
+
+        if (r > 10 || g > 10 || b > 10) {
+          const gradient = ctx.createRadialGradient(x, y, 0, x, y, 8);
+          gradient.addColorStop(0, `rgba(${r},${g},${b},1)`);
+          gradient.addColorStop(0.5, `rgba(${r},${g},${b},0.3)`);
+          gradient.addColorStop(1, `rgba(${r},${g},${b},0)`);
+          ctx.fillStyle = gradient;
+          ctx.fillRect(x - 8, y - 8, 16, 16);
+        }
+
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fill();
+      }
+
+      frameCount++;
+      const now = performance.now();
+      if (now - lastFpsUpdate > 1000) {
+        fpsEl.textContent = `${frameCount} fps`;
+        frameCount = 0;
+        lastFpsUpdate = now;
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    // Worker code as blob
+    const workerCode = `
+      importScripts('https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js');
+
+      let pyodide = null;
+      self.speed = 1;  // Real-time speed
+
+      const mockModules = \`
+import sys
+
+class MockPin:
+    def __init__(self, pin):
+        self.pin = pin
+
+class MockNeoPixel:
+    def __init__(self, pin, count):
+        self.count = count
+        self._leds = [(0,0,0)] * count
+
+    def __setitem__(self, idx, color):
+        if 0 <= idx < self.count:
+            self._leds[idx] = color
+
+    def __getitem__(self, idx):
+        return self._leds[idx] if 0 <= idx < self.count else (0,0,0)
+
+    def write(self):
+        import js
+        from pyodide.ffi import to_js
+        flat = []
+        for r,g,b in self._leds:
+            flat.extend([int(r), int(g), int(b)])
+        js.postMessage(to_js({'type': 'leds', 'data': flat}, dict_converter=js.Object.fromEntries))
+        # Simulate WS2811 write time: ~30µs per LED = 15ms for 500 LEDs
+        _real_time.sleep(0.015)
+
+class MockMachine:
+    Pin = MockPin
+
+# Save real time module before we overwrite it
+import time as _real_time
+
+class MockTime:
+    @staticmethod
+    def sleep(s):
+        import js
+        ms = s * 1000 / js.speed
+        if ms > 1:
+            _real_time.sleep(ms / 1000)
+
+    @staticmethod
+    def sleep_ms(ms):
+        import js
+        actual_ms = ms / js.speed
+        if actual_ms > 1:
+            _real_time.sleep(actual_ms / 1000)
+
+    @staticmethod
+    def sleep_us(us):
+        pass
+
+    @staticmethod
+    def ticks_ms():
+        from js import Date
+        return int(Date.now())
+
+    @staticmethod
+    def ticks_diff(a, b):
+        return a - b
+
+sys.modules['machine'] = MockMachine()
+sys.modules['neopixel'] = type(sys)('neopixel')
+sys.modules['neopixel'].NeoPixel = MockNeoPixel
+sys.modules['time'] = MockTime()
+
+import random
+\`;
+
+      self.speed = 5;
+
+      self.onmessage = async (e) => {
+        const { type, data } = e.data;
+
+        if (type === 'init') {
+          try {
+            self.postMessage({ type: 'status', data: 'Loading Pyodide...' });
+            pyodide = await loadPyodide();
+
+            self.postMessage({ type: 'status', data: 'Initializing...' });
+            await pyodide.runPythonAsync(mockModules);
+
+            // Load main.py
+            const mainPy = data.mainPy;
+            console.log('Loading main.py:', mainPy.substring(0, 500));
+            await pyodide.runPythonAsync(mainPy);
+            console.log('main.py loaded successfully');
+
+            // Get animation names
+            const names = pyodide.runPython('[(name, None) for name, _ in ANIMATIONS]');
+            const animNames = [];
+            for (let i = 0; i < names.length; i++) {
+              animNames.push(names.get(i).get(0));
+            }
+
+            self.postMessage({ type: 'animations', data: animNames });
+            self.postMessage({ type: 'status', data: 'Ready' });
+          } catch (err) {
+            self.postMessage({ type: 'error', data: err.message });
+          }
+        }
+
+        if (type === 'run') {
+          const idx = data;
+          try {
+            await pyodide.runPythonAsync(\`
+name, func = ANIMATIONS[\${idx}]
+while True:
+    func()
+\`);
+          } catch (err) {
+            if (!err.message.includes('interrupted')) {
+              self.postMessage({ type: 'error', data: err.message });
+            }
+          }
+        }
+
+      };
+    `;
+
+    async function loadMainPy() {
+      const response = await fetch('main.py');
+      let content = await response.text();
+
+      // Replace OTA import block with simple assignment
+      content = content.replace(
+        /# OTA imports \(optional.*?\n.*?try:\n.*?import ota\n.*?OTA_AVAILABLE = True\nexcept ImportError:\n.*?OTA_AVAILABLE = False\n/s,
+        'OTA_AVAILABLE = False\n'
+      );
+
+      // Remove WiFi/OTA setup block
+      content = content.replace(
+        /# Start WiFi and OTA.*?print\("Continuing without OTA\.\.\."\)\n/s,
+        ''
+      );
+
+      // Remove if OTA_AVAILABLE blocks
+      content = content.replace(
+        /if OTA_AVAILABLE:\n        ota\.total_animations.*?\n/g,
+        ''
+      );
+      content = content.replace(
+        /            if OTA_AVAILABLE:\n                ota\.current_animation.*?\n                ota\.animation_index.*?\n/g,
+        ''
+      );
+
+      // Remove the main loop at end
+      content = content.replace(
+        /print\("Christmas tree starting\.\.\."\)\n[\s\S]*$/,
+        ''
+      );
+
+      console.log('Processed main.py length:', content.length);
+      return content;
+    }
+
+    async function init() {
+      statusEl.textContent = 'Loading...';
+      statusEl.className = 'loading';
+
+      const mainPy = await loadMainPy();
+
+      // Create worker
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      worker = new Worker(URL.createObjectURL(blob));
+
+      worker.onmessage = (e) => {
+        const { type, data } = e.data;
+
+        if (type === 'status') {
+          statusEl.textContent = data;
+          if (data === 'Ready') {
+            statusEl.className = 'running';
+            runAnimation(currentAnimation);
+          }
+        }
+
+        if (type === 'leds') {
+          for (let i = 0; i < data.length && i < leds.length; i++) {
+            leds[i] = data[i];
+          }
+        }
+
+        if (type === 'animations') {
+          animationNames = data;
+          data.forEach((name, i) => {
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = name;
+            selectEl.appendChild(opt);
+          });
+          selectEl.disabled = false;
+          document.getElementById('prev-btn').disabled = false;
+          document.getElementById('next-btn').disabled = false;
+        }
+
+        if (type === 'error') {
+          console.error(data);
+          statusEl.textContent = 'Error: ' + data.slice(0, 50);
+          statusEl.className = 'error';
+        }
+
+        if (type === 'animation') {
+          animNameEl.textContent = data;
+        }
+      };
+
+      worker.postMessage({ type: 'init', data: { mainPy } });
+
+      // Start render loop
+      render();
+    }
+
+    function runAnimation(idx) {
+      selectEl.value = idx;
+      animNameEl.textContent = animationNames[idx] || '';
+      worker.postMessage({ type: 'run', data: idx });
+    }
+
+    function switchAnimation(idx) {
+      // Terminate and recreate worker to stop current animation
+      if (worker) worker.terminate();
+      currentAnimation = idx;
+      init();
+    }
+
+    document.getElementById('prev-btn').onclick = () => {
+      switchAnimation((currentAnimation - 1 + animationNames.length) % animationNames.length);
+    };
+
+    document.getElementById('next-btn').onclick = () => {
+      switchAnimation((currentAnimation + 1) % animationNames.length);
+    };
+
+    selectEl.onchange = (e) => {
+      switchAnimation(parseInt(e.target.value));
+    };
+
+    // URL param for animation
+    const params = new URLSearchParams(location.search);
+    if (params.has('anim')) {
+      currentAnimation = parseInt(params.get('anim')) || 0;
+    }
+
+    init();
+  </script>
+</body>
+</html>
