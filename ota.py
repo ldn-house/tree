@@ -238,6 +238,20 @@ def _get_status():
     uptime = time.time() - _start_time if _start_time else 0
 
     anim_name = current_animation or "unknown"
+
+    # Check MQTT status
+    mqtt_status = "unavailable"
+    try:
+        import mqtt
+        if mqtt.connected:
+            mqtt_status = "connected"
+        elif mqtt.MQTTClient is None:
+            mqtt_status = "umqtt not installed"
+        else:
+            mqtt_status = "disconnected"
+    except ImportError:
+        mqtt_status = "not loaded"
+
     return f"""{{
   "hostname": "{HOSTNAME}",
   "ip": "{_ip_address}",
@@ -246,7 +260,8 @@ def _get_status():
   "ota_port": {OTA_PORT},
   "animation": "{anim_name}",
   "animation_index": {animation_index},
-  "total_animations": {total_animations}
+  "total_animations": {total_animations},
+  "mqtt": "{mqtt_status}"
 }}"""
 
 
@@ -308,6 +323,21 @@ def _handle_client(client, addr):
             gc.collect()
             _send_response(client, "200 OK", "application/json",
                           f'{{"free_memory": {gc.mem_free()}}}')
+
+        elif path == "/mqtt":
+            # MQTT debug endpoint
+            try:
+                import mqtt
+                mqtt.check_messages()  # Check for new messages
+                info = {
+                    "connected": mqtt.connected,
+                    "state": mqtt.state,
+                    "pending_commands": len(mqtt.pending_commands),
+                    "effects": mqtt.effects_list[:3],  # First 3
+                }
+                _send_response(client, "200 OK", "application/json", str(info).replace("'", '"'))
+            except Exception as e:
+                _send_response(client, "200 OK", "application/json", f'{{"error": "{e}"}}')
 
         else:
             _send_response(client, "404 Not Found", "text/plain", "Not Found")

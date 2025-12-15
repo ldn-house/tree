@@ -11,3 +11,9 @@ HOSTNAME = "tree"
 
 # OTA server port
 OTA_PORT = 8080
+
+# MQTT settings for Home Assistant integration
+MQTT_BROKER = "192.168.2.x"  # Your HA/Mosquitto IP
+MQTT_PORT = 1883
+MQTT_USER = "your_ha_username"
+MQTT_PASSWORD = "your_ha_password"
