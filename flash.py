@@ -1,22 +1,105 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["mpremote"]
+# dependencies = ["mpremote", "httpx"]
 # ///
-"""Flash main.py to Pico and optionally run it."""
+"""Flash main.py to Pico via USB or OTA (WiFi)."""
 
+import argparse
 import subprocess
 import sys
+from pathlib import Path
 
-def run(*args):
+
+def usb_run(*args):
     subprocess.run(["mpremote"] + list(args), check=True)
 
+
+def ota_push(host: str, port: int, files: list[str]):
+    """Push files to Pico via HTTP OTA."""
+    import httpx
+
+    base_url = f"http://{host}:{port}"
+
+    # Check status first
+    print(f"Checking {base_url}...")
+    try:
+        r = httpx.get(f"{base_url}/status", timeout=5.0)
+        info = r.json()
+        print(f"Connected to {info['hostname']} ({info['ip']})")
+    except httpx.ConnectError:
+        print(f"Could not connect to {host}:{port}")
+        print("Is the Pico running and connected to WiFi?")
+        sys.exit(1)
+
+    # Push each file
+    for filepath in files:
+        path = Path(filepath)
+        if not path.exists():
+            print(f"File not found: {filepath}")
+            continue
+
+        content = path.read_bytes()
+        filename = path.name
+        print(f"Pushing {filename} ({len(content)} bytes)...")
+
+        r = httpx.post(
+            f"{base_url}/update?file={filename}",
+            content=content,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=30.0,
+        )
+
+        if r.status_code == 200:
+            result = r.json()
+            print(f"Success: {result.get('message', 'Updated')}")
+        else:
+            print(f"Failed: {r.text}")
+            sys.exit(1)
+
+
 if __name__ == "__main__":
-    if "--run" in sys.argv:
+    parser = argparse.ArgumentParser(
+        description="Flash main.py to Pico via USB or OTA (WiFi)."
+    )
+    parser.add_argument(
+        "--run", action="store_true",
+        help="Run script on Pico without saving to flash (USB only)"
+    )
+    parser.add_argument(
+        "--ota", action="store_true",
+        help="Push via WiFi OTA instead of USB"
+    )
+    parser.add_argument(
+        "--host", default="tree.local",
+        help="OTA hostname (default: tree.local)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080,
+        help="OTA port (default: 8080)"
+    )
+    parser.add_argument(
+        "--config", action="store_true",
+        help="Push config.py and ota.py too (first-time setup)"
+    )
+    parser.add_argument(
+        "files", nargs="*", default=["main.py"],
+        help="Files to flash (default: main.py)"
+    )
+
+    args = parser.parse_args()
+
+    files = args.files
+    if args.config:
+        files = ["config.py", "ota.py", "main.py"]
+
+    if args.ota:
+        ota_push(args.host, args.port, files)
+    elif args.run:
         print("Running script on Pico...")
-        run("run", "main.py")
+        usb_run("run", "main.py")
     else:
-        print("Copying main.py to Pico...")
-        run("cp", "main.py", ":main.py")
+        print(f"Copying {', '.join(files)} to Pico...")
+        for f in files:
+            usb_run("cp", f, f":{f}")
         print("Done! Script will auto-run on boot.")
-        print("Use --run to execute immediately without flashing.")

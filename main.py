@@ -1,12 +1,19 @@
 """
 Christmas Tree LED Controller - Pi Pico 2W
-MicroPython with PIO-based NeoPixel driver
+MicroPython with PIO-based NeoPixel driver + WiFi OTA updates
 """
 
 from machine import Pin
 from neopixel import NeoPixel
 import time
 import random
+
+# OTA imports (optional - works without WiFi)
+try:
+    import ota
+    OTA_AVAILABLE = True
+except ImportError:
+    OTA_AVAILABLE = False
 
 LED_COUNT = 500
 LED_PIN = 0
@@ -147,21 +154,36 @@ def wave(color1, color2, wait_ms=50, cycles=3):
 
 
 ANIMATIONS = [
-    lambda: rainbow_cycle(20, 2),
-    lambda: chase((255, 0, 0), 50, 10),
-    lambda: chase((0, 255, 0), 50, 10),
-    lambda: sparkle((255, 255, 255), 30, 0.03, 8000),
-    lambda: comet((0, 0, 255), 30, 15, 3),
-    lambda: comet((255, 215, 0), 30, 15, 3),
-    lambda: candy_cane(80, 100),
-    lambda: twinkle_multi(80, 10000),
+    ("rainbow_cycle", lambda: rainbow_cycle(20, 2)),
+    ("chase_red", lambda: chase((255, 0, 0), 50, 10)),
+    ("chase_green", lambda: chase((0, 255, 0), 50, 10)),
+    ("sparkle", lambda: sparkle((255, 255, 255), 30, 0.03, 8000)),
+    ("comet_blue", lambda: comet((0, 0, 255), 30, 15, 3)),
+    ("comet_gold", lambda: comet((255, 215, 0), 30, 15, 3)),
+    ("candy_cane", lambda: candy_cane(80, 100)),
+    ("twinkle_multi", lambda: twinkle_multi(80, 10000)),
 ]
 
 
 print("Christmas tree starting...")
+
+# Start WiFi and OTA server (non-blocking)
+if OTA_AVAILABLE:
+    try:
+        ota.connect_wifi()
+        ota.start_server()
+    except Exception as e:
+        print(f"OTA setup failed: {e}")
+        print("Continuing without OTA...")
+
 try:
+    if OTA_AVAILABLE:
+        ota.total_animations = len(ANIMATIONS)
     while True:
-        for anim in ANIMATIONS:
+        for i, (name, anim) in enumerate(ANIMATIONS):
+            if OTA_AVAILABLE:
+                ota.current_animation = name
+                ota.animation_index = i
             anim()
 except KeyboardInterrupt:
     clear()
