@@ -265,8 +265,6 @@ ANIMATIONS = [
     ("chase_green", lambda: chase((0, 255, 0), 50, 10)),
     ("chase_christmas", lambda: chase_christmas(50, 20)),
     ("sparkle", lambda: sparkle((255, 255, 255), 30, 0.03, 8000)),
-    ("comet_blue", lambda: comet((0, 0, 255), 30, 15, 3)),
-    ("comet_gold", lambda: comet((255, 215, 0), 30, 15, 3)),
     ("candy_cane", lambda: candy_cane(80, 100)),
     ("twinkle_multi", lambda: twinkle_multi(80, 10000)),
     ("warm_white", lambda: warm_white(10000)),
