@@ -15,11 +15,17 @@ RGB LED strip controller for a 6ft Christmas tree with 500 WS2811 LEDs, inspired
 # Flash to Pico (saves as main.py, auto-runs on boot)
 ./flash.py
 
-# Or just run without flashing
-./flash.py --run
+# First-time setup (includes WiFi config)
+./flash.py --config
+
+# Push updates via WiFi OTA (no USB needed)
+./flash.py --ota --host 192.168.2.149
+
+# Preview animations in browser
+./serve.py
 ```
 
-uv automatically handles the mpremote dependency.
+uv automatically handles dependencies.
 
 ## Animations
 
