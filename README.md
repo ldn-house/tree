@@ -54,8 +54,28 @@ The tree automatically limits total power draw per-frame to prevent PSU brownout
 - Candy cane stripes
 - Multicolor twinkle
 - Warm white (solid)
+- **Plane sweep** - Horizontal plane moves up/down tree (uses 3D coordinates)
+
+## 3D Coordinate Mapping
+
+The tree supports volumetric 3D animations using camera-calibrated LED positions:
+
+```bash
+# 1. Capture LED positions from multiple angles
+./capture.py --angle front --host 192.168.2.149
+
+# 2. Analyze images to extract 2D positions
+./analyze.py --angle front --validate
+
+# 3. Triangulate 3D coordinates from two orthogonal views
+./triangulate.py --angles front,side
+
+# 4. Upload coordinates to Pico
+curl -X POST --data-binary @coordinates/coords_compact.txt \
+  "http://192.168.2.149:8080/update?file=coords_compact.txt"
+```
 
 ## Roadmap
 
-- [ ] 3D coordinate mapping for volumetric animations
+- [x] 3D coordinate mapping for volumetric animations
 - [ ] RGB color picker in Home Assistant

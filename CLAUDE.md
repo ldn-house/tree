@@ -41,6 +41,13 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 - `simulator.html` - Browser-based simulator using Pyodide (runs same Python code)
 - `serve.py` - Local HTTP server for the simulator
 
+### Calibration Tools (for 3D coordinate mapping)
+
+- `capture.py` - Camera capture script for LED position detection
+- `analyze.py` - Image analysis with local contrast detection and wire constraint validation
+- `triangulate.py` - 3D position calculation from multiple camera angles
+- `coordinates/` - Generated 3D LED coordinates (CSV, JSON, compact formats)
+
 ## OTA API
 
 Once connected to WiFi, the Pico exposes an HTTP API on port 8080:
@@ -51,6 +58,11 @@ Once connected to WiFi, the Pico exposes an HTTP API on port 8080:
 | `/update?file=X` | POST | Push new code, reboots after write |
 | `/gc` | GET | Trigger garbage collection |
 | `/mqtt` | GET | MQTT debug info (connection state, pending commands) |
+| `/calibrate/start` | GET | Enter calibration mode (stops animations) |
+| `/calibrate/stop` | GET | Exit calibration mode |
+| `/calibrate/led?n=X` | GET | Light single LED X for position capture |
+| `/calibrate/binary?bit=X` | GET | Light LEDs where bit X is set (for binary encoding) |
+| `/calibrate/clear` | GET | Turn off all LEDs in calibration mode |
 
 mDNS (`tree.local`) is partially implemented but may not work on all networks.
 
