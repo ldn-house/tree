@@ -133,7 +133,7 @@ def chase(color, wait_ms=50, cycles=3):
             time.sleep_ms(wait_ms)
 
 
-def chase_christmas(wait_ms=50, cycles=10):
+def christmas(wait_ms=50, cycles=10):
     """Theater chase with alternating red and green."""
     red = (255, 0, 0)
     green = (0, 255, 0)
@@ -261,9 +261,7 @@ def warm_white(duration_ms=10000):
 ANIMATIONS = [
     ("auto", None),  # Special: cycles through all other effects
     ("rainbow_cycle", lambda: rainbow_cycle(20, 2)),
-    ("chase_red", lambda: chase((255, 0, 0), 50, 10)),
-    ("chase_green", lambda: chase((0, 255, 0), 50, 10)),
-    ("chase_christmas", lambda: chase_christmas(50, 20)),
+    ("christmas", lambda: christmas(50, 20)),
     ("sparkle", lambda: sparkle((255, 255, 255), 30, 0.03, 8000)),
     ("candy_cane", lambda: candy_cane(80, 100)),
     ("twinkle_multi", lambda: twinkle_multi(80, 10000)),

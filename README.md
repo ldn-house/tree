@@ -49,7 +49,7 @@ The tree automatically limits total power draw per-frame to prevent PSU brownout
 
 - **auto** - Cycles through all effects
 - Rainbow cycle
-- Theater chase (red/green/christmas)
+- Christmas (red/green theater chase)
 - White sparkle
 - Candy cane stripes
 - Multicolor twinkle
