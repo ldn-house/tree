@@ -344,6 +344,18 @@ def _get_status():
     except ImportError:
         mqtt_status = "not loaded"
 
+    # Get version info
+    git_commit = "unknown"
+    git_branch = "unknown"
+    build_time = "unknown"
+    try:
+        import version
+        git_commit = version.GIT_COMMIT
+        git_branch = version.GIT_BRANCH
+        build_time = version.BUILD_TIME
+    except (ImportError, AttributeError):
+        pass
+
     return f"""{{
   "hostname": "{HOSTNAME}",
   "ip": "{_ip_address}",
@@ -353,7 +365,10 @@ def _get_status():
   "animation": "{anim_name}",
   "animation_index": {animation_index},
   "total_animations": {total_animations},
-  "mqtt": "{mqtt_status}"
+  "mqtt": "{mqtt_status}",
+  "version": "{git_commit}",
+  "branch": "{git_branch}",
+  "build_time": "{build_time}"
 }}"""
 
 

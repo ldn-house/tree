@@ -17,7 +17,7 @@ GITHUB_BRANCH = "main"
 ARTIFACT_NAME = "firmware"
 
 # Files included in firmware artifact
-FIRMWARE_FILES = ["main.py", "ota.py", "mqtt.py", "selfupdate.py", "github.py"]
+FIRMWARE_FILES = ["main.py", "ota.py", "mqtt.py", "selfupdate.py", "github.py", "version.py"]
 
 
 def nightly_link_url(branch=GITHUB_BRANCH):

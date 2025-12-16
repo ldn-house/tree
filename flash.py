@@ -201,7 +201,7 @@ if __name__ == "__main__":
         # Note: --all, --config, --coords are ignored when using --github
         # since we use whatever the CI produced
     elif args.all:
-        files = ["main.py", "ota.py", "mqtt.py", "selfupdate.py", "github.py", "config.py"]
+        files = ["main.py", "ota.py", "mqtt.py", "selfupdate.py", "github.py", "version.py", "config.py"]
         if args.coords:
             files.append("coordinates/coords_compact.txt")
     elif args.config:
