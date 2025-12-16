@@ -375,7 +375,7 @@ def twinkle_multi(wait_ms=50, duration_ms=10000):
     # Initialize with random colors and phases
     led_colors = [random.choice(colors) for _ in range(LED_COUNT)]
     led_phase = [random.random() * 2 * math.pi for _ in range(LED_COUNT)]  # Phase in twinkle cycle
-    led_speed = [0.15 + random.random() * 0.25 for _ in range(LED_COUNT)]  # Faster twinkle speeds
+    led_speed = [0.03 + random.random() * 0.07 for _ in range(LED_COUNT)]  # Gentle twinkle speeds
 
     start = time.ticks_ms()
     while time.ticks_diff(time.ticks_ms(), start) < duration_ms:
@@ -384,14 +384,14 @@ def twinkle_multi(wait_ms=50, duration_ms=10000):
         for i in range(LED_COUNT):
             # Advance phase
             led_phase[i] += led_speed[i]
-            # Smooth brightness oscillation (0.1 to 1.0 range for dramatic effect)
-            b = 0.1 + 0.9 * (0.5 + 0.5 * math.sin(led_phase[i]))
+            # Subtle brightness oscillation (0.6 to 1.0 range for gentle effect)
+            b = 0.6 + 0.4 * (0.5 + 0.5 * math.sin(led_phase[i]))
             # Randomly change color when LED is at its dimmest point
             if led_phase[i] > 2 * math.pi:
                 led_phase[i] -= 2 * math.pi
                 if random.random() < 0.3:  # 30% chance to change color each cycle
                     led_colors[i] = random.choice(colors)
-                    led_speed[i] = 0.15 + random.random() * 0.25  # New random speed
+                    led_speed[i] = 0.03 + random.random() * 0.07  # New random speed
             strip[i] = scale(tuple(int(c * b) for c in led_colors[i]))
         safe_write()
         time.sleep_ms(wait_ms)
