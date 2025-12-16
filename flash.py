@@ -15,7 +15,7 @@ def usb_run(*args):
     subprocess.run(["mpremote"] + list(args), check=True)
 
 
-def ota_push(host: str, port: int, files: list[str]):
+def ota_push(host: str, port: int, files: list[str], no_reboot: bool = False):
     """Push files to Pico via HTTP OTA."""
     import httpx
 
@@ -32,19 +32,29 @@ def ota_push(host: str, port: int, files: list[str]):
         print("Is the Pico running and connected to WiFi?")
         sys.exit(1)
 
-    # Push each file
+    # Filter to valid files and track if any .py files were pushed
+    valid_files = []
     for filepath in files:
         path = Path(filepath)
         if not path.exists():
             print(f"File not found: {filepath}")
             continue
+        valid_files.append(path)
 
+    if not valid_files:
+        print("No valid files to push")
+        sys.exit(1)
+
+    # Push each file (defer reboot until all files are done)
+    py_files_pushed = False
+    for path in valid_files:
         content = path.read_bytes()
         filename = path.name
         print(f"Pushing {filename} ({len(content)} bytes)...")
 
+        # Don't reboot after each file - we'll reboot at the end
         r = httpx.post(
-            f"{base_url}/update?file={filename}",
+            f"{base_url}/update?file={filename}&reboot=0",
             content=content,
             headers={"Content-Type": "application/octet-stream"},
             timeout=30.0,
@@ -53,9 +63,31 @@ def ota_push(host: str, port: int, files: list[str]):
         if r.status_code == 200:
             result = r.json()
             print(f"Success: {result.get('message', 'Updated')}")
+            if filename.endswith(".py"):
+                py_files_pushed = True
         else:
             print(f"Failed: {r.text}")
             sys.exit(1)
+
+    # Reboot if any .py files were pushed (unless --no-reboot)
+    if py_files_pushed and not no_reboot:
+        print("Rebooting...")
+        try:
+            r = httpx.post(f"{base_url}/reboot", timeout=5.0)
+            if r.status_code == 200:
+                print("Reboot initiated")
+            else:
+                print(f"Reboot request failed: {r.text}")
+        except httpx.ReadTimeout:
+            # Expected - device reboots before responding
+            print("Reboot initiated")
+        except httpx.ConnectError:
+            # Also expected if device reboots quickly
+            print("Reboot initiated")
+    elif no_reboot:
+        print("Skipping reboot (--no-reboot)")
+    else:
+        print("No .py files pushed, skipping reboot")
 
 
 if __name__ == "__main__":
@@ -71,8 +103,8 @@ if __name__ == "__main__":
         help="Push via WiFi OTA instead of USB"
     )
     parser.add_argument(
-        "--host", default="tree.local",
-        help="OTA hostname (default: tree.local)"
+        "--host",
+        help="OTA hostname or IP address"
     )
     parser.add_argument(
         "--port", type=int, default=8080,
@@ -91,6 +123,10 @@ if __name__ == "__main__":
         help="Include coordinates/coords_compact.txt"
     )
     parser.add_argument(
+        "--no-reboot", action="store_true",
+        help="Don't reboot after OTA update"
+    )
+    parser.add_argument(
         "files", nargs="*", default=["main.py"],
         help="Files to flash (default: main.py)"
     )
@@ -107,7 +143,9 @@ if __name__ == "__main__":
         files = files + ["coordinates/coords_compact.txt"]
 
     if args.ota:
-        ota_push(args.host, args.port, files)
+        if not args.host:
+            parser.error("--host is required for OTA updates")
+        ota_push(args.host, args.port, files, no_reboot=args.no_reboot)
     elif args.run:
         print("Running script on Pico...")
         usb_run("run", "main.py")
