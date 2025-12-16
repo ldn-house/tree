@@ -24,7 +24,9 @@ except ImportError:
     GITHUB_BRANCH = "main"
     FIRMWARE_FILES = ["main.py", "ota.py", "mqtt.py", "selfupdate.py", "github.py"]
     def nightly_link_url(branch="main"):
-        return f"https://nightly.link/ldn-house/tree/workflows/build.yml/{branch}/firmware.zip"
+        # URL-encode slash in branch name (e.g., "claude/feature" -> "claude%2Ffeature")
+        encoded = branch.replace("/", "%2F")
+        return f"https://nightly.link/ldn-house/tree/workflows/build.yml/{encoded}/firmware.zip"
 
 # Update state
 _update_in_progress = False
