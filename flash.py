@@ -87,6 +87,10 @@ if __name__ == "__main__":
         help="Push all scripts (main.py, ota.py, mqtt.py, config.py)"
     )
     parser.add_argument(
+        "--coords", action="store_true",
+        help="Include coordinates/coords_compact.txt"
+    )
+    parser.add_argument(
         "files", nargs="*", default=["main.py"],
         help="Files to flash (default: main.py)"
     )
@@ -98,6 +102,9 @@ if __name__ == "__main__":
         files = ["main.py", "ota.py", "mqtt.py", "config.py"]
     elif args.config:
         files = ["config.py"]
+
+    if args.coords:
+        files = files + ["coordinates/coords_compact.txt"]
 
     if args.ota:
         ota_push(args.host, args.port, files)
