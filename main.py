@@ -592,15 +592,15 @@ def spiral_3d(wait_ms=30, cycles=2):
 # "auto" cycles through all effects; selecting any other effect locks to it
 ANIMATIONS = [
     ("auto", None),  # Special: cycles through all other effects
-    ("rainbow_cycle", lambda: rainbow_cycle(20, 2)),
-    ("christmas", lambda: christmas(50, 20)),
-    ("sparkle", lambda: sparkle((255, 255, 255), 30, 0.03, 8000)),
-    ("candy_cane", lambda: candy_cane(80, 100)),
-    ("twinkle_multi", lambda: twinkle_multi(80, 10000)),
+    ("rainbow_cycle", lambda: rainbow_cycle(10, 2)),
+    ("christmas", lambda: christmas(30, 20)),
+    ("sparkle", lambda: sparkle((255, 255, 255), 20, 0.03, 8000)),
+    ("candy_cane", lambda: candy_cane(50, 100)),
+    ("twinkle_multi", lambda: twinkle_multi(50, 10000)),
     ("warm_white", lambda: warm_white(10000)),
-    ("plane_sweep", lambda: plane_sweep((0, 255, 0), 15, 3)),
-    ("radial_burst", lambda: radial_burst(20, 3)),
-    ("spiral_3d", lambda: spiral_3d(30, 2)),
+    ("plane_sweep", lambda: plane_sweep((0, 255, 0), 8, 3)),
+    ("radial_burst", lambda: radial_burst(12, 3)),
+    ("spiral_3d", lambda: spiral_3d(18, 2)),
 ]
 
 
