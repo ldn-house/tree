@@ -36,6 +36,12 @@ pending_commands = []
 client = None
 connected = False
 
+# Reconnection state
+_last_reconnect_attempt = 0
+_reconnect_backoff = 5000  # Start with 5 seconds
+_max_reconnect_backoff = 60000  # Max 60 seconds
+_consecutive_failures = 0
+
 
 def _on_message(topic, msg):
     """Handle incoming MQTT commands."""
@@ -51,7 +57,7 @@ def _on_message(topic, msg):
 
 def connect():
     """Connect to MQTT broker and subscribe to command topic."""
-    global client, connected
+    global client, connected, _reconnect_backoff, _consecutive_failures
 
     if MQTTClient is None:
         print("MQTT: umqtt.simple not available")
@@ -72,11 +78,48 @@ def connect():
         print(f"MQTT subscribing to: {COMMAND_TOPIC}")
         client.subscribe(COMMAND_TOPIC.encode())
         connected = True
+        # Reset backoff on successful connection
+        _reconnect_backoff = 5000
+        _consecutive_failures = 0
         print(f"MQTT connected to {config.MQTT_BROKER}")
         return True
     except Exception as e:
         print(f"MQTT connection failed: {e}")
         connected = False
+        _consecutive_failures += 1
+        return False
+
+
+def reconnect():
+    """Attempt to reconnect to MQTT broker with exponential backoff."""
+    global _last_reconnect_attempt, _reconnect_backoff, connected, client
+
+    if connected:
+        return True
+
+    now = time.ticks_ms()
+    if time.ticks_diff(now, _last_reconnect_attempt) < _reconnect_backoff:
+        return False  # Not time yet
+
+    _last_reconnect_attempt = now
+    print(f"MQTT reconnecting (backoff: {_reconnect_backoff}ms)...")
+
+    # Clean up old client
+    if client:
+        try:
+            client.disconnect()
+        except:
+            pass
+        client = None
+
+    if connect():
+        # Re-publish discovery and state after reconnection
+        publish_discovery()
+        publish_state()
+        return True
+    else:
+        # Increase backoff for next attempt (exponential with cap)
+        _reconnect_backoff = min(_reconnect_backoff * 2, _max_reconnect_backoff)
         return False
 
 
@@ -135,10 +178,17 @@ def publish_state():
         print(f"MQTT state publish error: {e}")
 
 
+_last_ping = 0
+_ping_interval = 30000  # Ping every 30 seconds to keep connection alive
+
+
 def check_messages():
     """Non-blocking check for incoming messages. Call this frequently."""
-    global connected
+    global connected, _last_ping
+
+    # Try to reconnect if disconnected
     if not connected or client is None:
+        reconnect()
         return
 
     try:
@@ -148,6 +198,17 @@ def check_messages():
             client.check_msg()
         finally:
             client.sock.setblocking(True)
+
+        # Periodic ping to keep connection alive
+        now = time.ticks_ms()
+        if time.ticks_diff(now, _last_ping) > _ping_interval:
+            _last_ping = now
+            try:
+                client.ping()
+            except Exception as e:
+                print(f"MQTT ping failed: {e}")
+                connected = False
+
     except OSError:
         pass  # No message waiting (EAGAIN)
     except Exception as e:
