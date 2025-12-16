@@ -114,5 +114,6 @@ if __name__ == "__main__":
     else:
         print(f"Copying {', '.join(files)} to Pico...")
         for f in files:
-            usb_run("cp", f, f":{f}")
+            dest = Path(f).name  # Use basename for destination
+            usb_run("cp", f, f":{dest}")
         print("Done! Script will auto-run on boot.")
