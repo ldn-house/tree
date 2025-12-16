@@ -35,6 +35,12 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 
 # Push specific file via OTA
 ./flash.py --ota --host 192.168.2.149 ota.py
+
+# Fetch latest from GitHub CI and push via OTA
+./flash.py --github --ota --host 192.168.2.149
+
+# Fetch from GitHub CI and flash via USB
+./flash.py --github
 ```
 
 ## Architecture
