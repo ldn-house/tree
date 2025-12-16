@@ -211,8 +211,12 @@ def start_mdns():
     time.sleep(0.2)
 
 
-def _parse_request(client):
-    """Parse HTTP request, return (method, path, query_params, content_length, body)."""
+def _parse_request(client, skip_body=False):
+    """Parse HTTP request, return (method, path, query_params, content_length, body).
+
+    If skip_body=True, returns partial body (whatever was read with headers) and
+    caller is responsible for reading the rest from socket.
+    """
     request = b""
     content_length = 0
 
@@ -255,6 +259,10 @@ def _parse_request(client):
         if line.lower().startswith("content-length:"):
             content_length = int(line.split(":")[1].strip())
             break
+
+    # Skip body reading if requested (for streaming large uploads)
+    if skip_body:
+        return method, path, query_params, content_length, body
 
     # Read remaining body if needed
     while len(body) < content_length:
@@ -316,10 +324,11 @@ def _get_status():
 
 
 def _handle_update(body, filename="main.py", reboot=True):
-    """Write new code to specified file and optionally reboot."""
-    if not body:
-        return False, "No content received"
+    """Write new code to specified file and optionally reboot.
 
+    body can be bytes (legacy) or a tuple of (client, content_length, partial_body)
+    for streaming large files.
+    """
     # Basic security: only allow safe file extensions in root
     allowed_extensions = (".py", ".txt", ".json", ".csv")
     if "/" in filename or not any(filename.endswith(ext) for ext in allowed_extensions):
@@ -328,8 +337,45 @@ def _handle_update(body, filename="main.py", reboot=True):
     try:
         # Write to temp file first
         temp_name = "_ota_tmp"
-        with open(temp_name, "wb") as f:
-            f.write(body)
+
+        # Check if streaming mode (tuple) or legacy mode (bytes)
+        if isinstance(body, tuple):
+            # Streaming mode: (client_socket, content_length, partial_body)
+            client, content_length, partial_body = body
+            total_written = 0
+
+            gc.collect()  # Free memory before streaming
+
+            with open(temp_name, "wb") as f:
+                # Write any partial body already read with headers
+                if partial_body:
+                    f.write(partial_body)
+                    total_written += len(partial_body)
+
+                # Stream remaining data in chunks
+                chunk_size = 512  # Small chunks to minimize memory usage
+                while total_written < content_length:
+                    remaining = content_length - total_written
+                    to_read = min(chunk_size, remaining)
+                    chunk = client.recv(to_read)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total_written += len(chunk)
+
+                    # Periodic GC to prevent fragmentation
+                    if total_written % 4096 == 0:
+                        gc.collect()
+
+            bytes_written = total_written
+        else:
+            # Legacy mode: body is bytes
+            if not body:
+                return False, "No content received"
+
+            with open(temp_name, "wb") as f:
+                f.write(body)
+            bytes_written = len(body)
 
         # Rename to target (atomic on most filesystems)
         import os
@@ -340,9 +386,9 @@ def _handle_update(body, filename="main.py", reboot=True):
         os.rename(temp_name, filename)
 
         if reboot:
-            return True, f"Updated {filename} ({len(body)} bytes). Rebooting..."
+            return True, f"Updated {filename} ({bytes_written} bytes). Rebooting..."
         else:
-            return True, f"Updated {filename} ({len(body)} bytes)."
+            return True, f"Updated {filename} ({bytes_written} bytes)."
     except Exception as e:
         return False, f"Update failed: {e}"
 
@@ -352,7 +398,9 @@ def _handle_client(client, addr):
     try:
         # Set timeout on client socket to prevent blocking forever
         client.settimeout(10.0)  # 10 second timeout for client operations
-        method, path, query_params, content_length, body = _parse_request(client)
+
+        # Parse headers first, skip body for POST (may need streaming)
+        method, path, query_params, content_length, partial_body = _parse_request(client, skip_body=True)
 
         if method is None:
             return
@@ -369,7 +417,9 @@ def _handle_client(client, addr):
             if "reboot" in query_params:
                 should_reboot = query_params["reboot"].lower() in ("1", "true", "yes")
 
-            success, message = _handle_update(body, filename, reboot=should_reboot)
+            # Use streaming mode to avoid large memory allocations
+            stream_params = (client, content_length, partial_body)
+            success, message = _handle_update(stream_params, filename, reboot=should_reboot)
             if success:
                 response = f'{{"success": true, "message": "{message}"}}'
                 _send_response(client, "200 OK", "application/json", response)
