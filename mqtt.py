@@ -182,7 +182,7 @@ def publish_state():
 
 
 def publish_attributes():
-    """Publish device attributes (IP, uptime, memory, WiFi signal)."""
+    """Publish device attributes (IP, uptime, memory, WiFi signal, version)."""
     if not connected or client is None:
         return
 
@@ -199,6 +199,15 @@ def publish_attributes():
         attrs["current_animation"] = ota.current_animation or "unknown"
     except ImportError:
         pass
+
+    # Version info
+    try:
+        import version
+        attrs["firmware_version"] = version.GIT_COMMIT
+        attrs["firmware_branch"] = version.GIT_BRANCH
+        attrs["firmware_build_time"] = version.BUILD_TIME
+    except (ImportError, AttributeError):
+        attrs["firmware_version"] = "unknown"
 
     # Memory info
     gc.collect()
