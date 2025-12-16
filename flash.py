@@ -21,15 +21,15 @@ def ota_push(host: str, port: int, files: list[str], no_reboot: bool = False):
 
     base_url = f"http://{host}:{port}"
 
-    # Check status first
+    # Check connection
     print(f"Checking {base_url}...")
     try:
         r = httpx.get(f"{base_url}/status", timeout=5.0)
         info = r.json()
         print(f"Connected to {info['hostname']} ({info['ip']})")
-    except httpx.ConnectError:
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout):
         print(f"Could not connect to {host}:{port}")
-        print("Is the Pico running and connected to WiFi?")
+        print("Check: power, WiFi connection, IP address (may have changed)")
         sys.exit(1)
 
     # Filter to valid files and track if any .py files were pushed

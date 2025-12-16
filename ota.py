@@ -49,37 +49,71 @@ MDNS_PORT = 5353
 _last_wifi_check = 0
 _wifi_check_interval = 10000  # Check every 10 seconds
 
-def connect_wifi(timeout_s=30):
+def connect_wifi(timeout_s=30, retries=3):
     """Connect to WiFi and return IP address."""
     global _ip_address
 
     wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
 
-    # Set hostname before connecting (helps with some routers)
-    try:
-        wlan.config(hostname=HOSTNAME)
-    except Exception:
-        pass  # Not all firmware versions support this
+    for attempt in range(retries):
+        try:
+            # Reset WiFi interface on retry
+            if attempt > 0:
+                print(f"WiFi retry {attempt + 1}/{retries}...")
+                wlan.active(False)
+                time.sleep(2)
 
-    if wlan.isconnected():
-        _ip_address = wlan.ifconfig()[0]
-        print(f"Already connected: {_ip_address}")
-        return _ip_address
+            wlan.active(True)
 
-    print(f"Connecting to {WIFI_SSID}...")
-    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+            # Set hostname before connecting (helps with some routers)
+            try:
+                wlan.config(hostname=HOSTNAME)
+            except Exception:
+                pass  # Not all firmware versions support this
 
-    start = time.time()
-    while not wlan.isconnected():
-        if time.time() - start > timeout_s:
-            raise RuntimeError("WiFi connection timeout")
-        time.sleep(0.5)
+            # Check if already connected (may happen on soft reboot)
+            if wlan.isconnected():
+                _ip_address = wlan.ifconfig()[0]
+                print(f"Already connected: {_ip_address}")
+                return _ip_address
 
-    _ip_address = wlan.ifconfig()[0]
-    print(f"Connected: {_ip_address}")
-    print(f"Hostname: {HOSTNAME}.local")
-    return _ip_address
+            # Disconnect any stale connection first
+            try:
+                wlan.disconnect()
+                time.sleep(0.5)
+            except Exception:
+                pass
+
+            print(f"Connecting to {WIFI_SSID}...")
+            wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+
+            start = time.time()
+            last_status = None
+            while not wlan.isconnected():
+                elapsed = time.time() - start
+                if elapsed > timeout_s:
+                    status = wlan.status()
+                    print(f"WiFi timeout after {timeout_s}s (status={status})")
+                    break
+
+                # Print status changes for debugging
+                status = wlan.status()
+                if status != last_status:
+                    print(f"WiFi status: {status} ({elapsed:.1f}s)")
+                    last_status = status
+
+                time.sleep(0.5)
+
+            if wlan.isconnected():
+                _ip_address = wlan.ifconfig()[0]
+                print(f"Connected: {_ip_address}")
+                print(f"Hostname: {HOSTNAME}.local")
+                return _ip_address
+
+        except Exception as e:
+            print(f"WiFi attempt {attempt + 1} failed: {e}")
+
+    raise RuntimeError(f"WiFi connection failed after {retries} attempts")
 
 
 def check_wifi():
