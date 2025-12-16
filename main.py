@@ -23,6 +23,13 @@ try:
 except ImportError:
     MQTT_AVAILABLE = False
 
+# Self-update imports (optional - for update animations)
+try:
+    import selfupdate
+    SELFUPDATE_AVAILABLE = True
+except ImportError:
+    SELFUPDATE_AVAILABLE = False
+
 LED_COUNT = 500
 LED_PIN = 0
 BRIGHTNESS = 0.5
@@ -601,6 +608,179 @@ def spiral_3d(wait_ms=30, cycles=2):
             time.sleep_ms(wait_ms)
 
 
+# ─── Update Animations ─────────────────────────────────────────────────────────
+
+
+def is_update_in_progress():
+    """Check if a firmware update is currently in progress."""
+    if not SELFUPDATE_AVAILABLE:
+        return False
+    status = selfupdate.get_status()
+    return status["in_progress"]
+
+
+def get_update_stage():
+    """Get the current update stage from status string."""
+    if not SELFUPDATE_AVAILABLE:
+        return None
+    status = selfupdate.get_status()
+    if not status["in_progress"]:
+        return None
+    status_str = status["status"].lower()
+    if "checking" in status_str:
+        return "checking"
+    elif "connecting" in status_str:
+        return "connecting"
+    elif "downloading" in status_str:
+        return "downloading"
+    elif "extracting" in status_str:
+        return "extracting"
+    elif "writing" in status_str:
+        return "writing"
+    elif "reboot" in status_str:
+        return "rebooting"
+    return "updating"
+
+
+def update_animation_frame(frame):
+    """
+    Render a single frame of update animation based on current update stage.
+    Returns the recommended delay in ms before next frame.
+
+    Animations:
+    - checking/connecting: Pulsing cyan (thinking)
+    - downloading: Green wave filling up the tree
+    - extracting: Yellow/orange spinning
+    - writing: Quick white flashes
+    - rebooting: Full tree flash
+    """
+    import math
+
+    stage = get_update_stage()
+    if not stage:
+        return 50
+
+    coords = load_coords()
+    has_3d = any(coords)
+
+    if has_3d:
+        y_vals = [c[1] for c in coords if c]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_range = y_max - y_min if y_max > y_min else 1
+
+    if stage in ("checking", "connecting"):
+        # Pulsing cyan - "thinking" animation
+        pulse = (1 + math.sin(frame * 0.15)) / 2
+        brightness = 0.3 + 0.7 * pulse
+        color = (0, int(200 * brightness), int(255 * brightness))  # Cyan
+
+        for i in range(LED_COUNT):
+            # Add subtle wave based on position
+            if has_3d and coords[i]:
+                y_norm = (coords[i][1] - y_min) / y_range
+                local_pulse = (1 + math.sin(frame * 0.15 + y_norm * 3)) / 2
+                local_brightness = 0.3 + 0.7 * local_pulse
+                strip[i] = (0, int(200 * local_brightness), int(255 * local_brightness))
+            else:
+                strip[i] = color
+        strip.write()
+        return 30
+
+    elif stage == "downloading":
+        # Green wave filling up the tree - progress indicator
+        # Wave moves up repeatedly to show active download
+        wave_pos = (frame % 100) / 100.0  # 0 to 1, repeating
+        wave_width = 0.15
+
+        for i in range(LED_COUNT):
+            if has_3d and coords[i]:
+                y_norm = (coords[i][1] - y_min) / y_range
+                # Calculate distance from wave front
+                dist = wave_pos - y_norm
+                if dist < 0:
+                    dist += 1  # Wrap around
+
+                if dist < wave_width:
+                    # Bright at wave front, fading behind
+                    brightness = 1.0 - (dist / wave_width)
+                    strip[i] = (0, int(255 * brightness), 0)  # Green
+                else:
+                    # Dim green base to show "filled" progress
+                    strip[i] = (0, 20, 0)
+            else:
+                # Fallback: linear pattern
+                pos = (i + frame * 3) % LED_COUNT
+                brightness = max(0, 1.0 - (pos / 50))
+                strip[i] = (0, int(255 * brightness), 0)
+        strip.write()
+        return 20
+
+    elif stage == "extracting":
+        # Yellow/orange spinning effect
+        spin_angle = frame * 0.1
+
+        for i in range(LED_COUNT):
+            if has_3d and coords[i]:
+                x, y, z = coords[i]
+                led_angle = math.atan2(z, x)
+                # Two spinning arms
+                diff1 = abs(((led_angle - spin_angle + math.pi) % (2 * math.pi)) - math.pi)
+                diff2 = abs(((led_angle - spin_angle - math.pi + math.pi) % (2 * math.pi)) - math.pi)
+                diff = min(diff1, diff2)
+
+                if diff < 0.5:
+                    brightness = 1.0 - (diff / 0.5)
+                    strip[i] = (int(255 * brightness), int(180 * brightness), 0)  # Orange
+                else:
+                    strip[i] = (15, 10, 0)  # Dim orange base
+            else:
+                # Fallback: simple spinner
+                pos = (i + frame) % 20
+                brightness = 1.0 if pos < 5 else 0.1
+                strip[i] = (int(255 * brightness), int(180 * brightness), 0)
+        strip.write()
+        return 25
+
+    elif stage == "writing":
+        # Quick white flashes - shows file writes
+        flash = (frame % 10) < 5
+
+        for i in range(LED_COUNT):
+            if flash:
+                # Bright white flash
+                if has_3d and coords[i]:
+                    y_norm = (coords[i][1] - y_min) / y_range
+                    # Flash travels up
+                    flash_pos = (frame % 30) / 30.0
+                    if abs(y_norm - flash_pos) < 0.1:
+                        strip[i] = (255, 255, 255)
+                    else:
+                        strip[i] = (30, 30, 30)
+                else:
+                    strip[i] = (255, 255, 255) if (i + frame) % 10 < 2 else (30, 30, 30)
+            else:
+                strip[i] = (30, 30, 30)  # Dim white base
+        strip.write()
+        return 15
+
+    elif stage == "rebooting":
+        # Full tree flash - dramatic finale before reboot
+        flash = (frame % 6) < 3
+        color = (255, 255, 255) if flash else (0, 0, 0)
+        for i in range(LED_COUNT):
+            strip[i] = color
+        strip.write()
+        return 100
+
+    else:
+        # Generic updating - blue pulse
+        pulse = (1 + math.sin(frame * 0.1)) / 2
+        for i in range(LED_COUNT):
+            strip[i] = (0, 0, int(150 * pulse + 50))
+        strip.write()
+        return 40
+
+
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 
 
@@ -685,6 +865,13 @@ try:
     was_calibrating = False  # Track calibration state transitions
     was_off = False  # Track power state to only clear once
 
+    # Update animation state - extends animation beyond actual update duration
+    _update_anim_frame = 0
+    _update_anim_start = 0  # When update animation started (ticks_ms)
+    _update_anim_active = False  # Are we currently showing update animation
+    _update_min_duration = 5000  # Minimum animation duration in ms
+    _last_update_stage = None  # Track stage changes for logging
+
     # Periodic maintenance
     _last_gc = 0
     _gc_interval = 30000  # GC every 30 seconds
@@ -720,6 +907,43 @@ try:
             was_calibrating = False
             clear()
             print("Exited calibration mode, resuming animations")
+
+        # Handle firmware update animations - takes priority over normal animations
+        if SELFUPDATE_AVAILABLE:
+            update_active = is_update_in_progress()
+            current_stage = get_update_stage()
+
+            # Log stage changes
+            if current_stage != _last_update_stage:
+                if current_stage:
+                    print(f"[UPDATE] Stage: {current_stage}")
+                _last_update_stage = current_stage
+
+            # Start update animation when update begins
+            if update_active and not _update_anim_active:
+                _update_anim_active = True
+                _update_anim_start = time.ticks_ms()
+                _update_anim_frame = 0
+                print("[UPDATE] Starting update animation")
+
+            # Check if we should still show update animation
+            # (either update is active, or minimum duration hasn't passed)
+            if _update_anim_active:
+                elapsed = time.ticks_diff(time.ticks_ms(), _update_anim_start)
+                should_continue = update_active or elapsed < _update_min_duration
+
+                if should_continue:
+                    # Show update animation frame
+                    delay = update_animation_frame(_update_anim_frame)
+                    _update_anim_frame += 1
+                    time.sleep_ms(delay)
+                    continue  # Skip normal animation processing
+                else:
+                    # Update animation complete
+                    _update_anim_active = False
+                    _update_anim_frame = 0
+                    clear()
+                    print("[UPDATE] Update animation complete, resuming normal animations")
 
         # Check MQTT commands and handle effect changes (also handles reconnection)
         if MQTT_AVAILABLE:
