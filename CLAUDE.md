@@ -18,7 +18,13 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 # Flash via USB (saves as main.py, auto-runs on boot)
 ./flash.py
 
-# Flash all config files via USB (first-time setup)
+# Flash all scripts via USB (main, ota, mqtt, config)
+./flash.py --all
+
+# Flash all scripts + coordinates
+./flash.py --all --coords
+
+# Flash config only
 ./flash.py --config
 
 # Run without saving to flash
