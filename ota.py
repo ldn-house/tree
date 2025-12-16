@@ -442,6 +442,7 @@ def _handle_update(body, filename="main.py", reboot=True):
 
 def _handle_client(client, addr):
     """Handle a single client connection."""
+    global calibration_mode, calibration_led, calibration_binary_bit
     try:
         # Set timeout on client socket to prevent blocking forever
         client.settimeout(10.0)  # 10 second timeout for client operations
@@ -503,7 +504,6 @@ def _handle_client(client, addr):
 
         elif path == "/calibrate/start":
             # Enter calibration mode
-            global calibration_mode, calibration_led
             calibration_mode = True
             calibration_led = -1
             print("Entered calibration mode")
@@ -512,7 +512,6 @@ def _handle_client(client, addr):
 
         elif path == "/calibrate/stop":
             # Exit calibration mode
-            global calibration_mode, calibration_led
             calibration_mode = False
             calibration_led = -1
             print("Exited calibration mode")
@@ -521,7 +520,6 @@ def _handle_client(client, addr):
 
         elif path == "/calibrate/led":
             # Set specific LED on (n=index) or all off (n=-1)
-            global calibration_led
             if not calibration_mode:
                 _send_response(client, "400 Bad Request", "application/json",
                               '{"error": "Not in calibration mode. Call /calibrate/start first"}')
@@ -532,7 +530,6 @@ def _handle_client(client, addr):
 
         elif path == "/calibrate/binary":
             # Set binary pattern (bit=N means LEDs with bit N set are ON)
-            global calibration_led, calibration_binary_bit
             if not calibration_mode:
                 _send_response(client, "400 Bad Request", "application/json",
                               '{"error": "Not in calibration mode. Call /calibrate/start first"}')
@@ -582,7 +579,8 @@ def _handle_client(client, addr):
                 status = selfupdate.get_status()
                 response = f'{{"in_progress": {"true" if status["in_progress"] else "false"}, '
                 response += f'"status": "{status["status"]}", '
-                response += f'"error": {f\'"{status["error"]}"\' if status["error"] else "null"}}}'
+                error_val = f'"{status["error"]}"' if status["error"] else "null"
+                response += f'"error": {error_val}}}'
                 _send_response(client, "200 OK", "application/json", response)
             except ImportError:
                 _send_response(client, "200 OK", "application/json",
