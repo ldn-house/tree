@@ -21,16 +21,29 @@ def ota_push(host: str, port: int, files: list[str], no_reboot: bool = False):
 
     base_url = f"http://{host}:{port}"
 
-    # Check status first
+    # Check status first with retries (Pico may be slow to boot after power cycle)
     print(f"Checking {base_url}...")
-    try:
-        r = httpx.get(f"{base_url}/status", timeout=5.0)
-        info = r.json()
-        print(f"Connected to {info['hostname']} ({info['ip']})")
-    except httpx.ConnectError:
-        print(f"Could not connect to {host}:{port}")
-        print("Is the Pico running and connected to WiFi?")
-        sys.exit(1)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            r = httpx.get(f"{base_url}/status", timeout=10.0)
+            info = r.json()
+            print(f"Connected to {info['hostname']} ({info['ip']})")
+            break
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** (attempt + 1)  # 2s, 4s
+                print(f"Connection failed ({type(e).__name__}), retrying in {wait_time}s...")
+                import time
+                time.sleep(wait_time)
+            else:
+                print(f"Could not connect to {host}:{port} after {max_retries} attempts")
+                print("Possible causes:")
+                print("  - Pico not powered on or still booting")
+                print("  - WiFi not connected (check router for assigned IP)")
+                print("  - IP address may have changed after power cycle")
+                print("  - OTA server not running")
+                sys.exit(1)
 
     # Filter to valid files and track if any .py files were pushed
     valid_files = []

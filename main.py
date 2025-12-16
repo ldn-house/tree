@@ -628,33 +628,51 @@ def update_brightness():
         _brightness = BRIGHTNESS
 
 
+print("=" * 40)
 print("Christmas tree starting...")
+print(f"Free memory: {gc.mem_free()} bytes")
+print("=" * 40)
 
 # Start WiFi and OTA server (non-blocking)
 if OTA_AVAILABLE:
     try:
+        print("[BOOT] Connecting to WiFi...")
         ota.connect_wifi()
+        print("[BOOT] Starting OTA server...")
         ota.start_server()
+        print("[BOOT] OTA ready")
     except Exception as e:
-        print(f"OTA setup failed: {e}")
-        print("Continuing without OTA...")
+        print(f"[BOOT] OTA setup failed: {e}")
+        print("[BOOT] Continuing without OTA...")
+else:
+    print("[BOOT] OTA module not available")
 
 # Start MQTT (requires WiFi from OTA)
 if MQTT_AVAILABLE:
     try:
+        print("[BOOT] Setting up MQTT...")
         animation_names = [name for name, _ in ANIMATIONS]
         mqtt.setup(animation_names)
         mqtt.state["brightness"] = int(BRIGHTNESS * 255)
+        print("[BOOT] MQTT ready")
     except Exception as e:
-        print(f"MQTT setup failed: {e}")
+        print(f"[BOOT] MQTT setup failed: {e}")
+else:
+    print("[BOOT] MQTT module not available")
 
 # Initialize hardware watchdog after all setup is complete
 # 8 second timeout - must feed before this or system resets
+print("[BOOT] Enabling watchdog...")
 try:
     wdt = WDT(timeout=8000)
-    print("Watchdog enabled (8s timeout)")
+    print("[BOOT] Watchdog enabled (8s timeout)")
 except Exception as e:
-    print(f"Watchdog init failed: {e}")
+    print(f"[BOOT] Watchdog init failed: {e}")
+
+print("=" * 40)
+print("[BOOT] Initialization complete, entering main loop")
+print(f"Free memory: {gc.mem_free()} bytes")
+print("=" * 40)
 
 try:
     if OTA_AVAILABLE:
