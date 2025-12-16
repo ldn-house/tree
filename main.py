@@ -34,8 +34,8 @@ wdt = None  # Initialized after WiFi/OTA setup completes
 # Power limiting: max total RGB sum across all LEDs
 # Each LED can draw up to 60mA at full white (255,255,255)
 # 500 LEDs * 765 (255*3) = 382,500 max
-# Cap at ~15% to be safe with power supply
-MAX_POWER = int(LED_COUNT * 255 * 3 * 0.15)
+# Cap at ~13% to be safe with power supply
+MAX_POWER = int(LED_COUNT * 255 * 3 * 0.13)
 
 strip = NeoPixel(Pin(LED_PIN), LED_COUNT)
 
