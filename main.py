@@ -354,23 +354,30 @@ def candy_cane(wait_ms=100, cycles=50):
         time.sleep_ms(wait_ms)
 
 
-def twinkle_multi(wait_ms=100, duration_ms=10000):
-    """Twinkling multicolor Christmas lights."""
-    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]  # Red, green, blue, yellow
-    # Initialize with random colors
+def twinkle_multi(wait_ms=50, duration_ms=10000):
+    """Twinkling multicolor Christmas lights with smooth fading."""
+    import math
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 180, 0)]  # Red, green, blue, yellow (warmer)
+    # Initialize with random colors and phases
     led_colors = [random.choice(colors) for _ in range(LED_COUNT)]
-    led_brightness = [random.random() for _ in range(LED_COUNT)]
+    led_phase = [random.random() * 2 * math.pi for _ in range(LED_COUNT)]  # Phase in twinkle cycle
+    led_speed = [0.05 + random.random() * 0.15 for _ in range(LED_COUNT)]  # Individual twinkle speeds
 
     start = time.ticks_ms()
     while time.ticks_diff(time.ticks_ms(), start) < duration_ms:
         if check_interrupt():
             return
         for i in range(LED_COUNT):
-            # Randomly change some LEDs
-            if random.random() < 0.02:
-                led_colors[i] = random.choice(colors)
-                led_brightness[i] = random.random()
-            b = led_brightness[i]
+            # Advance phase
+            led_phase[i] += led_speed[i]
+            # Smooth brightness oscillation (0.3 to 1.0 range so never fully off)
+            b = 0.3 + 0.7 * (0.5 + 0.5 * math.sin(led_phase[i]))
+            # Randomly change color when LED is at its dimmest point
+            if led_phase[i] > 2 * math.pi:
+                led_phase[i] -= 2 * math.pi
+                if random.random() < 0.3:  # 30% chance to change color each cycle
+                    led_colors[i] = random.choice(colors)
+                    led_speed[i] = 0.05 + random.random() * 0.15  # New random speed
             strip[i] = scale(tuple(int(c * b) for c in led_colors[i]))
         safe_write()
         time.sleep_ms(wait_ms)
