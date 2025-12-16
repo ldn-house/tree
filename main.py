@@ -170,12 +170,10 @@ def fill(color):
 
 
 def rainbow_cycle(wait_ms=20, cycles=1):
-    """Rainbow that spirals around and up the tree (3D)."""
-    import math
+    """Rainbow gradient based on height - moves up/down the tree (3D)."""
     coords = load_coords()
 
-    # Precompute angles and heights for each LED
-    led_theta = []
+    # Precompute normalized heights for each LED
     led_y = []
     has_3d = any(coords)
 
@@ -186,12 +184,9 @@ def rainbow_cycle(wait_ms=20, cycles=1):
 
         for i in range(LED_COUNT):
             if coords[i]:
-                x, y, z = coords[i]
-                theta = math.atan2(z, x)  # -pi to pi
-                led_theta.append(theta)
+                y = coords[i][1]
                 led_y.append((y - y_min) / y_range)  # Normalize to 0-1
             else:
-                led_theta.append(0)
                 led_y.append(0)
 
     for _ in range(cycles):
@@ -200,9 +195,8 @@ def rainbow_cycle(wait_ms=20, cycles=1):
                 return
             for i in range(LED_COUNT):
                 if has_3d and coords[i]:
-                    # Color based on angle + height (spiral rainbow)
-                    theta_norm = (led_theta[i] + math.pi) / (2 * math.pi)  # 0-1
-                    hue = (theta_norm + led_y[i] * 0.5 + j / 256) % 1.0
+                    # Color based purely on height (vertical gradient)
+                    hue = (led_y[i] + j / 256) % 1.0
                     strip[i] = scale(wheel(int(hue * 255)))
                 else:
                     # Fallback to linear
@@ -592,9 +586,9 @@ def spiral_3d(wait_ms=30, cycles=2):
 # "auto" cycles through all effects; selecting any other effect locks to it
 ANIMATIONS = [
     ("auto", None),  # Special: cycles through all other effects
-    ("rainbow_cycle", lambda: rainbow_cycle(10, 2)),
+    ("rainbow_cycle", lambda: rainbow_cycle(5, 5)),
     ("christmas", lambda: christmas(30, 20)),
-    ("sparkle", lambda: sparkle((255, 255, 255), 20, 0.03, 8000)),
+    ("sparkle", lambda: sparkle((255, 255, 255), 80, 0.03, 8000)),
     ("candy_cane", lambda: candy_cane(50, 100)),
     ("twinkle_multi", lambda: twinkle_multi(50, 10000)),
     ("warm_white", lambda: warm_white(10000)),
@@ -646,6 +640,10 @@ try:
 
     _cal_debug_counter = 0
     while True:
+        # Check WiFi and reconnect if needed
+        if OTA_AVAILABLE:
+            ota.check_wifi()
+
         # Handle calibration mode - skip normal animation processing
         if OTA_AVAILABLE and ota.calibration_mode:
             was_calibrating = True

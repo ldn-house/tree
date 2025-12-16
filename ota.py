@@ -46,6 +46,9 @@ MDNS_ADDR = "224.0.0.251"
 MDNS_PORT = 5353
 
 
+_last_wifi_check = 0
+_wifi_check_interval = 10000  # Check every 10 seconds
+
 def connect_wifi(timeout_s=30):
     """Connect to WiFi and return IP address."""
     global _ip_address
@@ -77,6 +80,40 @@ def connect_wifi(timeout_s=30):
     print(f"Connected: {_ip_address}")
     print(f"Hostname: {HOSTNAME}.local")
     return _ip_address
+
+
+def check_wifi():
+    """Check WiFi connection and reconnect if needed. Call periodically from main loop."""
+    global _last_wifi_check, _ip_address
+
+    now = time.ticks_ms()
+    if time.ticks_diff(now, _last_wifi_check) < _wifi_check_interval:
+        return True
+    _last_wifi_check = now
+
+    wlan = network.WLAN(network.STA_IF)
+    if wlan.isconnected():
+        return True
+
+    print("WiFi disconnected, reconnecting...")
+    try:
+        wlan.active(False)
+        time.sleep(1)
+        wlan.active(True)
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+
+        for _ in range(20):  # 10 second timeout
+            if wlan.isconnected():
+                _ip_address = wlan.ifconfig()[0]
+                print(f"WiFi reconnected: {_ip_address}")
+                return True
+            time.sleep(0.5)
+
+        print("WiFi reconnection failed")
+        return False
+    except Exception as e:
+        print(f"WiFi reconnect error: {e}")
+        return False
 
 
 def _build_mdns_response(query_id, hostname, ip):
