@@ -103,8 +103,8 @@ if __name__ == "__main__":
         help="Push via WiFi OTA instead of USB"
     )
     parser.add_argument(
-        "--host", default="tree.local",
-        help="OTA hostname (default: tree.local)"
+        "--host",
+        help="OTA hostname or IP address"
     )
     parser.add_argument(
         "--port", type=int, default=8080,
@@ -143,6 +143,8 @@ if __name__ == "__main__":
         files = files + ["coordinates/coords_compact.txt"]
 
     if args.ota:
+        if not args.host:
+            parser.error("--host is required for OTA updates")
         ota_push(args.host, args.port, files, no_reboot=args.no_reboot)
     elif args.run:
         print("Running script on Pico...")
