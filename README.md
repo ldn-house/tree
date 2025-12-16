@@ -15,8 +15,8 @@ RGB LED strip controller for a 6ft Christmas tree with 500 WS2811 LEDs, inspired
 # Flash to Pico (saves as main.py, auto-runs on boot)
 ./flash.py
 
-# First-time setup (includes WiFi config and MQTT)
-./flash.py --config
+# First-time setup (all scripts: main, ota, mqtt, config)
+./flash.py --all
 
 # Push updates via WiFi OTA (no USB needed)
 ./flash.py --ota --host 192.168.2.149
@@ -38,7 +38,7 @@ The tree integrates with Home Assistant via MQTT, appearing as a light entity wi
 
 1. Install Mosquitto broker add-on in Home Assistant
 2. Add MQTT credentials to `config.py` (see `config.example.py`)
-3. Flash with `./flash.py --config`
+3. Flash with `./flash.py --all`
 4. Tree auto-discovers in Home Assistant
 
 ### Power Limiting (HDR)
