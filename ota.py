@@ -350,6 +350,8 @@ def _handle_update(body, filename="main.py", reboot=True):
 def _handle_client(client, addr):
     """Handle a single client connection."""
     try:
+        # Set timeout on client socket to prevent blocking forever
+        client.settimeout(10.0)  # 10 second timeout for client operations
         method, path, query_params, content_length, body = _parse_request(client)
 
         if method is None:
@@ -450,6 +452,10 @@ def _handle_client(client, addr):
         else:
             _send_response(client, "404 Not Found", "text/plain", "Not Found")
 
+    except OSError as e:
+        # Timeout or connection reset - don't spam logs for normal disconnects
+        if "ETIMEDOUT" not in str(e) and "ECONNRESET" not in str(e):
+            print(f"Client socket error: {e}")
     except Exception as e:
         print(f"Client error: {e}")
         try:
