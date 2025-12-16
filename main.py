@@ -3,10 +3,11 @@ Christmas Tree LED Controller - Pi Pico 2W
 MicroPython with PIO-based NeoPixel driver + WiFi OTA updates
 """
 
-from machine import Pin
+from machine import Pin, WDT
 from neopixel import NeoPixel
 import time
 import random
+import gc
 
 # OTA imports (optional - works without WiFi)
 try:
@@ -25,6 +26,10 @@ except ImportError:
 LED_COUNT = 500
 LED_PIN = 0
 BRIGHTNESS = 0.5
+
+# Hardware watchdog - will reset if not fed for 8 seconds
+# This catches any hangs in the main loop or animations
+wdt = None  # Initialized after WiFi/OTA setup completes
 
 # Power limiting: max total RGB sum across all LEDs
 # Each LED can draw up to 60mA at full white (255,255,255)
@@ -135,9 +140,18 @@ def wheel(pos):
         return (0, pos * 3, 255 - pos * 3)
 
 
+def feed_watchdog():
+    """Feed the hardware watchdog to prevent reset."""
+    if wdt:
+        wdt.feed()
+
+
 def check_interrupt():
     """Check if animation should be interrupted (e.g., power off from HA, or calibration mode).
-    Also updates brightness dynamically."""
+    Also updates brightness dynamically and feeds the watchdog."""
+    # Feed watchdog on every interrupt check (called frequently during animations)
+    feed_watchdog()
+
     # Check for calibration mode - interrupt immediately
     if OTA_AVAILABLE and ota.calibration_mode:
         return True
@@ -627,6 +641,14 @@ if MQTT_AVAILABLE:
     except Exception as e:
         print(f"MQTT setup failed: {e}")
 
+# Initialize hardware watchdog after all setup is complete
+# 8 second timeout - must feed before this or system resets
+try:
+    wdt = WDT(timeout=8000)
+    print("Watchdog enabled (8s timeout)")
+except Exception as e:
+    print(f"Watchdog init failed: {e}")
+
 try:
     if OTA_AVAILABLE:
         ota.total_animations = len(ANIMATIONS)
@@ -638,8 +660,21 @@ try:
     was_calibrating = False  # Track calibration state transitions
     was_off = False  # Track power state to only clear once
 
+    # Periodic maintenance
+    _last_gc = 0
+    _gc_interval = 30000  # GC every 30 seconds
+
     _cal_debug_counter = 0
     while True:
+        # Feed watchdog at start of each loop iteration
+        feed_watchdog()
+
+        # Periodic garbage collection to prevent memory fragmentation
+        now = time.ticks_ms()
+        if time.ticks_diff(now, _last_gc) > _gc_interval:
+            _last_gc = now
+            gc.collect()
+
         # Check WiFi and reconnect if needed
         if OTA_AVAILABLE:
             ota.check_wifi()
@@ -661,9 +696,9 @@ try:
             clear()
             print("Exited calibration mode, resuming animations")
 
-        # Check MQTT commands and handle effect changes
-        if MQTT_AVAILABLE and mqtt.connected:
-            mqtt.check_messages()
+        # Check MQTT commands and handle effect changes (also handles reconnection)
+        if MQTT_AVAILABLE:
+            mqtt.check_messages()  # This handles reconnection when disconnected
             cmd = mqtt.get_pending_command()
             if cmd:
                 changes = mqtt.process_command(cmd)
