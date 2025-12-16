@@ -76,6 +76,10 @@ def ota_push(host: str, port: int, files: list[str], no_reboot: bool = False):
             r = httpx.post(f"{base_url}/reboot", timeout=5.0)
             if r.status_code == 200:
                 print("Reboot initiated")
+            elif r.status_code == 404:
+                # Old firmware without /reboot endpoint
+                print("Note: Device needs manual reboot (old firmware)")
+                print("      After reboot, /reboot endpoint will be available")
             else:
                 print(f"Reboot request failed: {r.text}")
         except httpx.ReadTimeout:
