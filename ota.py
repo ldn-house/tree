@@ -449,6 +449,14 @@ def _handle_client(client, addr):
             _send_response(client, "200 OK", "application/json",
                           f'{{"calibration_mode": {"true" if calibration_mode else "false"}, "current_led": {calibration_led}, "total_leds": 500}}')
 
+        elif path == "/reboot" and method == "POST":
+            # Explicit reboot endpoint
+            _send_response(client, "200 OK", "application/json",
+                          '{"success": true, "message": "Rebooting..."}')
+            client.close()
+            time.sleep(0.5)
+            machine.reset()
+
         else:
             _send_response(client, "404 Not Found", "text/plain", "Not Found")
 
