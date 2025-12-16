@@ -80,7 +80,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--config", action="store_true",
-        help="Push config.py and ota.py too (first-time setup)"
+        help="Push config.py only"
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help="Push all scripts (main.py, ota.py, mqtt.py, config.py)"
     )
     parser.add_argument(
         "files", nargs="*", default=["main.py"],
@@ -90,8 +94,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     files = args.files
-    if args.config:
-        files = ["config.py", "ota.py", "main.py"]
+    if args.all:
+        files = ["main.py", "ota.py", "mqtt.py", "config.py"]
+    elif args.config:
+        files = ["config.py"]
 
     if args.ota:
         ota_push(args.host, args.port, files)
