@@ -1,8 +1,7 @@
 name: Build Firmware
 
 on:
-  push:
-    branches: [main]
+  push:  # All branches - enables nightly.link downloads for feature branches
   pull_request:
     branches: [main]
   workflow_dispatch:  # Allow manual trigger
