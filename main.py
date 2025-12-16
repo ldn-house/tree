@@ -170,13 +170,43 @@ def fill(color):
 
 
 def rainbow_cycle(wait_ms=20, cycles=1):
-    """Rainbow that moves along the strip."""
+    """Rainbow that spirals around and up the tree (3D)."""
+    import math
+    coords = load_coords()
+
+    # Precompute angles and heights for each LED
+    led_theta = []
+    led_y = []
+    has_3d = any(coords)
+
+    if has_3d:
+        y_vals = [c[1] for c in coords if c]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_range = y_max - y_min if y_max > y_min else 1
+
+        for i in range(LED_COUNT):
+            if coords[i]:
+                x, y, z = coords[i]
+                theta = math.atan2(z, x)  # -pi to pi
+                led_theta.append(theta)
+                led_y.append((y - y_min) / y_range)  # Normalize to 0-1
+            else:
+                led_theta.append(0)
+                led_y.append(0)
+
     for _ in range(cycles):
         for j in range(256):
             if check_interrupt():
                 return
             for i in range(LED_COUNT):
-                strip[i] = scale(wheel((i * 256 // LED_COUNT + j) & 255))
+                if has_3d and coords[i]:
+                    # Color based on angle + height (spiral rainbow)
+                    theta_norm = (led_theta[i] + math.pi) / (2 * math.pi)  # 0-1
+                    hue = (theta_norm + led_y[i] * 0.5 + j / 256) % 1.0
+                    strip[i] = scale(wheel(int(hue * 255)))
+                else:
+                    # Fallback to linear
+                    strip[i] = scale(wheel((i * 256 // LED_COUNT + j) & 255))
             safe_write()
             time.sleep_ms(wait_ms)
 
@@ -194,18 +224,42 @@ def chase(color, wait_ms=50, cycles=3):
 
 
 def christmas(wait_ms=50, cycles=10):
-    """Theater chase with alternating red and green."""
+    """Rotating red and green sectors around the tree (3D)."""
+    import math
+    coords = load_coords()
     red = (255, 0, 0)
     green = (0, 255, 0)
+
+    has_3d = any(coords)
+    led_theta = []
+
+    if has_3d:
+        for i in range(LED_COUNT):
+            if coords[i]:
+                x, y, z = coords[i]
+                led_theta.append(math.atan2(z, x))
+            else:
+                led_theta.append(0)
+
+    num_sectors = 6  # 3 red, 3 green alternating
+
     for _ in range(cycles):
-        for offset in range(3):
+        for offset in range(60):  # Rotate through 60 steps
             if check_interrupt():
                 return
+            rotation = (offset / 60) * 2 * math.pi
+
             for i in range(LED_COUNT):
-                if i % 3 == offset:
-                    strip[i] = scale(red if (i // 3) % 2 == 0 else green)
+                if has_3d and coords[i]:
+                    theta = led_theta[i] + rotation
+                    sector = int(((theta + math.pi) / (2 * math.pi)) * num_sectors) % num_sectors
+                    strip[i] = scale(red if sector % 2 == 0 else green)
                 else:
-                    strip[i] = (0, 0, 0)
+                    # Fallback
+                    if i % 3 == offset % 3:
+                        strip[i] = scale(red if (i // 3) % 2 == 0 else green)
+                    else:
+                        strip[i] = (0, 0, 0)
             safe_write()
             time.sleep_ms(wait_ms)
 
@@ -223,21 +277,45 @@ def sparkle(color, wait_ms=50, density=0.05, duration_ms=5000):
 
 
 def comet(color, tail_length=20, wait_ms=20, cycles=2, count=1):
-    """Multiple comets with fading tails."""
-    spacing = LED_COUNT // count
+    """Comets that rise up the tree (3D)."""
+    coords = load_coords()
+    has_3d = any(coords)
+
+    if has_3d:
+        y_vals = [c[1] for c in coords if c]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_range = y_max - y_min if y_max > y_min else 1
+        tail_size = 0.15  # Tail as fraction of tree height
+
     for _ in range(cycles):
-        for frame in range(LED_COUNT + tail_length):
+        for frame in range(100):
             if check_interrupt():
                 return
+
             for i in range(LED_COUNT):
                 brightness = 0.0
-                # Check each comet
-                for c in range(count):
-                    head = (frame + c * spacing) % (LED_COUNT + tail_length)
-                    distance = head - i
-                    if 0 <= distance < tail_length:
-                        fade = 1.0 - (distance / tail_length)
-                        brightness = max(brightness, fade)
+
+                if has_3d and coords[i]:
+                    y_norm = (coords[i][1] - y_min) / y_range
+
+                    # Multiple comets evenly spaced
+                    for c in range(count):
+                        head_y = (frame / 100 + c / count) % 1.0
+                        distance = head_y - y_norm
+
+                        if 0 <= distance < tail_size:
+                            fade = 1.0 - (distance / tail_size)
+                            brightness = max(brightness, fade)
+                else:
+                    # Fallback to linear
+                    spacing = LED_COUNT // count
+                    for c in range(count):
+                        head = (frame * LED_COUNT // 100 + c * spacing) % (LED_COUNT + tail_length)
+                        distance = head - i
+                        if 0 <= distance < tail_length:
+                            fade = 1.0 - (distance / tail_length)
+                            brightness = max(brightness, fade)
+
                 if brightness > 0:
                     strip[i] = scale(tuple(int(v * brightness) for v in color))
                 else:
@@ -247,16 +325,37 @@ def comet(color, tail_length=20, wait_ms=20, cycles=2, count=1):
 
 
 def candy_cane(wait_ms=100, cycles=50):
-    """Red and white stripes that move."""
-    stripe_width = 10
+    """Red and white horizontal stripes that move up the tree (3D)."""
+    coords = load_coords()
+    has_3d = any(coords)
+
+    if has_3d:
+        y_vals = [c[1] for c in coords if c]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_range = y_max - y_min if y_max > y_min else 1
+
+    num_stripes = 8  # Number of stripe pairs
+
     for offset in range(cycles):
         if check_interrupt():
             return
+        phase = offset / cycles  # 0 to 1
+
         for i in range(LED_COUNT):
-            if ((i + offset) // stripe_width) % 2 == 0:
-                strip[i] = scale((255, 0, 0))
+            if has_3d and coords[i]:
+                y_norm = (coords[i][1] - y_min) / y_range
+                stripe_pos = (y_norm * num_stripes + phase) % 1.0
+                if stripe_pos < 0.5:
+                    strip[i] = scale((255, 0, 0))  # Red
+                else:
+                    strip[i] = scale((255, 255, 255))  # White
             else:
-                strip[i] = scale((255, 255, 255))
+                # Fallback to linear
+                stripe_width = 10
+                if ((i + offset) // stripe_width) % 2 == 0:
+                    strip[i] = scale((255, 0, 0))
+                else:
+                    strip[i] = scale((255, 255, 255))
         safe_write()
         time.sleep_ms(wait_ms)
 
@@ -284,14 +383,29 @@ def twinkle_multi(wait_ms=100, duration_ms=10000):
 
 
 def wave(color1, color2, wait_ms=50, cycles=3):
-    """Smooth wave between two colors."""
+    """Smooth color wave that moves up the tree (3D)."""
     import math
+    coords = load_coords()
+    has_3d = any(coords)
+
+    if has_3d:
+        y_vals = [c[1] for c in coords if c]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_range = y_max - y_min if y_max > y_min else 1
+
     for _ in range(cycles):
-        for offset in range(LED_COUNT):
+        for offset in range(100):
             if check_interrupt():
                 return
+            phase = offset / 100 * 2 * math.pi
+
             for i in range(LED_COUNT):
-                ratio = (1 + math.sin((i + offset) * 0.1)) / 2
+                if has_3d and coords[i]:
+                    y_norm = (coords[i][1] - y_min) / y_range
+                    ratio = (1 + math.sin(y_norm * 4 * math.pi + phase)) / 2
+                else:
+                    ratio = (1 + math.sin((i + offset) * 0.1)) / 2
+
                 r = int(color1[0] * ratio + color2[0] * (1 - ratio))
                 g = int(color1[1] * ratio + color2[1] * (1 - ratio))
                 b = int(color1[2] * ratio + color2[2] * (1 - ratio))
