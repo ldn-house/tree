@@ -18,6 +18,7 @@ TOPIC_PREFIX = "homeassistant/light/xmas_tree"
 DISCOVERY_TOPIC = f"{TOPIC_PREFIX}/config"
 STATE_TOPIC = "xmas_tree/state"
 COMMAND_TOPIC = "xmas_tree/set"
+ATTRIBUTES_TOPIC = "xmas_tree/attributes"
 
 # State (modified by main.py and commands)
 state = {
@@ -113,9 +114,10 @@ def reconnect():
         client = None
 
     if connect():
-        # Re-publish discovery and state after reconnection
+        # Re-publish discovery, state, and attributes after reconnection
         publish_discovery()
         publish_state()
+        publish_attributes()
         return True
     else:
         # Increase backoff for next attempt (exponential with cap)
@@ -133,6 +135,7 @@ def publish_discovery():
         "unique_id": "xmas_tree_pico",
         "command_topic": COMMAND_TOPIC,
         "state_topic": STATE_TOPIC,
+        "json_attributes_topic": ATTRIBUTES_TOPIC,
         "schema": "json",
         "brightness": True,
         "brightness_scale": 255,
@@ -178,13 +181,63 @@ def publish_state():
         print(f"MQTT state publish error: {e}")
 
 
+def publish_attributes():
+    """Publish device attributes (IP, uptime, memory, WiFi signal)."""
+    if not connected or client is None:
+        return
+
+    import gc
+
+    attrs = {}
+
+    # Get info from OTA module
+    try:
+        import ota
+        attrs["ip_address"] = ota._ip_address or "unknown"
+        if ota._start_time:
+            attrs["uptime_seconds"] = int(time.time() - ota._start_time)
+        attrs["current_animation"] = ota.current_animation or "unknown"
+    except ImportError:
+        pass
+
+    # Memory info
+    gc.collect()
+    attrs["free_memory_bytes"] = gc.mem_free()
+
+    # WiFi signal strength (RSSI)
+    try:
+        import network
+        wlan = network.WLAN(network.STA_IF)
+        if wlan.isconnected():
+            rssi = wlan.status("rssi")
+            attrs["wifi_rssi"] = rssi
+            # Signal quality as percentage (rough approximation)
+            # RSSI typically ranges from -30 (excellent) to -90 (unusable)
+            quality = max(0, min(100, 2 * (rssi + 100)))
+            attrs["wifi_signal_percent"] = quality
+    except Exception:
+        pass
+
+    try:
+        client.publish(
+            ATTRIBUTES_TOPIC.encode(),
+            json.dumps(attrs).encode(),
+            retain=True,
+        )
+    except Exception as e:
+        print(f"MQTT attributes publish error: {e}")
+
+
 _last_ping = 0
 _ping_interval = 30000  # Ping every 30 seconds to keep connection alive
+
+_last_attributes = 0
+_attributes_interval = 60000  # Publish attributes every 60 seconds
 
 
 def check_messages():
     """Non-blocking check for incoming messages. Call this frequently."""
-    global connected, _last_ping
+    global connected, _last_ping, _last_attributes
 
     # Try to reconnect if disconnected
     if not connected or client is None:
@@ -199,8 +252,9 @@ def check_messages():
         finally:
             client.sock.setblocking(True)
 
-        # Periodic ping to keep connection alive
         now = time.ticks_ms()
+
+        # Periodic ping to keep connection alive
         if time.ticks_diff(now, _last_ping) > _ping_interval:
             _last_ping = now
             try:
@@ -208,6 +262,11 @@ def check_messages():
             except Exception as e:
                 print(f"MQTT ping failed: {e}")
                 connected = False
+
+        # Periodic attributes publishing
+        if time.ticks_diff(now, _last_attributes) > _attributes_interval:
+            _last_attributes = now
+            publish_attributes()
 
     except OSError:
         pass  # No message waiting (EAGAIN)
@@ -263,6 +322,7 @@ def setup(animation_names):
     if connect():
         publish_discovery()
         publish_state()
+        publish_attributes()
         return True
     return False
 
