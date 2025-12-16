@@ -12,11 +12,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-# GitHub repo for fetching CI artifacts via nightly.link
-GITHUB_REPO = "ldn-house/tree"
-GITHUB_WORKFLOW = "build.yml"
-GITHUB_BRANCH = "main"
-ARTIFACT_NAME = "firmware"
+# Import shared GitHub configuration
+from github import GITHUB_BRANCH, GITHUB_REPO, nightly_link_url
 
 
 def usb_run(*args):
@@ -30,9 +27,7 @@ def fetch_github_artifacts(branch: str = GITHUB_BRANCH) -> list[Path]:
     """
     import httpx
 
-    # nightly.link provides unauthenticated access to GitHub Actions artifacts
-    # URL format: https://nightly.link/<owner>/<repo>/workflows/<workflow>/<branch>/<artifact>.zip
-    url = f"https://nightly.link/{GITHUB_REPO}/workflows/{GITHUB_WORKFLOW}/{branch}/{ARTIFACT_NAME}.zip"
+    url = nightly_link_url(branch)
 
     print("Fetching latest firmware from GitHub CI...")
     print(f"  URL: {url}")
@@ -206,7 +201,7 @@ if __name__ == "__main__":
         # Note: --all, --config, --coords are ignored when using --github
         # since we use whatever the CI produced
     elif args.all:
-        files = ["main.py", "ota.py", "mqtt.py", "config.py"]
+        files = ["main.py", "ota.py", "mqtt.py", "selfupdate.py", "github.py", "config.py"]
         if args.coords:
             files.append("coordinates/coords_compact.txt")
     elif args.config:

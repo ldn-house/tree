@@ -542,6 +542,53 @@ def _handle_client(client, addr):
             time.sleep(0.5)
             machine.reset()
 
+        elif path == "/update/github" and method == "POST":
+            # Self-update from GitHub CI
+            try:
+                import selfupdate
+                branch = query_params.get("branch", "main")
+                # Don't reboot immediately - send response first
+                _send_response(client, "200 OK", "application/json",
+                              f'{{"success": true, "message": "Starting update from branch: {branch}"}}')
+                client.close()
+                # Now start the update (will reboot on success)
+                selfupdate.download_and_apply(branch=branch, reboot=True)
+            except ImportError:
+                _send_response(client, "500 Internal Server Error", "application/json",
+                              '{"error": "selfupdate module not available"}')
+            except Exception as e:
+                _send_response(client, "500 Internal Server Error", "application/json",
+                              f'{{"error": "{e}"}}')
+
+        elif path == "/update/github/status":
+            # Check self-update status
+            try:
+                import selfupdate
+                status = selfupdate.get_status()
+                response = f'{{"in_progress": {"true" if status["in_progress"] else "false"}, '
+                response += f'"status": "{status["status"]}", '
+                response += f'"error": {f\'"{status["error"]}"\' if status["error"] else "null"}}}'
+                _send_response(client, "200 OK", "application/json", response)
+            except ImportError:
+                _send_response(client, "200 OK", "application/json",
+                              '{"error": "selfupdate module not available"}')
+
+        elif path == "/update/github/check":
+            # Check if updates are available
+            try:
+                import selfupdate
+                branch = query_params.get("branch", "main")
+                info = selfupdate.check_for_updates(branch)
+                if info:
+                    _send_response(client, "200 OK", "application/json",
+                                  f'{{"available": true, "branch": "{info["branch"]}"}}')
+                else:
+                    _send_response(client, "200 OK", "application/json",
+                                  '{"available": false, "error": "Check failed"}')
+            except ImportError:
+                _send_response(client, "200 OK", "application/json",
+                              '{"error": "selfupdate module not available"}')
+
         else:
             _send_response(client, "404 Not Found", "text/plain", "Not Found")
 

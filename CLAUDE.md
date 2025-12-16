@@ -18,7 +18,7 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 # Flash via USB (saves as main.py, auto-runs on boot)
 ./flash.py
 
-# Flash all scripts via USB (main, ota, mqtt, config)
+# Flash all scripts via USB (main, ota, mqtt, selfupdate, github, config)
 ./flash.py --all
 
 # Flash all scripts + coordinates
@@ -48,6 +48,8 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 - `main.py` - MicroPython LED controller with animations (runs on Pico)
 - `mqtt.py` - MQTT client for Home Assistant integration (auto-discovery, state sync)
 - `ota.py` - WiFi OTA update server with HTTP API (runs in background thread)
+- `selfupdate.py` - Self-update from GitHub CI (downloads and applies firmware)
+- `github.py` - Shared GitHub CI configuration (repo, workflow, artifact names)
 - `config.py` - WiFi credentials, MQTT settings (gitignored)
 - `flash.py` - uv script (PEP 723) to flash/run code via USB or OTA
 - `simulator.html` - Browser-based simulator using Pyodide (runs same Python code)
@@ -68,6 +70,10 @@ Once connected to WiFi, the Pico exposes an HTTP API on port 8080:
 |----------|--------|-------------|
 | `/` | GET | Status: hostname, IP, uptime, current animation, MQTT status |
 | `/update?file=X` | POST | Push new code, reboots after write |
+| `/update/github?branch=X` | POST | Self-update from GitHub CI (default: main branch) |
+| `/update/github/status` | GET | Check self-update progress |
+| `/update/github/check?branch=X` | GET | Check if updates available |
+| `/reboot` | POST | Reboot the Pico |
 | `/gc` | GET | Trigger garbage collection |
 | `/mqtt` | GET | MQTT debug info (connection state, pending commands) |
 | `/calibrate/start` | GET | Enter calibration mode (stops animations) |
@@ -77,6 +83,20 @@ Once connected to WiFi, the Pico exposes an HTTP API on port 8080:
 | `/calibrate/clear` | GET | Turn off all LEDs in calibration mode |
 
 mDNS (`tree.local`) is partially implemented but may not work on all networks.
+
+### Self-Update from GitHub CI
+
+The Pico can update itself directly from GitHub CI artifacts without needing USB or a host machine:
+
+```bash
+# Trigger self-update via curl (from any machine on the network)
+curl -X POST http://192.168.2.149:8080/update/github
+
+# Update from a specific branch
+curl -X POST http://192.168.2.149:8080/update/github?branch=feature-branch
+```
+
+This downloads the latest firmware ZIP from [nightly.link](https://nightly.link), extracts it, writes the files, and reboots. The update includes: main.py, ota.py, mqtt.py, selfupdate.py, github.py.
 
 ## MQTT / Home Assistant
 

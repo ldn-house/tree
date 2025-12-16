@@ -16,7 +16,7 @@ jobs:
       - name: Bundle firmware
         run: |
           mkdir -p firmware
-          cp main.py ota.py mqtt.py firmware/
+          cp main.py ota.py mqtt.py selfupdate.py github.py firmware/
           # Include coordinates if present
           if [ -f coordinates/coords_compact.txt ]; then
             cp coordinates/coords_compact.txt firmware/
