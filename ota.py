@@ -352,8 +352,8 @@ def _handle_update(body, filename="main.py", reboot=True):
                     f.write(partial_body)
                     total_written += len(partial_body)
 
-                # Stream remaining data in chunks
-                chunk_size = 512  # Small chunks to minimize memory usage
+                # Stream remaining data in chunks (larger chunks = fewer flash writes)
+                chunk_size = 1024
                 while total_written < content_length:
                     remaining = content_length - total_written
                     to_read = min(chunk_size, remaining)
@@ -363,10 +363,8 @@ def _handle_update(body, filename="main.py", reboot=True):
                     f.write(chunk)
                     total_written += len(chunk)
 
-                    # Periodic GC to prevent fragmentation
-                    if total_written % 4096 == 0:
-                        gc.collect()
-
+            # GC after file is closed to free buffers
+            gc.collect()
             bytes_written = total_written
         else:
             # Legacy mode: body is bytes
@@ -416,6 +414,9 @@ def _handle_client(client, addr):
             should_reboot = filename.endswith(".py")
             if "reboot" in query_params:
                 should_reboot = query_params["reboot"].lower() in ("1", "true", "yes")
+
+            # Extend timeout for large uploads (flash writes can be slow)
+            client.settimeout(30.0)
 
             # Use streaming mode to avoid large memory allocations
             stream_params = (client, content_length, partial_body)
