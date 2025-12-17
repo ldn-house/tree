@@ -432,14 +432,15 @@ def wave(color1, color2, wait_ms=50, cycles=3):
 def warm_white(duration_ms=10000):
     """Solid warm white glow."""
     warm = (255, 140, 50)  # Warm white (more orange/candle-like)
-    for i in range(LED_COUNT):
-        strip[i] = scale(warm)
-    safe_write()
 
     start = time.ticks_ms()
     while time.ticks_diff(time.ticks_ms(), start) < duration_ms:
         if check_interrupt():
             return
+        # Reapply color to pick up brightness changes
+        for i in range(LED_COUNT):
+            strip[i] = scale(warm)
+        safe_write()
         time.sleep_ms(100)
 
 
