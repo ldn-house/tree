@@ -112,7 +112,7 @@ Requirements:
 6. Playback MUST NOT starve the watchdog, and MUST keep MQTT keepalives going. The firmware SHOULD defer non-essential MQTT publishes and Wi-Fi housekeeping until the gap after a latch.
 7. `T0` is `delay_ms` after the `play` request is accepted (default 0, max 30000). This gives a person time to start recording.
 
-**Rate.** The firmware MUST sustain `min_frame_ms <= 33` (30 fps) with 500 LEDs and SHOULD sustain `min_frame_ms <= 20` (50 fps). It reports the value it actually supports in `GET /calibrate`, and the host never builds frames shorter than that. The standard sequences use 66–100 ms frames because the phone camera is the bottleneck (see the findings report), so the firmware rate limit is a ceiling, not the working point.
+**Rate.** With PIO + DMA the firmware starts each transfer at `due - write_us`, where `write_us` is 500 × 30 µs plus the reset gap, and logs latch error against the DMA-completion estimate. The firmware MUST sustain `min_frame_ms <= 33` (30 fps) with 500 LEDs and SHOULD sustain `min_frame_ms <= 20` (50 fps). It reports the value it actually supports in `GET /calibrate`, and the host never builds frames shorter than that. The standard sequences use 66–100 ms frames because the phone camera is the bottleneck (see the findings report), so the firmware rate limit is a ceiling, not the working point.
 
 **Budget on a Pico 2W.** A 500-LED write is 500 × 24 bits × 1.25 µs = 15 ms on the wire whatever the driver. With today's bit-banged `neopixel` that time is spent with IRQs disabled (review M2). That still fits 30 fps but stalls Wi-Fi. With a PIO + DMA driver the write runs in the background, which is the recommended design. Expanding the next frame SHOULD happen during the current frame's hold time, so that only a buffer swap and DMA kick remain at the deadline. Two cheap ways to expand:
 
@@ -141,9 +141,11 @@ async def play(seq, loops, t0_us):
 
 ## 6. HTTP API
 
-These endpoints live on the existing control server (port 8080). All responses are JSON with `Content-Type: application/json`. Errors use `{"error": "..."}` with 400 (bad request), 409 (wrong state) or 413 (too large).
+These endpoints live on the existing control server (port 8080). All responses are JSON with `Content-Type: application/json`. Errors use `{"error": "..."}` with 400 (bad request), 401 (missing or wrong token), 409 (wrong state) or 413 (too large).
 
-Every `/calibrate*` response MUST include `Access-Control-Allow-Origin: *`, and the server MUST answer `OPTIONS` preflight requests with `Access-Control-Allow-Methods: GET, POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type`, and `Access-Control-Allow-Private-Network: true`. This lets a browser page on another origin drive calibration (section 10 explains the remaining mixed-content limits).
+**Authentication.** Every mutating endpoint requires the shared HTTP token from `config.py` (`HTTP_TOKEN`), sent as `Authorization: Bearer <token>` or `X-Tree-Token: <token>`. That covers `/calibrate/start`, `stop`, `sequence`, `play`, `halt` and `frame`, and the legacy `led`, `binary` and `clear`. A missing or wrong token gets 401. The read-only endpoints `GET /calibrate`, `/calibrate/status` and `/calibrate/log` stay open. Host tools take the token from `--token`, then the `TREE_TOKEN` environment variable, then `config.py`'s `HTTP_TOKEN`. MQTT commands need no token; broker authentication covers them.
+
+**CORS.** Every `/calibrate*` response MUST include `Access-Control-Allow-Origin: *`. The server MUST answer `OPTIONS` preflight requests with `Access-Control-Allow-Methods: GET, POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, Authorization, X-Tree-Token` and `Access-Control-Allow-Private-Network: true`. This lets a browser page on another origin drive calibration (section 10 explains the remaining mixed-content limits).
 
 | Endpoint | Method | Body | Effect |
 |---|---|---|---|
