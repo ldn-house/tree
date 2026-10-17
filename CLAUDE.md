@@ -59,7 +59,7 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 - `render.py` - Headless effect renderer (GIF, contact sheet, metrics)
 - `smoke.py` - Validates every effect (CI: `.github/workflows/effects.yml`)
 - `new_effect.py` / `push_effect.py` - Scaffold an effect; push effect files over OTA
-- `tools/` - `mp_check.py` (MicroPython allocation check), `mock_tree.py` (local stand-in for the effects OTA API)
+- `tools/` - `mp_check.py` (MicroPython allocation check), `mock_tree.py` (local stand-in for the firmware's effects API)
 
 ### Calibration Tools (for 3D coordinate mapping)
 
@@ -149,4 +149,4 @@ micropython tools/mp_check.py   # every render() is allocation-free on MicroPyth
 
 Attach `sheet.png` (and the GIF) to PRs that change an effect.
 
-To try an effect on the tree without a firmware update, use `./push_effect.py <name> --host <ip> --select`. It needs the firmware's effects OTA API; see "Pushing one effect over OTA" in `docs/effect-api.md`.
+To try an effect on the tree without a firmware update, use `./push_effect.py <name> --host <ip> --activate`. It needs the firmware's effects API; see "Pushing one effect over OTA" in `docs/effect-api.md`.

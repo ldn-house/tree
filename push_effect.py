@@ -3,29 +3,34 @@
 # requires-python = ">=3.10"
 # dependencies = ["numpy", "pillow"]
 # ///
-"""Push effect files to the tree over Wi-Fi, without a firmware update or reboot.
+"""Hot-push effects to the tree over Wi-Fi, without a firmware update or reboot.
 
     ./push_effect.py aurora --host 192.168.2.149            # check, upload, verify
-    ./push_effect.py aurora --host tree.local --select      # ...and switch to it
-    ./push_effect.py _util rainbow_cycle --host tree.local  # several files, shared modules first
+    ./push_effect.py aurora --host tree.local --activate    # ...and switch to it
+    ./push_effect.py aurora sparkle --host tree.local       # several effects
     ./push_effect.py aurora --dry-run                       # checks only, no network
+    ./push_effect.py aurora --host tree.local --delete      # drop the pushed copy
 
 Before uploading, each effect goes through the smoke checks (renders, power
-budget, determinism, pure imports) and every file is compiled with mpy-cross.
-If the device doesn't list the effect in its EFFECTS yet, effects/__init__.py
-is pushed as well, last.
+budget, determinism, pure imports) and is compiled with mpy-cross.
 
-The device side is the effects OTA API described in docs/effect-api.md
-("Pushing one effect over OTA"). tools/mock_tree.py implements it locally for
-testing. --host defaults to $TREE_HOST; an auth token, if the firmware requires
-one, comes from --token or $TREE_TOKEN.
+The device stores a pushed effect as an overlay that replaces (or adds to) the
+firmware's copy until the next firmware install. Only effect modules can be
+pushed; shared modules (effects/_util.py etc.) ship with firmware. A new
+effect doesn't need registering on the device. See "Pushing one effect over
+OTA" in docs/effect-api.md; tools/mock_tree.py is a local stand-in.
+
+--host defaults to $TREE_HOST; the HTTP token comes from --token or $TREE_TOKEN.
 """
 
 import argparse
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -36,8 +41,6 @@ sys.path.insert(0, str(ROOT))
 import effects  # noqa: E402
 import render  # noqa: E402
 import smoke  # noqa: E402
-
-SHARED_ORDER = ["_util", "_output", "_coords"]
 
 
 class Device:
@@ -56,72 +59,89 @@ class Device:
         except urllib.error.HTTPError as e:
             return e.code, _json(e.read())
 
-    def list(self):
+    def effects(self):
+        """{name: entry} from GET /effects."""
         status, data = self.request("GET", "/effects")
         if status == 404:
-            sys.exit(f"{self.base}/effects not found: this firmware has no effects OTA API yet "
+            sys.exit(f"{self.base}/effects not found: this firmware has no effects API "
                      "(see docs/effect-api.md); use ./flash.py --ota for a full update")
-        if status != 200 or not isinstance(data.get("effects"), list):
-            sys.exit(f"GET {self.base}/effects did not return the effects OTA listing "
-                     f"(HTTP {status}); is this the tree?")
-        return data
+        listing = data.get("effects") if isinstance(data, dict) else None
+        if status != 200 or not isinstance(listing, list):
+            sys.exit(f"GET {self.base}/effects did not return the effects listing (HTTP {status}); is this the tree?")
+        return {e.get("name"): e for e in listing if isinstance(e, dict)}
 
-    def upload(self, module, source):
-        digest = hashlib.sha256(source).hexdigest()
-        status, data = self.request("POST", f"/effects/{module}", source, {
-            "Content-Type": "text/x-python",
-            "X-Content-SHA256": digest,
+    def push(self, name, body, mpy, activate):
+        query = []
+        if mpy:
+            query.append("format=mpy")
+        if activate:
+            query.append("activate=1")
+        path = f"/effects/{name}" + ("?" + "&".join(query) if query else "")
+        return self.request("PUT", path, body, {
+            "Content-Type": "application/octet-stream" if mpy else "text/x-python",
+            "X-Content-SHA256": hashlib.sha256(body).hexdigest(),
         })
-        return status, data, digest
 
 
 def _json(raw):
     try:
         return json.loads(raw.decode() or "{}")
     except ValueError:
-        return {"raw": raw.decode(errors="replace")[:500]}
+        return {"error": raw.decode(errors="replace")[:500]}
 
 
-def local_checks(modules):
+def local_checks(names):
     rep = smoke.Report()
     coords, _ = render.find_coords()
-    for m in modules:
-        if m.startswith("_"):
-            continue
-        print(f"check {m}")
-        mod = effects.load(m)
-        smoke.check_metadata(rep, m, mod)
-        smoke.check_imports(rep, m)
-        smoke.check_render(rep, m, mod, coords, 3.0, 20)
-        smoke.check_variants(rep, m, mod, coords, 20)
+    for name in names:
+        print(f"check {name}")
+        mod = effects.load(name)
+        smoke.check_metadata(rep, name, mod)
+        smoke.check_imports(rep, name)
+        smoke.check_render(rep, name, mod, coords, 3.0, 20)
+        smoke.check_variants(rep, name, mod, coords, 20)
     smoke.check_mpy_cross(rep, required=False)
     return rep.failures
 
 
+def compile_mpy(name):
+    uvx = shutil.which("uvx")
+    if not uvx:
+        sys.exit("--mpy needs uvx (for mpy-cross)")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / f"{name}.mpy"
+        subprocess.run([uvx, "--from", "mpy-cross", "mpy-cross", "-o", str(out), f"effects/{name}.py"],
+                       cwd=ROOT, check=True)
+        return out.read_bytes()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("modules", nargs="+", help="effect names or shared modules (_util, _output, _coords, __init__)")
+    ap.add_argument("names", nargs="+", help="effect names (or effects/<name>.py paths)")
     ap.add_argument("--host", default=os.environ.get("TREE_HOST"))
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--token", default=os.environ.get("TREE_TOKEN"))
-    ap.add_argument("--select", action="store_true", help="switch the tree to the (last) pushed effect")
+    ap.add_argument("--activate", "--select", action="store_true", help="switch the tree to the last effect pushed")
+    ap.add_argument("--mpy", action="store_true",
+                    help="push bytecode compiled by mpy-cross (must match the device's MicroPython .mpy version)")
+    ap.add_argument("--delete", action="store_true", help="remove the pushed overlay, reverting to the firmware copy")
     ap.add_argument("--dry-run", action="store_true", help="run the local checks only")
     ap.add_argument("--no-check", action="store_true", help="skip the local checks (not recommended)")
-    ap.add_argument("--timeout", type=float, default=15.0)
+    ap.add_argument("--timeout", type=float, default=20.0)
     args = ap.parse_args()
 
-    modules = []
-    for m in args.modules:
-        m = Path(m).stem if m.endswith(".py") else m
-        if not (ROOT / "effects" / f"{m}.py").exists():
-            sys.exit(f"effects/{m}.py not found")
-        if not m.startswith("_") and m not in effects.EFFECTS:
-            sys.exit(f"{m!r} is not in EFFECTS (effects/__init__.py); register it first")
-        if m not in modules:
-            modules.append(m)
+    names = []
+    for n in args.names:
+        n = Path(n).stem if n.endswith(".py") else n
+        if n.startswith("_"):
+            sys.exit(f"{n} is a shared module; shared modules ship with firmware (./flash.py), not hot-push")
+        if not args.delete and not (ROOT / "effects" / f"{n}.py").exists():
+            sys.exit(f"effects/{n}.py not found")
+        if n not in names:
+            names.append(n)
 
-    if not args.no_check:
-        failures = local_checks(modules)
+    if not args.delete and not args.no_check:
+        failures = local_checks(names)
         if failures:
             print("\nlocal checks failed; not pushing:")
             for f in failures:
@@ -134,53 +154,36 @@ def main():
         sys.exit("--host (or $TREE_HOST) is required")
 
     dev = Device(args.host, args.port, args.token, args.timeout)
-    before = dev.list()
-    if any(not m.startswith("_") and m not in before.get("effects", []) for m in modules) \
-            and "__init__" not in modules:
-        modules.append("__init__")
-    if "__init__" in modules:
-        # Pushing the registry must not advertise effects the device lacks.
-        have = set(before.get("files", {})) | set(modules)
-        missing = [n for n in effects.EFFECTS if n not in have]
-        if missing:
-            sys.exit(f"effects/__init__.py lists {', '.join(missing)}, which the device doesn't have; "
-                     f"push them too: ./push_effect.py {' '.join(modules[:-1] + missing)} ...")
-    # Shared modules first so effects that need new helpers find them; the
-    # registry last so the device never lists an effect it can't import.
-    modules.sort(key=lambda m: (0, SHARED_ORDER.index(m)) if m in SHARED_ORDER
-                 else (2, 0) if m == "__init__" else (1, 0))
+    dev.effects()  # fail early if this isn't the tree
 
-    for m in modules:
-        source = (ROOT / "effects" / f"{m}.py").read_bytes()
-        status, data, digest = dev.upload(m, source)
-        if status != 200 or not data.get("ok"):
-            print(f"push {m}: FAILED (HTTP {status})\n  {data.get('error', data)}")
-            print("  the device kept its previous version of this file")
-            return 1
-        if data.get("sha256") != digest:
-            print(f"push {m}: device stored sha256 {data.get('sha256')}, expected {digest}")
-            return 1
-        print(f"push {m}: ok ({len(source)} bytes, sha256 {digest[:12]})")
+    if args.delete:
+        for n in names:
+            status, data = dev.request("DELETE", f"/effects/{n}")
+            print(f"delete {n}: " + ("ok" if status == 200 else f"FAILED (HTTP {status}) {data.get('error', data)}"))
+            if status != 200:
+                return 1
+        return 0
 
-    after = dev.list()
-    files = after.get("files", {})
-    for m in modules:
-        want = hashlib.sha256((ROOT / "effects" / f"{m}.py").read_bytes()).hexdigest()
-        if files.get(m) != want:
-            print(f"verify {m}: device reports {files.get(m)}, expected {want}")
+    for k, n in enumerate(names):
+        body = compile_mpy(n) if args.mpy else (ROOT / "effects" / f"{n}.py").read_bytes()
+        activate = args.activate and k == len(names) - 1
+        status, data = dev.push(n, body, args.mpy, activate)
+        if status in (401, 403):
+            print(f"push {n}: unauthorised (HTTP {status}); pass --token or set $TREE_TOKEN")
             return 1
-    print(f"verified {len(modules)} file(s) on {dev.base}")
+        if status != 200 or data.get("effect") != n:
+            print(f"push {n}: FAILED (HTTP {status})\n  {data.get('error', data)}")
+            print("  the device kept its previous version of this effect")
+            return 1
+        print(f"push {n}: ok ({len(body)} bytes{', activated' if data.get('activated') else ''})")
 
-    if args.select:
-        name = [m for m in modules if not m.startswith("_")][-1:]
-        if not name:
-            print("--select: no effect among the pushed files")
+    listing = dev.effects()
+    for n in names:
+        entry = listing.get(n)
+        if not entry or not entry.get("overlay") or entry.get("error"):
+            print(f"verify {n}: device reports {entry}")
             return 1
-        status, data = dev.request("POST", f"/effects/{name[0]}/select")
-        if status != 200 or not data.get("ok"):
-            print(f"select {name[0]}: FAILED (HTTP {status}) {data}")
-            return 1
-        print(f"selected {name[0]}")
+    print(f"verified {len(names)} effect(s) on {dev.base}")
     return 0
 
 

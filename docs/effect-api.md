@@ -126,41 +126,34 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 | `./new_effect.py <name> [--flat]` | Scaffold `effects/<name>.py` from a template, register it in `EFFECTS` and render it once. |
 | `./render.py <effect> --watch` | Re-render on every save in `effects/`. |
 | `./serve.py` | Browser viewer (`viewer/`), hot-reloads changed effect files. |
-| `./push_effect.py <effect...> --host H [--select]` | Run the local checks, then push just those files to the tree over Wi-Fi (see below). |
+| `./push_effect.py <effect...> --host H [--activate]` | Run the local checks, then hot-push those effects to the tree over Wi-Fi (see below). |
 | `./smoke.py [effect...]` | Everything CI checks: metadata, pure imports, renders without exceptions, not all-black, within budget, deterministic, survives params at min/max and no coordinates, mpy-cross compile, MicroPython allocation check. |
 
 The renderer draws front, side and top projections of the real coordinates. Display brightness is gamma-lifted (1/2.2) so that dim output stays visible; the numbers in `metrics.json` are the actual output values.
 
 ## Pushing one effect over OTA
 
-`./push_effect.py` updates effect files on a running tree without a firmware build or a reboot:
+`./push_effect.py <effect...> --host H [--activate]` hot-pushes effect modules to a running tree, with no firmware build and no reboot:
 
-1. It runs the smoke checks on each effect and compiles every file with mpy-cross. Failures stop the push.
-2. `GET /effects` reads what the device has.
-3. If an effect isn't registered on the device yet, it adds `effects/__init__.py` to the push. It refuses when that registry would list effects the device lacks.
-4. It uploads with `POST /effects/<module>`: shared modules (`_util`, `_output`, `_coords`) first, effect modules next, `__init__` last.
-5. It re-reads `GET /effects` and checks that every SHA-256 matches.
-6. With `--select`, it calls `POST /effects/<name>/select`.
+1. It runs the smoke checks on each effect and compiles it with mpy-cross. Failures stop the push.
+2. It uploads with `PUT /effects/<name>`, sending `X-Content-SHA256`. With `--activate`, the last effect is pushed with `?activate=1`.
+3. It re-reads `GET /effects` and checks that each effect is listed with `overlay: true` and no `error`.
 
-`tools/mock_tree.py` implements the device side for local testing and is an executable reference for it.
+Other options:
+- `--delete` removes a pushed overlay, reverting to the firmware's copy.
+- `--mpy` pushes mpy-cross bytecode. The `.mpy` version must match the device's MicroPython.
 
-### What the firmware needs to provide
+The token comes from `--token` or `$TREE_TOKEN` and is sent as `Authorization: Bearer`. `tools/mock_tree.py` mirrors the endpoints for local testing.
 
-On the existing HTTP server (port 8080), with whatever authentication the rest of the OTA API uses. The client sends `Authorization: Bearer $TREE_TOKEN` when a token is set.
+The firmware (`firmware/app/api.py`) defines the device side:
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /effects` | `200` JSON `{"effects": [...EFFECTS in order], "files": {"<module>": "<sha256 hex>", ...}, "current": "<name or null>"}`. `files` covers every `effects/*.py` on the device, keyed by module name without `.py`. |
-| `POST /effects/<module>` | Body: the file's source; `Content-Length` required; `X-Content-SHA256` header. `<module>` matches `[A-Za-z_][A-Za-z0-9_]*`. See the steps below. |
-| `POST /effects/<name>/select` | Lock the tree to effect `<name>`, as choosing it in Home Assistant does. `200 {"ok": true, "current": name}`, `404` if unknown. |
+| `GET /effects` | `{"effects": [{"name", "duration_ms", "needs_coords", "params": {k: {"default", "min", "max", "value"}}, "overlay", "eligible", "error"}], "running", "fx_error"}` |
+| `PUT` or `POST /effects/<name>` | Auth required. The body is module source, or `.mpy` (sniffed, or `?format=mpy`), at most 32 KB. Optional `X-Content-SHA256`; `?activate=1` also selects the effect. The device compile-checks the module, imports it under a staging name, builds `Effect(ctx)` and renders t=0 and t=33. Only then does it replace the overlay (`/fx/fx_<name>.py`) and hot-reload. Replies `200 {"effect", "overlay": true, "activated", "duration_ms", "params", "needs_coords"}`, or `400 {"error"}` and keeps the previous version. |
+| `DELETE /effects/<name>` | Auth required. Removes the overlay. |
 
-`POST /effects/<module>` must handle the upload as follows:
-
-1. Reject unless exactly `Content-Length` bytes arrived and their SHA-256 matches the header (`400`).
-2. Write to `effects/<module>.py.tmp` and `compile()` it.
-3. Keep the old file as `.bak`, rename the new one into place, and drop `effects` and `effects.*` from `sys.modules`.
-4. For an effect module, import it, construct `Effect(ctx)` and render one frame. For `__init__` or a shared module, do that for every registered effect.
-5. On any failure, restore the `.bak`, purge again, and reply `422 {"ok": false, "error": "<exception text>"}`. The previously working version must keep running.
-6. On success, reply `200 {"ok": true, "file": "effects/<module>.py", "bytes": n, "sha256": "<hex>"}`. If the replaced effect is the one currently running, restart it from the new module. No reboot.
-
-The runtime should also skip any name in `EFFECTS` whose module is missing or fails to import, rather than stopping. Files pushed this way persist until the next full firmware update overwrites them.
+Limits:
+- Only effect modules can be pushed. Shared modules (`_util`, `_output`, `_coords`) and `__init__` ship with firmware.
+- A pushed effect with a new name is added without editing `EFFECTS`.
+- Installing new firmware wipes all overlays.

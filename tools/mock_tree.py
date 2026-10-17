@@ -3,15 +3,19 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""A stand-in for the tree's effects OTA API, for testing push_effect.py and
-as an executable reference for the firmware side (docs/effect-api.md).
+"""A local stand-in for the tree's effects API, for testing push_effect.py
+without hardware. It mirrors the firmware's endpoints (firmware/app/api.py):
 
-    tools/mock_tree.py --port 8080 [--state DIR]
+    GET    /effects                list effects (bundled + overlays)
+    PUT    /effects/<name>         hot-push an effect (also POST); ?activate=1
+    DELETE /effects/<name>         remove a pushed overlay
 
-It keeps its own copy of effects/ in DIR (default .scratch/mock-tree), seeded
-from the repository. Uploads are validated the way the device should validate
-them: length and SHA-256, compile, import, construct and render one frame,
-with the previous file restored on any failure.
+    tools/mock_tree.py --port 8080 [--token SECRET]
+
+Bundled effects come from this checkout's effects/; pushed ones are kept in
+memory. An upload is validated like the device does it: optional
+X-Content-SHA256, compile, import under a staging name, build Effect(ctx) and
+render t=0 and t=33; only then does it replace the overlay.
 """
 
 import argparse
@@ -20,66 +24,64 @@ import http.server
 import json
 import random
 import re
-import shutil
 import sys
-import traceback
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULE = re.compile(r"^/effects/([A-Za-z_][A-Za-z0-9_]*)$")
-SELECT = re.compile(r"^/effects/([a-z][a-z0-9_]*)/select$")
+sys.path.insert(0, str(ROOT))
+
+import effects  # noqa: E402
+
+NAME = re.compile(r"^/effects/([a-z][a-z0-9_]*)(\?.*)?$")
+MAX_EFFECT = 32 * 1024
+N = 500
 
 
 class Tree:
-    def __init__(self, state):
-        self.state = Path(state)
-        pkg = self.state / "effects"
-        if not pkg.exists():
-            pkg.mkdir(parents=True)
-            for f in (ROOT / "effects").glob("*.py"):
-                shutil.copy(f, pkg / f.name)
-        sys.path.insert(0, str(self.state))
-        self.current = None
+    def __init__(self):
+        self.overlays = {}  # name -> module
+        self.running = effects.EFFECTS[0]
 
-    def purge(self):
-        for k in [k for k in sys.modules if k == "effects" or k.startswith("effects.")]:
-            del sys.modules[k]
+    def module(self, name):
+        return self.overlays.get(name) or effects.load(name)
 
-    def files(self):
-        return {p.stem: hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in sorted((self.state / "effects").glob("*.py"))}
+    def names(self):
+        return list(effects.EFFECTS) + [n for n in self.overlays if n not in effects.EFFECTS]
 
     def listing(self):
-        self.purge()
-        import effects
-        return {"effects": list(effects.EFFECTS), "files": self.files(), "current": self.current}
+        out = []
+        for name in self.names():
+            mod = self.module(name)
+            out.append({
+                "name": name,
+                "duration_ms": mod.DURATION_MS,
+                "needs_coords": mod.NEEDS_COORDS,
+                "params": {k: {"default": v[0], "min": v[1], "max": v[2], "value": v[0]}
+                           for k, v in getattr(mod, "PARAMS", {}).items()},
+                "overlay": name in self.overlays,
+                "eligible": True,
+                "error": None,
+            })
+        return {"effects": out, "running": self.running, "fx_error": None}
 
-    def install(self, module, body):
-        path = self.state / "effects" / f"{module}.py"
-        backup = path.read_bytes() if path.exists() else None
-        compile(body, f"effects/{module}.py", "exec")
-        path.write_bytes(body)
-        try:
-            self.purge()
-            import effects
-            names = [module] if not module.startswith("_") else []
-            if module == "__init__" or module.startswith("_"):
-                names = [n for n in effects.EFFECTS if (self.state / "effects" / f"{n}.py").exists()]
-            for name in names:
-                mod = effects.load(name)
-                ctx = effects.Ctx(500, None, effects.defaults(mod), random.Random(0))
-                frame = bytearray(1500)
-                mod.Effect(ctx).render(0, frame)
-        except Exception:
-            if backup is None:
-                path.unlink()
-            else:
-                path.write_bytes(backup)
-            self.purge()
-            raise
+    def push(self, name, source):
+        code = compile(source, f"fx_{name}.py", "exec")
+        mod = types.ModuleType(f"fx_{name}__new")
+        exec(code, mod.__dict__)
+        if not hasattr(mod, "Effect"):
+            raise ValueError("module has no Effect class")
+        params = {k: v[0] for k, v in getattr(mod, "PARAMS", {}).items()}
+        inst = mod.Effect(effects.Ctx(N, None, params, random.Random(0)))
+        frame = bytearray(3 * N)
+        inst.render(0, frame)
+        inst.render(33, frame)
+        self.overlays[name] = mod
+        return {"duration_ms": mod.DURATION_MS, "params": getattr(mod, "PARAMS", {}),
+                "needs_coords": mod.NEEDS_COORDS}
 
 
-def make_handler(tree):
+def make_handler(tree, token):
     class Handler(http.server.BaseHTTPRequestHandler):
         def reply(self, status, data):
             body = json.dumps(data).encode()
@@ -89,36 +91,61 @@ def make_handler(tree):
             self.end_headers()
             self.wfile.write(body)
 
+        def authorised(self):
+            if not token:
+                return True
+            got = self.headers.get("Authorization", "").removeprefix("Bearer ").strip() or \
+                self.headers.get("X-Tree-Token", "")
+            if got != token:
+                self.reply(401, {"error": "unauthorised"})
+                return False
+            return True
+
         def do_GET(self):
             if self.path == "/effects":
                 return self.reply(200, tree.listing())
-            self.reply(404, {"ok": False, "error": "not found"})
+            self.reply(404, {"error": "not found"})
 
-        def do_POST(self):
-            m = SELECT.match(self.path)
-            if m:
-                if m.group(1) not in tree.listing()["effects"]:
-                    return self.reply(404, {"ok": False, "error": f"unknown effect {m.group(1)}"})
-                tree.current = m.group(1)
-                return self.reply(200, {"ok": True, "current": tree.current})
-            m = MODULE.match(self.path)
+        def do_PUT(self):
+            m = NAME.match(self.path)
             if not m:
-                return self.reply(404, {"ok": False, "error": "not found"})
-            module = m.group(1)
+                return self.reply(400, {"error": "effect names are lowercase letters, digits and _"})
+            if not self.authorised():
+                return
+            name = m.group(1)
+            query = dict(kv.split("=", 1) for kv in (m.group(2) or "?")[1:].split("&") if "=" in kv)
             length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length)
-            if len(body) != length:
-                return self.reply(400, {"ok": False, "error": "truncated body"})
-            digest = hashlib.sha256(body).hexdigest()
+            if length > MAX_EFFECT:
+                return self.reply(413, {"error": "too large"})
+            data = self.rfile.read(length)
             want = self.headers.get("X-Content-SHA256")
-            if want and want != digest:
-                return self.reply(400, {"ok": False, "error": f"sha256 mismatch: got {digest}"})
+            if want and hashlib.sha256(data).hexdigest() != want.strip().lower():
+                return self.reply(400, {"error": "X-Content-SHA256 does not match the body"})
+            if query.get("format") == "mpy" or (len(data) > 4 and data[0] == 0x4D and data[1] < 32):
+                return self.reply(400, {"error": "mock tree cannot run .mpy; push source"})
             try:
-                tree.install(module, body)
+                result = tree.push(name, data.decode())
+            except SyntaxError as e:
+                return self.reply(400, {"error": f"{e!r}"})
             except Exception as e:  # noqa: BLE001
-                return self.reply(422, {"ok": False, "error": "".join(
-                    traceback.format_exception_only(type(e), e)).strip()})
-            self.reply(200, {"ok": True, "file": f"effects/{module}.py", "bytes": length, "sha256": digest})
+                return self.reply(400, {"error": f"effect failed to load or render: {e!r}"})
+            activate = query.get("activate") in ("1", "true", "yes")
+            if activate:
+                tree.running = name
+            result.update({"effect": name, "overlay": True, "activated": activate})
+            self.reply(200, result)
+
+        do_POST = do_PUT
+
+        def do_DELETE(self):
+            m = NAME.match(self.path)
+            if not m:
+                return self.reply(404, {"error": "not found"})
+            if not self.authorised():
+                return
+            if tree.overlays.pop(m.group(1), None) is None:
+                return self.reply(404, {"error": "no hot-pushed effect named " + m.group(1)})
+            self.reply(200, {"effect": m.group(1), "overlay": False})
 
         def log_message(self, fmt, *args):
             print("mock-tree: " + fmt % args, flush=True)
@@ -129,11 +156,10 @@ def make_handler(tree):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--state", default=str(ROOT / ".scratch" / "mock-tree"))
+    ap.add_argument("--token", help="require this bearer token on writes")
     args = ap.parse_args()
-    tree = Tree(args.state)
-    print(f"mock tree on http://127.0.0.1:{args.port} (state in {args.state})", flush=True)
-    http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(tree)).serve_forever()
+    print(f"mock tree on http://127.0.0.1:{args.port}", flush=True)
+    http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(Tree(), args.token)).serve_forever()
 
 
 if __name__ == "__main__":
