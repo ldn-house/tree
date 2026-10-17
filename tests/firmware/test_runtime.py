@@ -269,3 +269,22 @@ def test_missing_config_still_runs(make_device, bundles):
     assert len(d.boots) == 0
     assert "config.py failed to load" in d.console()
     assert "engine: running" in d.console()
+
+
+def test_led_timing_and_power_budget_config(make_device, bundles):
+    d = make_device(bundles["v1"], LED_TIMING_NS=(350, 900, 750, 500), POWER_BUDGET_MA=3000, LED_MA_PER_CHANNEL=10)
+    st = d.wait_http(30)
+    assert st["led_timing_ns"] == [350, 900, 750, 500]
+    assert st["power"] == {"budget_ma": 3000, "ma_per_channel": 10, "estimated_ma": st["power"]["estimated_ma"],
+                           "volts": 12}
+    assert st["power_budget"] == 3000 * 255 // 10
+    d.post("/state", {"effect": "solid", "brightness": 255})
+    wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
+    time.sleep(0.5)
+    full, _ = frame_sum(d)
+    assert full <= 3000 * 255 // 10 and status(d)["power"]["estimated_ma"] <= 3000
+    # A bad timing falls back to the default instead of breaking the driver.
+    d2 = make_device(bundles["v1"], LED_TIMING_NS=(400, 850, 800, 100))
+    st = d2.wait_http(30)
+    assert st["led_timing_ns"] == [400, 850, 800, 450] and st["driver"] == "pio+dma"
+    assert "bad LED_TIMING_NS" in d2.console()

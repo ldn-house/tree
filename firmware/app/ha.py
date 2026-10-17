@@ -249,6 +249,7 @@ class HA:
             ("uptime", "Uptime", {"device_class": "duration", "unit_of_measurement": "s", "state_class": "total_increasing"}),
             ("fps", "Frame rate", {"unit_of_measurement": "fps", "state_class": "measurement", "icon": "mdi:filmstrip"}),
             ("cap_pct", "Power cap output", {"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:flash-triangle"}),
+            ("led_ma", "LED current (estimated, 12 V)", {"device_class": "current", "unit_of_measurement": "mA", "state_class": "measurement"}),
             ("reset", "Last reset cause", {"icon": "mdi:restart-alert"}),
             ("boot", "Boot status", {"icon": "mdi:shield-check"}),
             ("ip", "IP address", {"icon": "mdi:ip-network"}),

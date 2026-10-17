@@ -58,9 +58,12 @@ class Runtime:
             log("state: effect %s no longer exists, using auto" % self.state.get("effect"))
             self.state.d["effect"] = "auto"
 
-        self.driver = driver.create(self.n, cfg.LED_PIN)
-        self.out = outstage.create(self.n, cfg.POWER_BUDGET_PERCENT, cfg.GAMMA, cfg.COLOR_ORDER)
-        self.cal_out = outstage.create(self.n, cfg.POWER_BUDGET_PERCENT, None, cfg.COLOR_ORDER)
+        self.driver = driver.create(self.n, cfg.LED_PIN, cfg.LED_TIMING_NS)
+        budget = outstage.channel_budget(self.n, cfg.POWER_BUDGET_MA, cfg.LED_MA_PER_CHANNEL, cfg.POWER_BUDGET_PERCENT)
+        log("power: budget %d mA at 12 V (%d mA per channel) = channel sum %d" % (
+            outstage.estimated_ma(budget, cfg.LED_MA_PER_CHANNEL), cfg.LED_MA_PER_CHANNEL, budget))
+        self.out = outstage.create(self.n, budget, cfg.GAMMA, cfg.COLOR_ORDER)
+        self.cal_out = outstage.create(self.n, budget, None, cfg.COLOR_ORDER)
         self.engine = engine.Engine(self.n, self.state, self.fx, self.out, self.driver, cfg.FPS)
         self.engine.coords = coords.load(self.n, self.slot_dir)
         bootmgr.feed()
@@ -132,6 +135,14 @@ class Runtime:
         name = sorted(errs)[-1]
         return ("%s: %s" % (name, errs[name]))[:250]
 
+    def led_ma(self):
+        """Estimated strip current for the last effect frame, mA at 12 V."""
+        if self.engine.dark or self.engine.owner is not None:
+            return 0
+        out = self.out
+        shown = out.raw_total * out.factor // 4096 * self.state.get("brightness") // 255
+        return outstage.estimated_ma(shown, cfg.LED_MA_PER_CHANNEL)
+
     def diag(self):
         es = self.engine.status()
         return {
@@ -141,6 +152,7 @@ class Runtime:
             "fps": es["fps"],
             "capped": es["power_capped"],
             "cap_pct": es["cap_factor"],
+            "led_ma": self.led_ma(),
             "reset": (self.info.get("reset_cause") or "?") + (": " + self.reset_reason if self.reset_reason else ""),
             "boot": self.boot_status(),
             "ip": self.wifi.ip,
@@ -178,7 +190,14 @@ class Runtime:
             "overlays": self.fx.overlays(),
             "coords": coords.count(self.engine.coords),
             "driver": self.driver.mode,
+            "led_timing_ns": self.driver.timing_ns,
             "power_budget": self.out.budget,
+            "power": {
+                "budget_ma": outstage.estimated_ma(self.out.budget, cfg.LED_MA_PER_CHANNEL),
+                "ma_per_channel": cfg.LED_MA_PER_CHANNEL,
+                "estimated_ma": self.led_ma(),
+                "volts": 12,
+            },
             "wifi": self.wifi.status(),
             "mqtt": self.mqtt.status() if self.mqtt else None,
             "http": {"requests": self.http.requests, "rejected": self.http.rejected, "auth": bool(cfg.HTTP_TOKEN)},

@@ -36,5 +36,14 @@ MQTT_PASSWORD = "your_ha_password"
 # LED_COUNT = 500
 # LED_PIN = 0
 # COLOR_ORDER = "RGB"
-# POWER_BUDGET_PERCENT = 13   # per-frame cap, % of every LED at full white
+# LED_TIMING_NS = (400, 850, 800, 450)  # T0H, T0L, T1H, T1L in ns (800 kHz);
+#     MicroPython neopixel's timing. The BSS138 level shifter's slow rising
+#     edge means T0H shouldn't go much below 400 ns.
 # GAMMA = None                # e.g. 2.2 for perceptual dimming
+
+# Power, at the strip's 12 V supply (PSU: 12 V 20 A). The firmware scales
+# every frame so the estimated strip current stays within POWER_BUDGET_MA.
+# LED_MA_PER_CHANNEL = 8      # mA per colour channel of one pixel at full
+#                             # duty; ~0.3 W per pixel at full white. Measure!
+# POWER_BUDGET_MA = 1560      # mA at 12 V. 1560 (18.7 W) equals the old 13%
+#                             # cap; raise it only after measuring the draw.

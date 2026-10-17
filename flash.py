@@ -159,7 +159,17 @@ def check_config(path: Path):
             die(f"{path} has no {k}")
     if len(cfg["HTTP_TOKEN"]) < 8:
         die("HTTP_TOKEN must be at least 8 characters")
-    return {k: v for k, v in cfg.items() if k.isupper() and isinstance(v, (str, int, float, bool, type(None)))}
+    out = {}
+    for k, v in cfg.items():
+        if not k.isupper():
+            continue
+        if isinstance(v, (tuple, list)) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            out[k] = list(v)  # e.g. LED_TIMING_NS; the device writes it back as a tuple
+        elif isinstance(v, (str, int, float, bool, type(None))):
+            out[k] = v
+        else:
+            die(f"config.py: {k} can't be sent to the device (use strings, numbers, bools or lists of numbers)")
+    return out
 
 
 def usb(bundle: Path, extra_files):

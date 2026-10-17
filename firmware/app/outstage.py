@@ -13,5 +13,18 @@ except Exception:
     from app._output_fallback import Output, budget_for
 
 
-def create(n, percent, gamma, order):
-    return Output(n, budget_for(n, percent), gamma, order)
+def channel_budget(n, budget_ma, ma_per_channel, percent=None):
+    """The output stage's budget is a sum of channel values (0-255 each);
+    the config states it as current. One channel at 255 draws
+    ma_per_channel, so budget = budget_ma * 255 / ma_per_channel."""
+    if percent is not None:
+        return budget_for(n, percent)
+    return max(0, int(budget_ma * 255 // max(1, ma_per_channel)))
+
+
+def estimated_ma(channel_sum, ma_per_channel):
+    return channel_sum * ma_per_channel // 255
+
+
+def create(n, budget, gamma, order):
+    return Output(n, budget, gamma, order)

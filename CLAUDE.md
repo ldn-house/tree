@@ -9,8 +9,9 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 ## Hardware
 
 - **Target**: Pi Pico 2W running MicroPython 1.27.0 (RPI_PICO2_W; bundles are mpy v6.3 bytecode from mpy-cross 1.27). Measured on the board: 452,544 bytes heap free at an idle REPL, 2,621,440-byte filesystem
-- **LEDs**: 500x WS2811 12V RGB strip, RGB on the wire (`COLOR_ORDER`)
-- **Data signal**: 3.3V GPIO (GP0) → level shifter → 5V to LEDs, driven by a PIO state machine fed by DMA
+- **LEDs**: 500x WS2811 12 V 12 mm bullet pixels on 3-wire strands (JST-SM joins, power injected at the joins), RGB on the wire (`COLOR_ORDER`). About 0.3 W per pixel at full white (to be measured): ~150 W, ~12.5 A for all 500. PSU: 12 V 20 A.
+- **Data signal**: Pico GP0 (3.3 V) → 4-channel BSS138 level shifter (10 kΩ pull-ups; LV = 3V3, HV = Pico VBUS 5 V) → first pixel, driven by a PIO state machine fed by DMA. The shifter's high side rises only through its pull-up (RC ≈ 0.5 µs with the cable), so short high pulses can vanish: the default `LED_TIMING_NS` is MicroPython neopixel's (400, 850, 800, 450) ns, which drove this hardware before.
+- **Pico power**: from a USB hub on its own 5 V adapter; ground is shared with the strip through the level shifter.
 
 ## Commands
 
@@ -118,7 +119,7 @@ Discovery puts every entity under one device (identifier `xmas_tree_pico`, so th
 - Topics under `xmas_tree/`: `availability` (online/offline, last will), `state` + `set` (light), `settings`, `diag`, `update`, `cmd/...`, `calibrate/set` + `calibrate/state`.
 - Persisted state wins at boot: retained messages on command topics are ignored. HA's birth message (`homeassistant/status` = online) triggers re-discovery.
 
-**Power limiting:** the per-frame cap (default 13% of all LEDs at full white) is applied to the raw frame before brightness, so brightness 100% means "as bright as the PSU budget allows" and the slider always dims.
+**Power limiting:** each frame's estimated strip current, at 12 V, is capped at `POWER_BUDGET_MA` (default 1560 mA = 18.7 W, which is exactly the old 13% cap, kept because of past brownouts), using `LED_MA_PER_CHANNEL` (default 8 mA per colour channel at full duty, to be measured). The cap applies to the raw frame before brightness, so brightness 100% means "as bright as the budget allows" and the slider always dims. `GET /` (`power`) and the HA sensor "LED current (estimated, 12 V)" report the estimate. Raise the budget only after measuring; the PSU is 20 A.
 
 ## Simulator
 

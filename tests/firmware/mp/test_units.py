@@ -475,14 +475,17 @@ def m9_config_install_and_fallback():
         except OSError:
             pass
     raises(lambda: bootmgr.install_config({"WIFI_SSID": "x"}), "HTTP_TOKEN")
-    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "X": [1]}), "must be")
+    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "X": ["a"]}), "must be")
+    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "X": {"a": 1}}), "must be")
     raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "lower": 1}), "bad setting")
-    keys = bootmgr.install_config({"WIFI_SSID": "net\"'\n", "HTTP_TOKEN": "t" * 10, "MQTT_PORT": 1883})
-    assert keys == ["HTTP_TOKEN", "MQTT_PORT", "WIFI_SSID"]
+    keys = bootmgr.install_config({"WIFI_SSID": "net\"'\n", "HTTP_TOKEN": "t" * 10, "MQTT_PORT": 1883,
+                                   "LED_TIMING_NS": [400, 850, 800, 450]})
+    assert keys == ["HTTP_TOKEN", "LED_TIMING_NS", "MQTT_PORT", "WIFI_SSID"]
     ns = {}
     with open("config.py") as f:
         exec(f.read(), ns)
     assert ns["WIFI_SSID"] == "net\"'\n" and ns["MQTT_PORT"] == 1883
+    assert ns["LED_TIMING_NS"] == (400, 850, 800, 450)
     # Broken config.py: the snapshot keeps the board reachable.
     with open("config.py", "w") as f:
         f.write("WIFI_SSID = 'x'\nthis is not python\n")
@@ -604,7 +607,7 @@ def output_cap_applies_before_brightness():
     from app import outstage
 
     n = 500
-    out = outstage.create(n, 13, None, "RGB")
+    out = outstage.create(n, outstage.channel_budget(n, 1560, 8), None, "RGB")
     src = bytearray([255] * (3 * n))
     dst = bytearray(3 * n)
     out.process(src, dst, 255)
@@ -624,10 +627,25 @@ def output_cap_applies_before_brightness():
 def output_colour_order():
     from app import outstage
 
-    out = outstage.create(2, 100, None, "GRB")
+    out = outstage.create(2, 10**6, None, "GRB")
     dst = bytearray(6)
     out.process(bytearray([10, 20, 30, 1, 2, 3]), dst, 255)
     assert list(dst) == [20, 10, 30, 2, 1, 3]
+
+
+@test
+def power_budget_is_a_current_at_12v():
+    from app import outstage
+
+    # Default: 1560 mA at 8 mA per channel is exactly the old 13% cap.
+    assert outstage.channel_budget(500, 1560, 8) == 49725 == outstage.budget_for(500, 13)
+    assert outstage.estimated_ma(49725, 8) == 1560
+    # A higher measured per-channel draw tightens the cap (same current).
+    assert outstage.channel_budget(500, 1560, 12) == 33150
+    assert outstage.channel_budget(500, 5000, 8) == 159375
+    # Full white on all 500 pixels: 12 A at 8 mA/channel (~144 W at 12 V).
+    assert outstage.estimated_ma(500 * 765, 8) == 12000
+    assert outstage.channel_budget(500, 0, 8, percent=13) == 49725  # legacy override
 
 
 # -- state --------------------------------------------------------------------

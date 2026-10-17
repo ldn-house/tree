@@ -340,8 +340,12 @@ def install_config(values):
     for k, v in values.items():
         if not isinstance(k, str) or not k or not all(c.isupper() or c.isdigit() or c == "_" for c in k):
             raise ValueError("bad setting name %r" % (k,))
-        if not isinstance(v, CONFIG_TYPES):
-            raise ValueError("%s must be a string, number, bool or null" % k)
+        if isinstance(v, list) and len(v) <= 8 and all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) for x in v
+        ):
+            v = tuple(v)  # e.g. LED_TIMING_NS
+        elif not isinstance(v, CONFIG_TYPES):
+            raise ValueError("%s must be a string, number, bool, null or a short list of numbers" % k)
         clean[k] = v
         lines.append("%s = %r\n" % (k, v))
     err = _config_ok(clean)

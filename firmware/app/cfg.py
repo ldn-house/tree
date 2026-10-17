@@ -44,7 +44,23 @@ LED_PIN = get("LED_PIN", 0)
 # Order the strip expects on the wire. The WS2811 ICs on this tree take RGB
 # (review M8: the old firmware's two swaps cancelled out to RGB).
 COLOR_ORDER = get("COLOR_ORDER", "RGB")
-POWER_BUDGET_PERCENT = get("POWER_BUDGET_PERCENT", 13)
+# Data waveform in ns: (T0H, T0L, T1H, T1L), 800 kHz. The default is
+# MicroPython neopixel's timing; see app/driver.py before changing it.
+LED_TIMING_NS = get("LED_TIMING_NS")
+
+# Power model, at the strip's 12 V supply (not the Pico's 5 V):
+#   LED_MA_PER_CHANNEL: current one colour channel of one pixel draws at full
+#     duty (255). 12 V WS2811 bullets: ~8 mA, so ~24 mA (~0.3 W) per pixel at
+#     full white. To be measured on the tree.
+#   POWER_BUDGET_MA: the most the strip may draw per frame; the output stage
+#     scales the frame down to fit. The default 1560 mA (18.7 W) is exactly
+#     the old firmware's 13% cap, kept because higher settings browned out
+#     the PSU before. The PSU is 12 V 20 A, so this can be raised once the
+#     real draw is measured, e.g. 5000 mA = 60 W.
+LED_MA_PER_CHANNEL = get("LED_MA_PER_CHANNEL", 8)
+POWER_BUDGET_MA = get("POWER_BUDGET_MA", 1560)
+# Legacy: a cap as % of all pixels at full white overrides the above.
+POWER_BUDGET_PERCENT = get("POWER_BUDGET_PERCENT")
 GAMMA = get("GAMMA")
 FPS = get("FPS", 40)
 
