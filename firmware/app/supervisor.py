@@ -14,6 +14,7 @@ Health, for the boot counter (bootmgr):
   supervisor reboots, and bootmgr rolls back to the previous firmware.
 """
 
+import gc
 import time
 
 import asyncio
@@ -28,6 +29,7 @@ HEALTHY_S = 30
 PERIOD_MS = 500
 STARTUP_GRACE_MS = 5000
 PERSIST_MS = 2000  # a problem must last this long before feeding stops
+GC_EVERY_MS = 10000
 
 
 def take_reason():
@@ -60,6 +62,11 @@ class Supervisor:
         self.feeds = 0
         self.problems = []
         self.gave_up = False
+        self.heap_min = None  # lowest gc.mem_free() seen, sampled each loop
+        # Lowest free heap right after a collection: the real headroom
+        # (heap_min mostly measures garbage not collected yet).
+        self.heap_live_min = None
+        self._gc_at = 0
 
     def heartbeat(self, name, obj, max_ms):
         def check():
@@ -114,10 +121,22 @@ class Supervisor:
 
     async def run(self):
         wdt = bootmgr.watchdog()
+        last = time.ticks_ms()
         while True:
             rt = self.rt
             now = time.ticks_ms()
-            problems = self._problems() if time.ticks_diff(now, rt.started) > STARTUP_GRACE_MS else []
+            rt.uptime_ms += time.ticks_diff(now, last)
+            last = now
+            free = hw.mem_free()
+            if self.heap_min is None or free < self.heap_min:
+                self.heap_min = free
+            if rt.uptime_ms - self._gc_at >= GC_EVERY_MS and not rt.calib.playing():
+                self._gc_at = rt.uptime_ms
+                gc.collect()
+                free = hw.mem_free()
+                if self.heap_live_min is None or free < self.heap_live_min:
+                    self.heap_live_min = free
+            problems = self._problems() if rt.uptime_ms > STARTUP_GRACE_MS else []
             self.problems = problems
             if problems and self.failing is None:
                 self.failing = now
@@ -136,7 +155,7 @@ class Supervisor:
                     wdt.feed()
                 self.feeds += 1
                 if not problems:
-                    self._health(time.ticks_diff(now, rt.started) // 1000)
+                    self._health(rt.uptime_ms // 1000)
             if rt.reboot_at is not None and time.ticks_diff(now, rt.reboot_at) >= 0:
                 await self._reboot()
             await asyncio.sleep_ms(PERIOD_MS)

@@ -38,7 +38,7 @@ MAX_DELAY_MS = 30000
 IMPLICIT_HOLD_MS = 2000
 STATIC_REFRESH_MS = 1000
 SPIN_US = 2500
-LUT_CACHE = 8
+MONO_LUTS = 4  # 6 KB each
 GC_SLACK_US = 12000
 MIN_LEAD_MS = 10
 LEGACY_LED = (255, 255, 255)
@@ -116,33 +116,27 @@ class Sequence:
             return self._count(p, nb) * (lv[0] + lv[1] + lv[2])
         return sum(self._count(p + c * nb, nb) * lv[c] for c in range(3))
 
-    def _lut(self, levels):
-        """LUT[byte] -> 24-byte chunk (8 LEDs x RGB) as a big-endian int,
-        with channel c at levels[c] for each set bit."""
+    def _mono_lut(self, levels):
+        """One flat bytearray, 256 rows of 24 bytes: row v is 8 LEDs (RGB)
+        lit at levels where bit b of v is set. 6 KB per level and a single
+        allocation, so expanding a mono frame is 63 slice copies with no
+        per-frame garbage. At most MONO_LUTS are kept."""
         lut = self._luts.get(levels)
         if lut is None:
-            if len(self._luts) >= 2 * LUT_CACHE:
+            if len(self._luts) >= MONO_LUTS:
                 self._luts.clear()
-            lut = []
+            gc.collect()
+            lut = bytearray(256 * 24)
+            lr, lg, lb = levels
             for v in range(256):
-                x = 0
+                row = 24 * v
                 for b in range(8):
                     if v >> b & 1:
-                        for c in range(3):
-                            if levels[c]:
-                                x |= levels[c] << ((23 - 3 * b - c) * 8)
-                lut.append(x)
+                        j = row + 3 * b
+                        lut[j] = lr
+                        lut[j + 1] = lg
+                        lut[j + 2] = lb
             self._luts[levels] = lut
-        return lut
-
-    def _mono_lut(self, levels):
-        """Like _lut but as 24-byte chunks, so mono frames (most of a
-        standard sequence) expand with slice copies and no allocation."""
-        key = ("b",) + levels
-        lut = self._luts.get(key)
-        if lut is None:
-            lut = [x.to_bytes(24, "big") for x in self._lut(levels)]
-            self._luts[key] = lut
         return lut
 
     def expand(self, k, out):
@@ -155,40 +149,42 @@ class Sequence:
         p = pos + seqfile.FRAME_HEADER_SIZE
         total = 3 * self.n
         if fflags & seqfile.FLAG_MONO:
-            lut = self._mono_lut((lr, lg, lb))
+            lut = memoryview(self._mono_lut((lr, lg, lb)))
             for j in range(nb):
                 o = 24 * j
-                chunk = lut[d[p + j]]
+                r = 24 * d[p + j]
                 if o + 24 <= total:
-                    out[o : o + 24] = chunk
+                    out[o : o + 24] = lut[r : r + 24]
                 else:
-                    out[o:total] = chunk[: total - o]
+                    out[o:total] = lut[r : r + total - o]
         else:
-            lr_ = self._lut((lr, 0, 0))
-            lg_ = self._lut((0, lg, 0))
-            lb_ = self._lut((0, 0, lb))
-            for j in range(nb):
-                o = 24 * j
-                chunk = (lr_[d[p + j]] | lg_[d[p + nb + j]] | lb_[d[p + 2 * nb + j]]).to_bytes(24, "big")
-                if o + 24 <= total:
-                    out[o : o + 24] = chunk
-                else:
-                    out[o:total] = chunk[: total - o]
+            # Colour frames: test three bits per LED. No LUT memory at all.
+            n = self.n
+            pr = p
+            pg = p + nb
+            pb = p + 2 * nb
+            for i in range(n):
+                byte = i >> 3
+                m = 1 << (i & 7)
+                j = 3 * i
+                out[j] = lr if d[pr + byte] & m else 0
+                out[j + 1] = lg if d[pg + byte] & m else 0
+                out[j + 2] = lb if d[pb + byte] & m else 0
 
     def prewarm(self):
-        """Build every LUT playback will need, so none is built (slowly, in
-        Python) between two deadlines."""
+        """Build the mono LUTs playback will need before T0, so none is
+        built (slowly, in Python) between two deadlines."""
         d = self.data
+        levels = []
         for pos in self.offsets:
-            lv = (d[pos + 3], d[pos + 4], d[pos + 5])
             if d[pos + 2] & seqfile.FLAG_MONO:
-                self._mono_lut(lv)
-            else:
-                self._lut((lv[0], 0, 0))
-                self._lut((0, lv[1], 0))
-                self._lut((0, 0, lv[2]))
-        if len(self._luts) > LUT_CACHE:
-            log("calibration: %d distinct levels; LUTs will be rebuilt during playback" % len(self._luts))
+                lv = (d[pos + 3], d[pos + 4], d[pos + 5])
+                if lv not in levels:
+                    levels.append(lv)
+        if len(levels) > MONO_LUTS:
+            log("calibration: %d mono levels; LUTs will be rebuilt during playback" % len(levels))
+        for lv in levels[:MONO_LUTS]:
+            self._mono_lut(lv)
 
     def info(self):
         return {"crc32": "%08x" % self.crc, "frames": self.frames, "loop_ms": self.loop_ms}
@@ -352,9 +348,12 @@ class Calib:
             now = time.ticks_ms()
             self.hb = now
             if self.state != "idle":
-                # Finite playback pushed expires past its end (play()), so
-                # this only cuts infinite loops or an idle lock.
-                if time.ticks_diff(now, self.expires) >= 0:
+                # The TTL never cuts finite playback (spec 2.2); it applies
+                # to infinite loops and idle locks. No absolute "end of
+                # playback" deadline is computed: loops * loop_ms can exceed
+                # the range ticks_diff can compare.
+                finite = self.playing() and self.play_info and self.play_info["loops"]
+                if not finite and time.ticks_diff(now, self.expires) >= 0:
                     self.unlock("playback finished" if self.implicit and not self.playing() else "ttl expired")
                 elif self.state == "locked" and (
                     self.static_dirty or time.ticks_diff(now, self.static_at) >= STATIC_REFRESH_MS
@@ -369,8 +368,15 @@ class Calib:
             data = None
             for path in (self.rt.slot_dir + "/data/calib_default.tcal", "calib_default.tcal"):
                 try:
+                    import os
+
+                    size = os.stat(path)[6]
+                    if size > MAX_SEQUENCE:
+                        raise ValueError("default sequence larger than %d bytes" % MAX_SEQUENCE)
+                    # read(n) preallocates n bytes: ask for exactly the size.
+                    gc.collect()
                     with open(path, "rb") as f:
-                        data = f.read(MAX_SEQUENCE + 1)
+                        data = f.read(size)
                     break
                 except OSError:
                     continue
@@ -415,11 +421,8 @@ class Calib:
         t0 = time.ticks_add(time.ticks_us(), delay_ms * 1000)
         self.state = "playing"
         self.log = Log(name)
-        self.play_info = {"sequence": name, "loop": 0, "loops": loops, "frame": 0, "t0_us": t0, "loop_ms": seq.loop_ms}
-        if loops:
-            end = time.ticks_add(time.ticks_ms(), delay_ms + loops * seq.loop_ms + IMPLICIT_HOLD_MS)
-            if time.ticks_diff(end, self.expires) > 0:
-                self.expires = end
+        self.play_info = {"sequence": name, "loop": 0, "loops": loops, "frame": 0, "t0_us": t0,
+                          "loop_ms": seq.loop_ms, "elapsed_ms": 0}
         self.player = asyncio.create_task(self._play(seq, loops, t0))
         self._changed()
         log("calibration: playing %s, %d loops, t0 in %d ms" % (name, loops, delay_ms))
@@ -462,6 +465,7 @@ class Calib:
         k = 0
         loop = 0
         bi = 0
+        played = 0
         due = t0
         seq.expand(0, raw)
         out.process(raw, bufs[0], 255)
@@ -483,6 +487,8 @@ class Calib:
                         lg.capped += 1
                 info["frame"] = k
                 info["loop"] = loop
+                info["elapsed_ms"] = played  # time since T0 at this frame's latch
+                played += seq.durations[k]
                 due = time.ticks_add(due, dur)
                 k += 1
                 if k == seq.frames:
@@ -533,7 +539,7 @@ class Calib:
                 "loop": p["loop"],
                 "loops": p["loops"],
                 "frame": p["frame"],
-                "t0_ms_ago": time.ticks_diff(time.ticks_us(), p["t0_us"]) // 1000,
+                "t0_ms_ago": max(0, p["elapsed_ms"]),
             }
         if self.state == "idle":
             self._default = None
@@ -596,7 +602,7 @@ class Calib:
             ("/calibrate/clear", self.h_clear),
         ):
             srv.route("GET|POST", path, h, auth=True)
-        srv.route("POST", "/calibrate/sequence", self.h_sequence, auth=True)
+        srv.route("POST", "/calibrate/sequence", self.h_sequence, auth=True, deadline=60)
         srv.route("POST", "/calibrate/play", self.h_play, auth=True)
         srv.route("POST", "/calibrate/halt", self.h_halt, auth=True)
         srv.route("POST", "/calibrate/frame", self.h_frame, auth=True)

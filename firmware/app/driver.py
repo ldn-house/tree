@@ -23,6 +23,17 @@ from app.log import log
 BIT_NS = 1250
 RESET_US = 300  # WS2811 latches after >= 280 us low
 
+# Waveform: 25 PIO cycles per bit at 20 MHz (50 ns each).
+#   0 bit: high T1 = 7 cycles (350 ns), low T2 + T3 = 18 (900 ns)
+#   1 bit: high T1 + T2 = 16 (800 ns),   low T3 = 9 (450 ns)
+# The old firmware's machine.bitstream timing (400/850 ns high for 0/1,
+# known to work on this strip) is the reference. 350 ns for a 0 also sits
+# inside the original WS2811 high-speed window (T0H 250 +/- 150 ns) and the
+# WS2812-style window later WS2811 revisions use (T0H 250-550 ns, T1H
+# 650-950 ns). tests/firmware/test_pio.py simulates this program and checks
+# the pulse widths against those windows.
+PIO_FREQ = 20_000_000
+
 
 if rp2 is not None:
 
@@ -33,14 +44,18 @@ if rp2 is not None:
         pull_thresh=8,
     )
     def _ws2811():
-        # 10 PIO cycles per bit at 8 MHz: 1 = 0.875 us high, 0 = 0.375 us.
+        # asm_pio runs this body with only the PIO names as globals, so the
+        # cycle counts must be locals here.
+        T1 = 7
+        T2 = 9
+        T3 = 9
         wrap_target()
         label("bitloop")
-        out(x, 1).side(0)[2]
-        jmp(not_x, "do_zero").side(1)[1]
-        jmp("bitloop").side(1)[4]
+        out(x, 1).side(0)[T3 - 1]
+        jmp(not_x, "do_zero").side(1)[T1 - 1]
+        jmp("bitloop").side(1)[T2 - 1]
         label("do_zero")
-        nop().side(0)[4]
+        nop().side(0)[T2 - 1]
         wrap()
 
 
@@ -52,7 +67,7 @@ class Driver:
         self.sm_id = sm_id
         self.write_us = n * 24 * BIT_NS // 1000  # time on the wire
         self.busy_us = self.write_us + RESET_US
-        self.sm = rp2.StateMachine(sm_id, _ws2811, freq=8_000_000, sideset_base=machine.Pin(pin))
+        self.sm = rp2.StateMachine(sm_id, _ws2811, freq=PIO_FREQ, sideset_base=machine.Pin(pin))
         self.sm.active(1)
         self.dma = None
         self._t = time.ticks_us() - self.busy_us

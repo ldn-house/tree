@@ -331,12 +331,15 @@ class Engine:
         if dt < 0 or dt > 1000:
             dt = 0 if dt < 0 else 1000
         # Accumulate scaled time so t_ms stays monotonic when speed changes.
-        self.t_frac += int(dt * 1000 * self.state.get("speed"))
-        self.t_ms += self.t_frac // 1000
-        self.t_frac %= 1000
-        if self.t_ms >= T_RESTART_MS:
-            # Restart before t_ms leaves small-int range (docs/effect-api.md).
+        frac = self.t_frac + int(dt * 1000 * self.state.get("speed"))
+        t = self.t_ms + frac // 1000
+        if t >= T_RESTART_MS:
+            # Restart instead of rendering: render() never sees t_ms at or
+            # past the contract's limit (docs/effect-api.md).
             self.reload = True
+            return
+        self.t_ms = t
+        self.t_frac = frac % 1000
         t0 = time.ticks_us()
         try:
             self.inst.render(self.t_ms, self.raw)

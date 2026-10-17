@@ -38,6 +38,9 @@ class Runtime:
         self.manifest = m
         self.version = m.get("version", "dev")
         self.started = time.ticks_ms()
+        # Accumulated by the supervisor: a single ticks_diff from boot is
+        # ambiguous after half the ticks period (~6 days on the rp2).
+        self.uptime_ms = 0
         self.reboot_at = None
         self.reboot_reason = None
         self.restarts = {}
@@ -45,7 +48,7 @@ class Runtime:
         log("tree %s (slot %s, reset %s%s)" % (self.version, self.slot, info.get("reset_cause"),
                                                 ": " + self.reset_reason if self.reset_reason else ""))
         if cfg.ERROR:
-            log("config.py failed to load: " + cfg.ERROR)
+            log("config: %s; using %s" % (cfg.ERROR, cfg.SOURCE))
 
         self.state = state.State()
         self.state.load()
@@ -115,7 +118,7 @@ class Runtime:
             self.reboot_at = time.ticks_add(time.ticks_ms(), delay_ms)
 
     def uptime_s(self):
-        return time.ticks_diff(time.ticks_ms(), self.started) // 1000
+        return self.uptime_ms // 1000
 
     def boot_status(self):
         s = "trial" if self.info.get("trial") else "ok"
@@ -181,8 +184,10 @@ class Runtime:
             "http": {"requests": self.http.requests, "rejected": self.http.rejected, "auth": bool(cfg.HTTP_TOKEN)},
             "calibration": self.calib.state,
             "update": self.updates.status(),
-            "supervisor": {"healthy": self.sup.healthy, "problems": self.sup.problems},
+            "supervisor": {"healthy": self.sup.healthy, "problems": self.sup.problems, "heap_min": self.sup.heap_min,
+                           "heap_live_min": self.sup.heap_live_min},
             "config_error": cfg.ERROR,
+            "config_source": cfg.SOURCE,
             "restarts": self.restarts,
         }
 
