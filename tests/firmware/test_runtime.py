@@ -157,8 +157,8 @@ def test_hanging_effect_is_quarantined_after_watchdog(device):
     st["effect"] = "hang"
     (d.root / "state.json").write_text(json.dumps(st))
     d.start()
-    wait_for(lambda: len(d.boots) >= 2, 40, what="watchdog reset")
-    assert d.boots[1] == "watchdog reset", d.boots
+    wait_for(lambda: len(d.boots) >= 1, 40, what="watchdog reset")
+    assert d.boots[0] == "watchdog reset", d.boots
     st = d.wait_http(30)
     assert "hang" in st["effect"]["quarantined"]
     assert st["state"]["effect"] == "hang" and st["effect"]["running"] != "hang"
@@ -166,7 +166,7 @@ def test_hanging_effect_is_quarantined_after_watchdog(device):
     assert st["boot"]["reset_cause"] == "wdt"
     # Healthy (boot counter reset) after 30 s, with no further resets.
     wait_for(lambda: status(d)["supervisor"]["healthy"], 45, what="healthy")
-    assert len(d.boots) == 2  # no reboot loop
+    assert len(d.boots) == 1  # no reboot loop
     assert d.boot_state()["boots"] == 0
 
 
@@ -211,8 +211,7 @@ def test_missing_and_short_coordinates(make_device, bundles):
     for f in (d.root / "fw" / "a" / "data").glob("coords_compact.txt"):
         f.unlink()
     d.start()
-    st = d.wait_http(30, pred=lambda s: len(d.boots) >= 1)
-    assert st["coords"] == 0
+    st = d.wait_http(30, pred=lambda s: s["coords"] == 0)
     effects = {e["name"]: e for e in d.get("/effects")[1]["effects"]}
     assert not effects["height"]["eligible"]  # NEEDS_COORDS effects are skipped, nothing crashes
     seen = set()
@@ -230,7 +229,7 @@ def test_missing_and_short_coordinates(make_device, bundles):
     assert status(d)["effect"]["failed"] == {}
     code, res = d.request("PUT", "/files/coords.txt", body=b"1,2\nnot,numbers,here\n")
     assert code == 400
-    assert len(d.boots) == 1
+    assert len(d.boots) == 0  # no resets after the restart
 
 
 def test_wifi_down_at_boot(make_device, bundles):

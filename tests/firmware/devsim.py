@@ -188,6 +188,8 @@ class Device:
                         outcome, cause = "watchdog reset", "wdt"
                 elif rc == 42:
                     outcome, cause = "machine.reset()", "wdt"
+                elif self._stop.is_set():
+                    break  # we killed it (stop()): not a boot outcome
                 elif fed is not None:
                     # Dropped to the REPL; the running watchdog resets the board.
                     while time.time() - fed <= timeout and not self._stop.is_set():
@@ -197,7 +199,7 @@ class Device:
                     outcome = f"exited ({rc}) with no watchdog: board would hang at the REPL"
                     self.hung = True
                     self._stop.set()
-            if outcome:
+            if outcome and not self._stop.is_set():
                 self.boots.append(outcome)
                 log.write(f"===== {outcome} =====\n")
                 log.flush()

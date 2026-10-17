@@ -39,6 +39,8 @@ tools/build_firmware.py
 uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware
 ```
 
+Run the tests on the board's MicroPython version (1.27.0, as CI does): set `MICROPYTHON` to a 1.27 unix build, because newer ports have APIs the board lacks (1.27's sockets have no `sendall()`). The board-sized heap test (`test_heap.py`) also needs a 32-bit build in `MICROPYTHON32` (`make -C ports/unix MICROPY_FORCE_32BIT=1`; on macOS, run `tests/firmware/heapcheck.py` in a `linux/386` container).
+
 OTA needs `HTTP_TOKEN` (config.py, `$TREE_TOKEN` or `--token`). `./flash.py --ota --config` replaces config.py over Wi-Fi (sent as JSON values, signed with `UPDATE_KEY`); flash.py validates config.py before sending it anywhere. The first USB install also removes the old single-slot firmware files (`ota.py`, `mqtt.py`, `selfupdate.py`, `github.py`, `version.py`, `lib/umqtt`, `lib/ssl.mpy`) and keeps `config.py` and the root `coords_compact.txt`.
 
 ## Architecture
