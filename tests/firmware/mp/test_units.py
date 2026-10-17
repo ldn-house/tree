@@ -607,7 +607,7 @@ def output_cap_applies_before_brightness():
     from app import outstage
 
     n = 500
-    out = outstage.create(n, outstage.channel_budget(n, 1560, 8), None, "RGB")
+    out = outstage.create(n, outstage.channel_budget(n, 1.5, 8), None, "RGB")
     src = bytearray([255] * (3 * n))
     dst = bytearray(3 * n)
     out.process(src, dst, 255)
@@ -634,18 +634,18 @@ def output_colour_order():
 
 
 @test
-def power_budget_is_a_current_at_12v():
+def power_limit_is_in_amps_at_12v():
     from app import outstage
 
-    # Default: 1560 mA at 8 mA per channel is exactly the old 13% cap.
-    assert outstage.channel_budget(500, 1560, 8) == 49725 == outstage.budget_for(500, 13)
-    assert outstage.estimated_ma(49725, 8) == 1560
-    # A higher measured per-channel draw tightens the cap (same current).
-    assert outstage.channel_budget(500, 1560, 12) == 33150
-    assert outstage.channel_budget(500, 5000, 8) == 159375
+    # Default 1.5 A at 8 mA per channel: channel sum 47812, 12.5% of full white.
+    b = outstage.channel_budget(500, 1.5, 8)
+    assert b == 47812 and abs(outstage.estimated_a(b, 8) - 1.5) < 0.001
+    # A higher measured per-channel draw tightens the cap (same amps).
+    assert outstage.channel_budget(500, 1.5, 12) == 31875
+    assert outstage.channel_budget(500, 3, 8) == 95625
     # Full white on all 500 pixels: 12 A at 8 mA/channel (~144 W at 12 V).
-    assert outstage.estimated_ma(500 * 765, 8) == 12000
-    assert outstage.channel_budget(500, 0, 8, percent=13) == 49725  # legacy override
+    assert outstage.estimated_a(500 * 765, 8) == 12.0
+    assert outstage.channel_budget(500, 1.5, 8, percent=13) == 49725  # deprecated alias wins
 
 
 # -- state --------------------------------------------------------------------

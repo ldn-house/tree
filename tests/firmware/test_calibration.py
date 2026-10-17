@@ -52,7 +52,7 @@ def test_legacy_endpoints_go_through_the_power_cap(device):
     d = device
     assert d.get("/calibrate/led?n=5")[0] == 401
     st = cal(d)
-    assert st["state"] == "idle" and st["power_budget"] == 49725 and st["min_frame_ms"] == 20
+    assert st["state"] == "idle" and st["power_budget"] == 47812  # 1.5 A at 8 mA per channel and st["min_frame_ms"] == 20
     assert d.get("/calibrate/led?n=5", token=True)[0] == 400  # not locked: legacy error
     code, res = d.get("/calibrate/start", token=True)
     assert code == 200 and res["success"] and res["state"] == "locked"
@@ -68,7 +68,7 @@ def test_legacy_endpoints_go_through_the_power_cap(device):
     assert res["leds_on"] == 248  # LEDs 0-499 with bit 3 set
     time.sleep(0.3)
     f = frame(d)
-    assert sum(f) <= 49725 and f[3 * 8] > 0 and f[0] == 0  # 248 x 240 = 59520 raw, capped (review M6)
+    assert sum(f) <= 47812 and f[3 * 8] > 0 and f[0] == 0  # 248 x 240 = 59520 raw, capped (review M6)
     assert d.get("/calibrate/clear", token=True)[0] == 200
     time.sleep(0.3)
     assert sum(frame(d)) == 0
@@ -99,7 +99,10 @@ def test_ttl_expiry_and_power_off_unlock(device):
 def test_sequence_upload_play_and_log(device):
     d = device
     lit = [i % 2 == 0 for i in range(N)]
-    frames = [mono(40, 64, lit), mono(40, 64, [not b for b in lit]), mono(40, 0, [0] * N)]
+    # 250 LEDs x 3 x 64 = 48000 is over the 1.5 A budget (47812): reported.
+    code, res = d.post("/calibrate/sequence", seq([mono(40, 64, lit), mono(40, 60, lit)]))
+    assert code == 200 and res["over_budget_frames"] == [0]
+    frames = [mono(40, 60, lit), mono(40, 60, [not b for b in lit]), mono(40, 0, [0] * N)]
     data = seq(frames, loops=2)
     code, res = d.post("/calibrate/sequence", data)
     assert code == 200 and res["frames"] == 3 and res["loop_ms"] == 120 and res["over_budget_frames"] == []

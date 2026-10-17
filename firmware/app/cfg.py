@@ -48,18 +48,20 @@ COLOR_ORDER = get("COLOR_ORDER", "RGB")
 # MicroPython neopixel's timing; see app/driver.py before changing it.
 LED_TIMING_NS = get("LED_TIMING_NS")
 
-# Power model, at the strip's 12 V supply (not the Pico's 5 V):
-#   LED_MA_PER_CHANNEL: current one colour channel of one pixel draws at full
-#     duty (255). 12 V WS2811 bullets: ~8 mA, so ~24 mA (~0.3 W) per pixel at
-#     full white. To be measured on the tree.
-#   POWER_BUDGET_MA: the most the strip may draw per frame; the output stage
-#     scales the frame down to fit. The default 1560 mA (18.7 W) is exactly
-#     the old firmware's 13% cap, kept because higher settings browned out
-#     the PSU before. The PSU is 12 V 20 A, so this can be raised once the
-#     real draw is measured, e.g. 5000 mA = 60 W.
+# Power cap, in real units at the strip's 12 V supply (not the Pico's 5 V).
+# Every frame is scaled so the estimated strip current is at most
+# POWER_LIMIT_A.
+#   POWER_LIMIT_A: amps at 12 V. Default 1.5 A (18 W, ~12% of full white).
+#     With a single feed at the data-input end, the limits are the first
+#     JST-SM connector (~3 A) and voltage drop along ~50 m of thin strand
+#     wire, not the 20 A PSU. Raise it only after fused power-injection runs
+#     are installed and the far end has been checked for dimming.
+#   LED_MA_PER_CHANNEL: mA one colour channel of one pixel draws at full
+#     duty (255). 12 V WS2811 bullets: ~8 mA, so ~0.3 W per pixel at full
+#     white. To be measured.
+POWER_LIMIT_A = get("POWER_LIMIT_A", 1.5)
 LED_MA_PER_CHANNEL = get("LED_MA_PER_CHANNEL", 8)
-POWER_BUDGET_MA = get("POWER_BUDGET_MA", 1560)
-# Legacy: a cap as % of all pixels at full white overrides the above.
+# Deprecated: a cap as % of all pixels at full white; overrides POWER_LIMIT_A.
 POWER_BUDGET_PERCENT = get("POWER_BUDGET_PERCENT")
 GAMMA = get("GAMMA")
 FPS = get("FPS", 40)

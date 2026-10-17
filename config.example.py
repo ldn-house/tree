@@ -41,9 +41,13 @@ MQTT_PASSWORD = "your_ha_password"
 #     edge means T0H shouldn't go much below 400 ns.
 # GAMMA = None                # e.g. 2.2 for perceptual dimming
 
-# Power, at the strip's 12 V supply (PSU: 12 V 20 A). The firmware scales
-# every frame so the estimated strip current stays within POWER_BUDGET_MA.
+# Power cap, in amps at the strip's 12 V supply. Every frame is scaled so
+# the estimated strip current stays at or below POWER_LIMIT_A.
+# POWER_LIMIT_A = 1.5         # amps at 12 V (18 W, ~12% of full white). With
+#     a single feed at the data-input end, the first JST-SM connector (~3 A)
+#     and voltage drop along ~50 m of thin strand wire are the limits, not
+#     the 20 A PSU. Raise only after fused power-injection runs are installed
+#     and the far end has been checked for dimming.
 # LED_MA_PER_CHANNEL = 8      # mA per colour channel of one pixel at full
-#                             # duty; ~0.3 W per pixel at full white. Measure!
-# POWER_BUDGET_MA = 1560      # mA at 12 V. 1560 (18.7 W) equals the old 13%
-#                             # cap; raise it only after measuring the draw.
+#                             # duty (~0.3 W per pixel at full white). Measure!
+# POWER_BUDGET_PERCENT = 13   # deprecated alias: % of full white
