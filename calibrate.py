@@ -125,7 +125,7 @@ def cmd_solve(args):
 def _plan_from_args(args):
     from calib.sequence import SequenceParams, build, sequential_plan
     params = SequenceParams(codebook=args.codebook, differential=not args.single, colour=args.colour,
-                            symbol_ms=args.symbol_ms)
+                            symbol_ms=args.symbol_ms, max_level=args.max_level)
     return params, (sequential_plan(symbol_ms=args.symbol_ms) if args.sequential else build(params))
 
 
@@ -270,6 +270,7 @@ def main():
         p.add_argument("--single", action="store_true", help="no complement frames")
         p.add_argument("--sequential", action="store_true", help="one LED at a time")
         p.add_argument("--symbol-ms", type=int, default=100)
+        p.add_argument("--max-level", type=int, default=255, help="cap on the code-frame LED level")
 
     p = sub.add_parser("simulate-video", help="render synthetic phone clips of the sequence")
     p.add_argument("--out", required=True)

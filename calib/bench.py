@@ -189,6 +189,8 @@ def bench_video(root: Path, workers: int = 4) -> dict:
     usable = [v for v in views if np.isfinite(v.uv).all(1).sum() >= 15]
     out["views_used_3d"] = len(usable)
     try:
+        if len(usable) < 2:
+            raise RuntimeError(f"only {len(usable)} views with 15+ detections")
         sol = Solver(usable).solve()
         out["3d"] = position_errors(sol.points, np.array(truth["points"]), truth["pitch"])
         out["3d"]["reproj_px"] = sol.cost_px

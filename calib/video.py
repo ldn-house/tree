@@ -133,6 +133,7 @@ class DecodeParams:
     min_margin: float = 0.35        # per-pixel decode margin, relative to the code's maximum
     min_amplitude_sigma: float = 6.0
     min_pixels: int = 3
+    colour_box: int = 1             # colour mode: average RGB over this box first (video chroma is 4:2:0)
 
 
 def _linear(frame_bgr: np.ndarray) -> np.ndarray:
@@ -402,40 +403,56 @@ def refine_sync(smalls: list, ts: np.ndarray, plan: Plan, sync: dict, dp: Decode
 
 
 def _soft_bits(acc: np.ndarray, plan: Plan, pix: tuple, colour: bool):
-    """Soft bits (Npix, n_bits) in [-1, 1] and the amplitude per pixel."""
+    """Soft bits (Npix, n_bits) in [-1, 1] and the amplitude per pixel.
+
+    Colour mode unmixes camera RGB into LED channels with one global matrix
+    (crosstalk is a property of the camera and the LED type), estimated from
+    the R, G and B training frames over bright pixels. Inverting each pixel's
+    own noisy 3x3 matrix amplifies noise. Soft bits are normalised per LED
+    channel, so a channel that is weak at a pixel still gets full weight.
+    """
     nb = plan.codebook.n_bits
     off = acc[plan.index("off")[0]][pix]  # (N, C)
+    chan_of_bit = np.zeros(nb, int)
     if colour:
-        M = np.stack([acc[plan.index(c)[0]][pix] - off for c in "rgb"], -1)  # (N, 3 cam, 3 led)
-        Minv = np.linalg.pinv(M)
-    pos = {}
-    neg = {}
-    for f, b in enumerate(plan.bits):
+        Mp = np.stack([acc[plan.index(c)[0]][pix] - off for c in "rgb"], -1)  # (N, cam, led)
+        strength = np.abs(Mp).sum((1, 2))
+        bright = strength >= np.percentile(strength, 50)
+        Mn = Mp[bright] / np.maximum(np.abs(Mp[bright]).sum(1, keepdims=True), 1e-9)  # column-normalised
+        Mg = np.median(Mn, axis=0)
+        Mg_inv = np.linalg.pinv(Mg)
+    pos, neg = {}, {}
+    for f, bits in enumerate(plan.bits):
         if plan.roles[f] != "code":
             continue
         img = acc[f][pix] - off
         if colour:
-            x = np.einsum("nij,nj->ni", Minv, img)  # LED channel intensities
-            for c, (bit, pol) in enumerate(b):
+            x = img @ Mg_inv.T  # LED channel intensities (N, 3)
+            for c, (bit, pol) in enumerate(bits):
                 (pos if pol else neg)[bit] = x[:, c]
+                chan_of_bit[bit] = c
         else:
-            (bit, pol), = b
+            (bit, pol), = bits
             (pos if pol else neg)[bit] = img[:, 0]
     s = np.zeros((len(off), nb), np.float32)
+    if neg:
+        for bit in range(nb):
+            s[:, bit] = pos[bit] - neg[bit]
+    else:
+        # No complement frames: threshold each pixel at the midpoint of its own
+        # brightest and darkest code frames (the all-on reference is a poor
+        # threshold: it includes every neighbour's light and a different
+        # exposure). An LED whose codeword is all zeros or all ones cannot be
+        # decoded this way.
+        P = np.stack([pos[bit] for bit in range(nb)], 1)
+        mid = 0.5 * (P.max(1, keepdims=True) + P.min(1, keepdims=True))
+        s = (P - mid).astype(np.float32)
     amp = np.zeros(len(off), np.float32)
-    for bit in range(nb):
-        if bit in neg:
-            d = pos[bit] - neg[bit]
-        else:
-            # No complement: threshold at half the "on" reference, rescaled from
-            # its level to the code-frame level.
-            f_on = plan.index("on")[0]
-            f_code = next(f for f in range(plan.n_frames) if plan.roles[f] == "code")
-            ratio = plan.level[f_code].max() / max(plan.level[f_on].max(), 1)
-            d = pos[bit] - 0.5 * ratio * np.maximum(acc[f_on][pix].mean(-1) - off.mean(-1), 1e-6)
-        s[:, bit] = d
-        amp = np.maximum(amp, np.abs(d))
-    s /= np.maximum(amp[:, None], 1e-9)
+    for c in np.unique(chan_of_bit):
+        cols = chan_of_bit == c
+        a_c = np.abs(s[:, cols]).max(1)
+        s[:, cols] /= np.maximum(a_c[:, None], 1e-9)
+        amp = np.maximum(amp, a_c)
     return np.clip(s, -1, 1), amp
 
 
@@ -443,6 +460,12 @@ def decode_symbols(acc: np.ndarray, wsum: np.ndarray, plan: Plan, dp: DecodePara
                    colour: bool) -> dict:
     n = plan.params.n_leds
     acc = acc / np.maximum(wsum[..., None, None], 1e-6)
+    if colour and dp.colour_box > 1:
+        # Phone and H.264 video store colour at half resolution and quantise it
+        # coarsely, so per-pixel colour around a 2-3 px LED core is unreliable.
+        k = (dp.colour_box, dp.colour_box)
+        acc = np.stack([np.stack([cv2.blur(acc[f][..., c], k) for c in range(acc.shape[-1])], -1)
+                        for f in range(acc.shape[0])])
     off = acc[plan.index("off")[0]]
     code_frames = [f for f in range(plan.n_frames) if plan.roles[f] == "code"]
     # Amplitude map from the strongest pattern/complement difference.
