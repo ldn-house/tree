@@ -89,6 +89,8 @@ trailer (4 bytes)
 
 **Validation.** The firmware MUST reject a file (HTTP 400, with the reason in the JSON body) if the magic, version, flags, CRC, total length or `led_count` are wrong, if any `duration_ms` is below `min_frame_ms`, or if the file is larger than `max_sequence_bytes`. It SHOULD compute each frame's raw RGB sum on upload and report any frames over the power budget (they are accepted, and the cap will scale them).
 
+**Limits for sequence producers.** A sequence SHOULD use at most 4 distinct `(level_r, level_g, level_b)` triples across its MONO frames. The firmware expands MONO frames from one 6 KB lookup table per distinct level and keeps at most 4, built before `T0`; more than that forces rebuilds during playback, which can make frames late. Colour (three-plane) frames are expanded per LED without tables. Their cost on the RP2350 is not yet measured against `min_frame_ms`. The standard mono sequence uses 2 levels and no colour frames.
+
 **Sizes.** A MONO frame is 69 bytes and a colour frame is 195 bytes. The standard sequences are 3 to 5 KB. A one-LED-at-a-time sequence of 530 frames is about 37 KB. The firmware MUST accept files of at least 48 KB and SHOULD accept 64 KB. It MAY keep the file in flash and expand frames from it lazily (`seqfile.frame_offsets` shows the access pattern).
 
 **Test vectors.** `tests/data/calib-default.tcal` is the standard sequence. `tests/data/calib-default.expanded.sha256` is the SHA-256 of every frame expanded to `bytearray(3 * 500)` in logical RGB and concatenated in order. `tests/test_seqfile.py` checks both, and the firmware SHOULD check the same hash on the device. The CRC-32 is the standard zlib/PNG one, so `binascii.crc32` on MicroPython and `zlib.crc32` on CPython agree.
