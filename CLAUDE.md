@@ -58,10 +58,15 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 
 ### Calibration Tools (for 3D coordinate mapping)
 
-- `capture.py` - Camera capture script for LED position detection
-- `analyze.py` - Image analysis with local contrast detection and wire constraint validation
-- `triangulate.py` - 3D position calculation from multiple camera angles
-- `coordinates/` - Generated 3D LED coordinates (CSV, JSON, compact formats)
+- `calibrate.py` - uv script with subcommands: `sequence`, `simulate`, `simulate-video`, `detect`, `decode-video`, `solve`, `quality`, `bench-stills`, `bench-video`
+- `calib/` - library behind it: `.tcal` sequence format (`seqfile.py`, MicroPython-compatible), codes and sequences, camera simulator (`render.py`, `synth.py`, `video.py`), detectors (`detect.py`), perspective bundle adjustment (`solve.py`), scoring (`metrics.py`, `bench.py`)
+- `capture.py` - Webcam capture of one LED per frame via `/calibrate/*` (capture_version 2 fixes the stale-frame lag)
+- `analyze.py`, `triangulate.py` - Older pipeline (orthographic 0/90/180/270 views), kept working
+- `sequences/default.tcal` - Calibration sequence the firmware plays; `docs/calibration-protocol.md` is the firmware contract
+- `docs/calibration-findings.md` - Benchmark results and known problems with the existing captures
+- `coordinates/` - Generated 3D LED coordinates (`coords.txt` contract format from `calibrate.py solve`; legacy CSV, JSON, compact)
+
+Run tests with `uv run --with pytest --with numpy --with scipy --with opencv-python pytest tests`.
 
 ## OTA API
 

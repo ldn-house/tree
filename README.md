@@ -58,22 +58,31 @@ The tree automatically limits total power draw per-frame to prevent PSU brownout
 
 ## 3D Coordinate Mapping
 
-The tree supports volumetric 3D animations using camera-calibrated LED positions:
+The tree supports volumetric 3D animations using camera-calibrated LED positions. `calibrate.py` is the current toolkit; see [docs/calibration-findings.md](docs/calibration-findings.md) for why, and for benchmark numbers.
+
+**Video (recommended, needs the calibration protocol in firmware).** The tree loops a short coded sequence ([docs/calibration-protocol.md](docs/calibration-protocol.md)). Film it for about 11 s from each of 4–6 spots around the tree, front view first:
 
 ```bash
-# 1. Capture LED positions from multiple angles
+./calibrate.py decode-video front.mp4 right.mp4 back.mp4 left.mp4 --out positions
+./calibrate.py solve positions/{front,right,back,left}_detections.json --out coordinates
+```
+
+**Still captures (works with the current firmware).**
+
+```bash
+# 1. Capture each LED from 4 or more angles (front first)
 ./capture.py --angle front --host 192.168.2.149
 
-# 2. Analyze images to extract 2D positions
-./analyze.py --angle front --validate
+# 2. Detect LEDs (captures made before capture_version 2 show LED i-1 in led_i: use --lag 1)
+./calibrate.py detect --views front,right,back,left
 
-# 3. Triangulate 3D coordinates from two orthogonal views
-./triangulate.py --angles front,side
-
-# 4. Upload coordinates to Pico
-curl -X POST --data-binary @coordinates/coords_compact.txt \
-  "http://192.168.2.149:8080/update?file=coords_compact.txt"
+# 3. Triangulate with perspective bundle adjustment -> coordinates/coords.txt
+./calibrate.py solve positions/{front,right,back,left}_detections.json --out coordinates
 ```
+
+`coords.txt` has one `x,y,z` (or `null`) line per LED: y from 0 (lowest LED) to 1 (highest), x and z in the same units, origin on the trunk, +x towards the front view. `coords_metres.csv` adds metres, per-LED confidence and the number of views. The older `analyze.py` and `triangulate.py` still work and still write `coords_compact.txt`.
+
+The synthetic benchmark (`./calibrate.py simulate`, `simulate-video`, `bench-stills`, `bench-video`) renders captures with known ground truth so any pipeline can be scored.
 
 ## Roadmap
 

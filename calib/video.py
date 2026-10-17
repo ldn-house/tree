@@ -222,13 +222,23 @@ def find_sync(series: np.ndarray, ts: np.ndarray, plan: Plan, dp: DecodeParams) 
         return x / (x.std(0, keepdims=True) + 1e-9)
 
     whole = norm(series.mean(1, keepdims=True))
-    phases = np.arange(0, loop, 1.0)
+    # Coarse phase step scales with the loop (1 ms for the standard 6.6 s loop,
+    # coarser for the 54 s one-LED-at-a-time loop), then a local 1 ms search.
+    step = max(1.0, float(np.floor(loop / 6600)))
     best = None
     for ex in dp.exposures_ms:
+        phases = np.arange(0, loop, step)
         sc = _sync_scores(whole, ts, tmpl, loop, phases, np.array([0.5]), 0.0, ex)
         j = int(np.argmax(sc))
-        if best is None or sc[j] > best[0]:
-            best = (float(sc[j]), float(phases[j]), ex)
+        if step > 1:
+            fine = (phases[j] + np.arange(-step, step + 1, 1.0)) % loop
+            scf = _sync_scores(whole, ts, tmpl, loop, fine, np.array([0.5]), 0.0, ex)
+            k = int(np.argmax(scf))
+            cand = (float(scf[k]), float(fine[k]), ex)
+        else:
+            cand = (float(sc[j]), float(phases[j]), ex)
+        if best is None or cand[0] > best[0]:
+            best = cand
     score1, centre, ex = best
     # centre is the phase that puts the frame centre (band 0.5) on the template;
     # with readout ro the row-0 phase is centre - ro / 2.
@@ -557,7 +567,8 @@ def decode_video(path: Path, plan: Plan, dp: DecodeParams | None = None, verbose
     series, ts, fps, (w, h), smalls, change = read_small(path, dp.downsample, dp.bands, keep=True)
     colour = plan.params.colour
     sync = find_sync(series, ts, plan, dp)
-    sync = refine_sync_transitions(change, ts, plan, sync, series=series)
+    if not plan.roles.count("single"):
+        sync = refine_sync_transitions(change, ts, plan, sync, series=series)
     del smalls
     if verbose:
         print(f"  {path.name}: {len(ts)} frames @ {fps:.1f} fps, sync {sync}")
