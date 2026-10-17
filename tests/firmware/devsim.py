@@ -148,8 +148,11 @@ class Device:
             self.proc.kill()
 
     def _wdt(self):
+        """(last feed time, timeout) or (None, None) before the first feed.
+        Uses the file's mtime: reading its contents could catch the mock's
+        write mid-truncate and look like a feed at time 0."""
         try:
-            fed = float((self.root / ".wdt").read_text() or 0)
+            fed = (self.root / ".wdt").stat().st_mtime
             timeout = int((self.root / ".wdt.timeout").read_text()) / 1000
             return fed, timeout
         except (OSError, ValueError):
@@ -257,7 +260,7 @@ def wait_for(pred, timeout=30, interval=0.2, what="condition"):
 
 
 def build_bundle(out: Path, effects: Path | None = None, key: str | None = None, version: str | None = None,
-                 source=False):
+                 source=False, app: Path | None = None):
     import sys
 
     cmd = [sys.executable, str(ROOT / "tools" / "build_firmware.py"), "--out", str(out)]
@@ -268,5 +271,7 @@ def build_bundle(out: Path, effects: Path | None = None, key: str | None = None,
         cmd += ["--version", version]
     if source:
         cmd.append("--source")
+    if app:
+        cmd += ["--app", str(app)]
     subprocess.run(cmd, check=True, capture_output=True)
     return out / "tree-firmware.bin"

@@ -93,7 +93,7 @@ def effect_meta(effects_dir: Path):
         sys.path.pop(0)
 
 
-def collect(effects_dir: Path | None, source: bool, work: Path):
+def collect(effects_dir: Path | None, source: bool, work: Path, app_dir: Path):
     """Return a list of (slot path, bytes)."""
     files = []
 
@@ -107,7 +107,7 @@ def collect(effects_dir: Path | None, source: bool, work: Path):
             mpy_cross(src, dest, out)
             files.append((dest[:-3] + ".mpy", out.read_bytes()))
 
-    for src in sorted((ROOT / "firmware" / "app").glob("*.py")):
+    for src in sorted(app_dir.glob("*.py")):
         add_py(src, f"app/{src.name}")
     if effects_dir and (effects_dir / "__init__.py").exists():
         for src in sorted(effects_dir.glob("*.py")):
@@ -149,13 +149,14 @@ def main():
     ap.add_argument("--key", default=os.environ.get("FIRMWARE_SIGNING_KEY") or None, help="HMAC signing key")
     ap.add_argument("--source", action="store_true", help="bundle .py sources instead of .mpy")
     ap.add_argument("--version", help="override the version string")
+    ap.add_argument("--app", default=str(ROOT / "firmware" / "app"), help=argparse.SUPPRESS)  # tests: patched app
     args = ap.parse_args()
 
     info = version_info()
     if args.version:
         info["version"] = args.version
     with tempfile.TemporaryDirectory() as tmp:
-        files = collect(Path(args.effects), args.source, Path(tmp))
+        files = collect(Path(args.effects), args.source, Path(tmp), Path(args.app))
     data, mbytes, manifest = bundle(files, info, args.key)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
