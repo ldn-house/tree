@@ -183,7 +183,7 @@ def fill(color):
 # ─── Animations ───────────────────────────────────────────────────────────────
 
 
-def rainbow_cycle(wait_ms=20, cycles=1):
+def rainbow_cycle(wait_ms=20, cycles=1, step=1):
     """Rainbow gradient based on height - moves up/down the tree (3D)."""
     coords = load_coords()
 
@@ -204,7 +204,7 @@ def rainbow_cycle(wait_ms=20, cycles=1):
                 led_y.append(0)
 
     for _ in range(cycles):
-        for j in range(256):
+        for j in range(0, 256, step):
             if check_interrupt():
                 return
             for i in range(LED_COUNT):
@@ -602,21 +602,139 @@ def spiral_3d(wait_ms=30, cycles=2):
             time.sleep_ms(wait_ms)
 
 
+def text_scroll(text="HI", color=(255, 0, 0), wait_ms=40, cycles=2):
+    """Scroll text around the tree - visible from one side at a time."""
+    coords = load_coords()
+    if not any(coords):
+        return
+
+    import math
+
+    # Wide 5x5 block font - each char is 5 cols wide, 5 rows tall
+    # Extra spacing within letters for LED visibility
+    FONT = {
+        'A': [0x1E, 0x00, 0x05, 0x00, 0x1E],
+        'B': [0x1F, 0x00, 0x15, 0x00, 0x0A],
+        'C': [0x0E, 0x00, 0x11, 0x00, 0x11],
+        'D': [0x1F, 0x00, 0x11, 0x00, 0x0E],
+        'E': [0x1F, 0x00, 0x15, 0x00, 0x11],
+        'F': [0x1F, 0x00, 0x05, 0x00, 0x01],
+        'G': [0x0E, 0x00, 0x11, 0x00, 0x1D],
+        'H': [0x1F, 0x00, 0x04, 0x00, 0x1F],
+        'I': [0x11, 0x00, 0x1F, 0x00, 0x11],
+        'J': [0x08, 0x00, 0x10, 0x00, 0x0F],
+        'K': [0x1F, 0x00, 0x04, 0x00, 0x1B],
+        'L': [0x1F, 0x00, 0x10, 0x00, 0x10],
+        'M': [0x1F, 0x02, 0x00, 0x02, 0x1F],
+        'N': [0x1F, 0x02, 0x04, 0x08, 0x1F],
+        'O': [0x0E, 0x00, 0x11, 0x00, 0x0E],
+        'P': [0x1F, 0x00, 0x05, 0x00, 0x02],
+        'Q': [0x0E, 0x00, 0x19, 0x00, 0x1E],
+        'R': [0x1F, 0x00, 0x05, 0x00, 0x1A],
+        'S': [0x12, 0x00, 0x15, 0x00, 0x09],
+        'T': [0x01, 0x00, 0x1F, 0x00, 0x01],
+        'U': [0x0F, 0x00, 0x10, 0x00, 0x0F],
+        'V': [0x07, 0x00, 0x18, 0x00, 0x07],
+        'W': [0x1F, 0x08, 0x00, 0x08, 0x1F],
+        'X': [0x1B, 0x00, 0x04, 0x00, 0x1B],
+        'Y': [0x03, 0x00, 0x1C, 0x00, 0x03],
+        'Z': [0x19, 0x00, 0x15, 0x00, 0x13],
+        ' ': [0x00, 0x00, 0x00, 0x00, 0x00],
+        '!': [0x00, 0x00, 0x17, 0x00, 0x00],
+    }
+
+    # Build bitmap for text (with 3 col spacing between letters)
+    bitmap = []
+    for char in text.upper():
+        if char in FONT:
+            bitmap.extend(FONT[char])
+            bitmap.extend([0x00, 0x00, 0x00])  # 3 column spacing
+
+    text_width = len(bitmap)
+    if text_width == 0:
+        return
+
+    # Precompute LED cylindrical positions
+    y_vals = [c[1] for c in coords if c]
+    y_min, y_max = min(y_vals), max(y_vals)
+    y_range = y_max - y_min if y_max > y_min else 1
+
+    led_pos = []
+    for i in range(LED_COUNT):
+        if coords[i]:
+            x, y, z = coords[i]
+            angle = math.atan2(z, x)
+            angle_norm = (angle + math.pi) / (2 * math.pi)
+            height_norm = (y - y_min) / y_range
+            led_pos.append((angle_norm, height_norm))
+        else:
+            led_pos.append(None)
+
+    # Display window: only show ~1/3 of tree (120 degrees) at a time
+    window_width = 8  # columns visible at once
+    total_scroll = text_width + window_width
+
+    for _ in range(cycles):
+        for scroll in range(total_scroll):
+            if check_interrupt():
+                return
+
+            for i in range(LED_COUNT):
+                if led_pos[i] is None:
+                    strip[i] = (0, 0, 0)
+                    continue
+
+                angle_norm, height_norm = led_pos[i]
+
+                # Map angle to window position (0 to window_width)
+                # Only LEDs in front 1/3 of tree are in the window
+                window_pos = int(angle_norm * window_width * 3)  # 0 to 24
+                if window_pos >= window_width:
+                    strip[i] = (0, 0, 0)
+                    continue
+
+                # Calculate which bitmap column this LED maps to
+                bitmap_x = scroll - window_pos
+
+                # Map height to row (0-4), text in middle 60% of tree
+                if height_norm < 0.2 or height_norm > 0.8:
+                    strip[i] = (0, 0, 0)
+                    continue
+
+                adjusted_height = (height_norm - 0.2) / 0.6
+                bitmap_y = int((1.0 - adjusted_height) * 4.99)
+                bitmap_y = max(0, min(4, bitmap_y))
+
+                # Check bitmap
+                if 0 <= bitmap_x < text_width:
+                    col = bitmap[bitmap_x]
+                    if col & (1 << bitmap_y):
+                        strip[i] = scale(color)
+                    else:
+                        strip[i] = (0, 0, 0)
+                else:
+                    strip[i] = (0, 0, 0)
+
+            safe_write()
+            time.sleep_ms(wait_ms)
+
+
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 
 
 # "auto" cycles through all effects; selecting any other effect locks to it
 ANIMATIONS = [
     ("auto", None),  # Special: cycles through all other effects
-    ("rainbow_cycle", lambda: rainbow_cycle(5, 5)),
+    ("rainbow_cycle", lambda: rainbow_cycle(5, 5, 3)),  # step=3 for faster cycle
     ("christmas", lambda: christmas(30, 20)),
     ("sparkle", lambda: sparkle((255, 255, 255), 80, 0.03, 8000)),
     ("candy_cane", lambda: candy_cane(50, 100)),
     ("twinkle_multi", lambda: twinkle_multi(50, 10000)),
     ("warm_white", lambda: warm_white(10000)),
-    ("plane_sweep", lambda: plane_sweep((0, 255, 0), 8, 3)),
-    ("radial_burst", lambda: radial_burst(12, 3)),
-    ("spiral_3d", lambda: spiral_3d(18, 2)),
+    ("plane_sweep", lambda: plane_sweep((0, 255, 0), 3, 3)),
+    ("radial_burst", lambda: radial_burst(5, 3)),
+    ("spiral_3d", lambda: spiral_3d(5, 2)),
+    ("text_scroll", lambda: text_scroll("HI", (255, 0, 0), 40, 3)),
 ]
 
 

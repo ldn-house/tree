@@ -382,8 +382,15 @@ class MockNeoPixel:
         # Simulate WS2811 write time: ~30µs per LED = 15ms for 500 LEDs
         _real_time.sleep(0.015)
 
+class MockWDT:
+    def __init__(self, timeout=8000):
+        pass
+    def feed(self):
+        pass
+
 class MockMachine:
     Pin = MockPin
+    WDT = MockWDT
 
 # Save real time module before we overwrite it
 import time as _real_time
@@ -424,7 +431,7 @@ sys.modules['time'] = MockTime()
 import random
 \`;
 
-      self.speed = 5;
+      self.speed = 1;  // Real-time to match Pico
 
       self.onmessage = async (e) => {
         const { type, data } = e.data;
@@ -639,7 +646,13 @@ else:
     }
 
     // Load coordinates first (for 3D view and Python animations), then init
-    loadCoordinates().then(() => init());
+    loadCoordinates().then((hasCoords) => {
+      // Default to 3D view if coordinates are available
+      if (hasCoords) {
+        document.getElementById('view-3d').click();
+      }
+      init();
+    });
   </script>
 </body>
 </html>

@@ -335,6 +335,150 @@ def simple_triangulate(pos_a: dict, pos_b: dict) -> dict[int, tuple[float, float
     return coords_3d
 
 
+def multi_angle_triangulate(pos_list: list[dict], angle_names: list[str]
+                            ) -> dict[int, tuple[float, float, float]]:
+    """
+    Triangulation using 4 angles at 90° intervals for better accuracy.
+
+    Expects angles in order: 0°, 90°, 180°, 270° (e.g., front, right, back, left)
+    - Angles 0° and 180° are opposite views → both give X coordinate (one flipped)
+    - Angles 90° and 270° are opposite views → both give Z coordinate (one flipped)
+
+    For each LED:
+    - Average X from angle[0] and flipped angle[2] when both valid
+    - Average Z from angle[1] and flipped angle[3] when both valid
+    - Fall back to single view when one is obscured/invalid
+    """
+    if len(pos_list) < 4:
+        print("Warning: multi_angle_triangulate expects 4 angles, falling back to simple")
+        return simple_triangulate(pos_list[0], pos_list[1])
+
+    coords_3d = {}
+
+    # Extract position dicts
+    positions = [p["positions"] for p in pos_list]
+
+    # Get all LED indices across all views
+    all_leds = set()
+    for p in positions:
+        all_leds.update(int(k) for k in p.keys())
+
+    print(f"Total unique LEDs across all angles: {len(all_leds)}")
+
+    # Count how many views each LED appears in
+    view_counts = {}
+    for led in all_leds:
+        led_str = str(led)
+        count = sum(1 for p in positions if led_str in p)
+        view_counts[led] = count
+
+    leds_in_4 = sum(1 for c in view_counts.values() if c == 4)
+    leds_in_3 = sum(1 for c in view_counts.values() if c == 3)
+    leds_in_2 = sum(1 for c in view_counts.values() if c == 2)
+    leds_in_1 = sum(1 for c in view_counts.values() if c == 1)
+    print(f"  LEDs visible in 4 views: {leds_in_4}")
+    print(f"  LEDs visible in 3 views: {leds_in_3}")
+    print(f"  LEDs visible in 2 views: {leds_in_2}")
+    print(f"  LEDs visible in 1 view: {leds_in_1}")
+
+    def get_centered_coords(positions_dict: dict, led_str: str) -> tuple[float, float, bool] | None:
+        """Get centered (x, y) coordinates and validity flag for an LED."""
+        if led_str not in positions_dict:
+            return None
+        p = positions_dict[led_str]
+        x_centered = p["x_norm"] - 0.5
+        y_centered = 1.0 - p["y_norm"]  # Flip Y so up is positive
+        # Check if this was interpolated (less reliable)
+        is_valid = p.get("valid", True)
+        return (x_centered, y_centered, is_valid)
+
+    raw_coords = {}
+    confidence = {}
+
+    for led in all_leds:
+        led_str = str(led)
+
+        # Get coordinates from each angle
+        c0 = get_centered_coords(positions[0], led_str)  # 0° - gives X
+        c1 = get_centered_coords(positions[1], led_str)  # 90° - gives Z
+        c2 = get_centered_coords(positions[2], led_str)  # 180° - gives -X
+        c3 = get_centered_coords(positions[3], led_str)  # 270° - gives -Z
+
+        # Calculate X from angle 0 and angle 2 (opposite views)
+        x_values = []
+        if c0 is not None:
+            x_values.append((c0[0], 1.0 if c0[2] else 0.5))  # (value, weight)
+        if c2 is not None:
+            # Angle 2 is 180° rotated, so X is flipped
+            x_values.append((-c2[0], 1.0 if c2[2] else 0.5))
+
+        # Calculate Z from angle 1 and angle 3 (opposite views)
+        z_values = []
+        if c1 is not None:
+            z_values.append((c1[0], 1.0 if c1[2] else 0.5))
+        if c3 is not None:
+            # Angle 3 is 180° from angle 1, so X (which maps to Z) is flipped
+            z_values.append((-c3[0], 1.0 if c3[2] else 0.5))
+
+        # Calculate Y from all available views
+        y_values = []
+        for c in [c0, c1, c2, c3]:
+            if c is not None:
+                y_values.append((c[1], 1.0 if c[2] else 0.5))
+
+        # Need at least X and Z to triangulate
+        if not x_values or not z_values:
+            continue
+
+        # Weighted average
+        def weighted_avg(values: list[tuple[float, float]]) -> float:
+            total_weight = sum(w for _, w in values)
+            return sum(v * w for v, w in values) / total_weight
+
+        tree_x = weighted_avg(x_values)
+        tree_z = weighted_avg(z_values)
+        tree_y = weighted_avg(y_values) if y_values else 0
+
+        raw_coords[led] = (tree_x, tree_y, tree_z)
+        # Confidence based on number of views and validity
+        conf = (len(x_values) + len(z_values)) / 4.0
+        confidence[led] = conf
+
+    print(f"Triangulated {len(raw_coords)} LEDs using multi-angle method")
+
+    if not raw_coords:
+        return {}
+
+    # Normalize to [-1, 1] range
+    all_x = [c[0] for c in raw_coords.values()]
+    all_y = [c[1] for c in raw_coords.values()]
+    all_z = [c[2] for c in raw_coords.values()]
+
+    x_min, x_max = min(all_x), max(all_x)
+    y_min, y_max = min(all_y), max(all_y)
+    z_min, z_max = min(all_z), max(all_z)
+
+    x_range = x_max - x_min if x_max > x_min else 1
+    y_range = y_max - y_min if y_max > y_min else 1
+    z_range = z_max - z_min if z_max > z_min else 1
+
+    xz_range = (x_range + z_range) / 2
+    print(f"  X range: {x_range:.3f}, Z range: {z_range:.3f}, using avg: {xz_range:.3f}")
+
+    max_range = max(xz_range, y_range)
+    x_center = (x_max + x_min) / 2
+    z_center = (z_max + z_min) / 2
+
+    coords_3d = {}
+    for led_idx, (x, y, z) in raw_coords.items():
+        norm_x = (x - x_center) / xz_range * 2
+        norm_y = (y - y_min) / max_range * 2
+        norm_z = (z - z_center) / xz_range * 2
+        coords_3d[led_idx] = (norm_x, norm_y, norm_z)
+
+    return coords_3d
+
+
 def opencv_triangulate(pos_a: dict, pos_b: dict,
                        focal_length: float = 1000) -> dict[int, tuple[float, float, float]]:
     """
@@ -604,10 +748,14 @@ def main():
     for i, data in enumerate(pos_data):
         print(f"  {angles[i]}: {data['found_count']} LEDs found")
 
-    # Triangulate (using first two angles)
+    # Triangulate
     print(f"\nTriangulating using {args.method} method...")
     if args.method == "opencv":
         coords = opencv_triangulate(pos_data[0], pos_data[1])
+    elif len(angles) == 4:
+        # Use multi-angle triangulation for 4 angles at 90° intervals
+        print("Using multi-angle triangulation (4 views at 90° intervals)")
+        coords = multi_angle_triangulate(pos_data, angles)
     else:
         coords = simple_triangulate(pos_data[0], pos_data[1])
 
