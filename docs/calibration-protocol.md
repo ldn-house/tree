@@ -39,7 +39,7 @@ Rules:
 1. Entering LOCKED MUST stop the running effect within one frame and show all-off.
 2. The lock has a time-to-live (TTL). Default 180 s, maximum 900 s. Every `/calibrate/*` HTTP request and every `xmas_tree/calibrate/set` message refreshes it. While PLAYING, the TTL MUST NOT expire before the current playback finishes, unless the playback loops forever (`loops = 0`), in which case the TTL applies. When the TTL expires the firmware MUST unlock (this fixes review item M7).
 3. Unlocking (explicitly, by TTL, or by HA power-off) MUST stop playback, turn the strip off for at least one frame, and then restore the pre-lock `{power, brightness, effect}` state, including any HA changes deferred while locked.
-4. `play` while IDLE MUST take an implicit lock. That lock ends automatically 2 s after the playback ends (or at TTL expiry for infinite loops), so a one-shot trigger from HA or curl leaves the tree as it was.
+4. `play` while IDLE MUST take an implicit lock. That lock ends automatically 2 s after the playback ends (or at TTL expiry for infinite loops), so a one-shot trigger from HA or curl leaves the tree as it was. Requests do not extend an implicit lock (polling `GET /calibrate` while it plays has no effect on when it ends). They do refresh an explicit lock's TTL.
 5. The lock MUST NOT persist across a reboot: the tree always boots IDLE.
 
 ## 3. Output path
@@ -110,7 +110,7 @@ Requirements:
 4. Loops play back-to-back with no gap. Loop `L+1` frame 0 is scheduled at `T0 + (L+1) * loop_ms`.
 5. When playback ends, the strip MUST show all-off and the state returns to LOCKED (or to IDLE, for an implicit lock, after 2 s).
 6. Playback MUST NOT starve the watchdog, and MUST keep MQTT keepalives going. The firmware SHOULD defer non-essential MQTT publishes and Wi-Fi housekeeping until the gap after a latch.
-7. `T0` is `delay_ms` after the `play` request is accepted (default 0, max 30000). This gives a person time to start recording.
+7. `T0` is `delay_ms` after the `play` request is accepted (default 0, max 30000). This gives a person time to start recording. Frame 0 needs its write time on the wire before it can latch, so the firmware enforces `T0 >= now + write_us + 10 ms` (25 ms for 500 LEDs). It honours any larger `delay_ms` exactly, and reports the actual lead as `t0_in_ms`.
 
 **Rate.** With PIO + DMA the firmware starts each transfer at `due - write_us`, where `write_us` is 500 × 30 µs plus the reset gap, and logs latch error against the DMA-completion estimate. The firmware MUST sustain `min_frame_ms <= 33` (30 fps) with 500 LEDs and SHOULD sustain `min_frame_ms <= 20` (50 fps). It reports the value it actually supports in `GET /calibrate`, and the host never builds frames shorter than that. The standard sequences use 66–100 ms frames because the phone camera is the bottleneck (see the findings report), so the firmware rate limit is a ceiling, not the working point.
 
@@ -143,7 +143,7 @@ async def play(seq, loops, t0_us):
 
 These endpoints live on the existing control server (port 8080). All responses are JSON with `Content-Type: application/json`. Errors use `{"error": "..."}` with 400 (bad request), 401 (missing or wrong token), 409 (wrong state) or 413 (too large).
 
-**Authentication.** Every mutating endpoint requires the shared HTTP token from `config.py` (`HTTP_TOKEN`), sent as `Authorization: Bearer <token>` or `X-Tree-Token: <token>`. That covers `/calibrate/start`, `stop`, `sequence`, `play`, `halt` and `frame`, and the legacy `led`, `binary` and `clear`. A missing or wrong token gets 401. The read-only endpoints `GET /calibrate`, `/calibrate/status` and `/calibrate/log` stay open. Host tools take the token from `--token`, then the `TREE_TOKEN` environment variable, then `config.py`'s `HTTP_TOKEN`. MQTT commands need no token; broker authentication covers them.
+**Authentication.** Every mutating endpoint requires the shared HTTP token from `config.py` (`HTTP_TOKEN`), sent as `Authorization: Bearer <token>` or `X-Tree-Token: <token>`. That covers `/calibrate/start`, `stop`, `sequence`, `play`, `halt` and `frame`, and the legacy `led`, `binary` and `clear`. A missing or wrong token gets 401. The read-only endpoints `GET /calibrate`, `/calibrate/status` and `/calibrate/log` stay open. Host tools take the token from the `TREE_TOKEN` environment variable, then from `config.py`'s `HTTP_TOKEN` (`capture.py` does this in `pico_request`). MQTT commands need no token; broker authentication covers them.
 
 **CORS.** Every `/calibrate*` response MUST include `Access-Control-Allow-Origin: *`. The server MUST answer `OPTIONS` preflight requests with `Access-Control-Allow-Methods: GET, POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, Authorization, X-Tree-Token` and `Access-Control-Allow-Private-Network: true`. This lets a browser page on another origin drive calibration (section 10 explains the remaining mixed-content limits).
 
@@ -200,11 +200,12 @@ Legacy levels: `/calibrate/led` used (255, 255, 255) and `/calibrate/binary` use
 {
   "sequence": "default", "frames_shown": 171, "frames_skipped": 0,
   "late_us": {"max": 1830, "mean": 410, "over_4ms": 0},
-  "capped_frames": 0
+  "capped_frames": 0,
+  "worst_frame": [1, 23]
 }
 ```
 
-The firmware MAY add `"late_us_by_frame": [...]` for the last loop.
+`worst_frame` is `[loop, frame]` for the largest latch error. The firmware MAY add `"late_us_by_frame": [...]` for the current or last loop, with -1 marking a skipped frame.
 
 ## 7. MQTT and Home Assistant
 
@@ -238,7 +239,7 @@ This is the intended phone flow: press the button in HA, then walk round the tre
 
 ## 8. Default sequence on the device
 
-The firmware bundle MUST include the standard sequence as `/calib_default.tcal`. The canonical copy in the repository is `sequences/default.tcal`, generated by `./calibrate.py sequence --out sequences/default.tcal`. CI SHOULD copy it into the firmware artifact next to `coords.txt`. `play?sequence=default` reads it from flash. If it is missing, play returns 409 with the error `"no default sequence"`.
+The firmware bundle MUST include the standard sequence. The canonical copy in the repository is `sequences/default.tcal`, generated by `./calibrate.py sequence --out sequences/default.tcal`. The firmware build (`tools/build_firmware.py`) copies it into the firmware slot as `/fw/<slot>/data/calib_default.tcal`, so it is versioned and rolled back with the firmware. A `/calib_default.tcal` at the flash root is read as a fallback. `play?sequence=default` reads it from flash. If neither file exists, play returns 409 with the error `"no default sequence"`.
 
 When the default sequence changes, only this file changes; the firmware does not.
 
