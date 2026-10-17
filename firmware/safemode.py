@@ -132,14 +132,27 @@ def _read_head(c, deadline):
     return (parts[0], path, query, headers), rest
 
 
+def _send_all(c, data):
+    """socket.sendall() isn't in every MicroPython port (1.27's unix port
+    lacks it), so loop on send()."""
+    mv = memoryview(data)
+    while mv:
+        bootmgr.feed()
+        n = c.send(mv)
+        if not n:
+            raise OSError("send failed")
+        mv = mv[n:]
+
+
 def _send(c, code, obj):
     body = json.dumps(obj).encode()
     reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found"}.get(code, "Error")
-    c.sendall(
+    _send_all(
+        c,
         b"HTTP/1.0 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
-        % (code, reason.encode(), len(body))
+        % (code, reason.encode(), len(body)),
     )
-    c.sendall(body)
+    _send_all(c, body)
 
 
 def _authorized(headers):
