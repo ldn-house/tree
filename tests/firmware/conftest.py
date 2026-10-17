@@ -24,6 +24,9 @@ sys.path.insert(0, str(HERE))
 
 import devsim  # noqa: E402
 
+# mp/ holds MicroPython-only tests, run through test_units.py.
+collect_ignore = ["mp"]
+
 MOSQUITTO = os.environ.get("MOSQUITTO") or shutil.which("mosquitto") or "/opt/homebrew/opt/mosquitto/sbin/mosquitto"
 SIGNING_KEY = "test-signing-key"
 

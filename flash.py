@@ -152,7 +152,8 @@ class Tree:
         return r.json()
 
     def call(self, method, path, **kw):
-        r = self.httpx.request(method, self.base + path, headers=self.h, timeout=kw.pop("timeout", 30.0), **kw)
+        headers = {**self.h, **kw.pop("headers", {})}
+        r = self.httpx.request(method, self.base + path, headers=headers, timeout=kw.pop("timeout", 30.0), **kw)
         try:
             body = r.json()
         except ValueError:
@@ -184,8 +185,7 @@ def ota_update(tree: Tree, bundle: Path, manifest):
     else:
         print(f"Device runs {before['version']} (slot {before['slot']}); installing {manifest['version']}.")
     data = bundle.read_bytes()
-    res = tree.call("POST", "/update", content=data, headers={**tree.h, "Content-Type": "application/octet-stream"},
-                    timeout=120.0)
+    res = tree.call("POST", "/update", content=data, headers={"Content-Type": "application/octet-stream"}, timeout=120.0)
     print(f"Installed {res.get('installed')}; rebooting into it as a trial.")
     st = tree.wait(lambda s: s.get("version") == manifest["version"] or "rolled back" in s.get("boot", {}).get("status", ""),
                    120)
