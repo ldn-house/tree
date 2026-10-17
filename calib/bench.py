@@ -147,3 +147,60 @@ def bench_stills(root: Path, methods=("local_contrast", "diff", "ref", "ref_dog"
                 sol2 = solve_detections(per_view, sizes, names, wire_prior=False)
                 add("perspective BA, no wire prior", m, L, sol2.points, {"reproj_px": sol2.cost_px})
     return rows
+
+
+def _decode_job(args):
+    from .sequence import SequenceParams, build, sequential_plan
+    from .video import decode_video
+    path, plan_kw = args
+    sequential = plan_kw.pop("sequential", False)
+    plan = sequential_plan(symbol_ms=plan_kw["symbol_ms"]) if sequential else build(SequenceParams(**plan_kw))
+    return decode_video(Path(path), plan)
+
+
+def bench_video(root: Path, workers: int = 4) -> dict:
+    """Decode every clip in a simulate-video directory and score 2D, ID and 3D accuracy."""
+    import json
+    from .metrics import position_errors
+    from .solve import Solver, ViewObs
+
+    truth = json.loads((root / "truth.json").read_text())
+    plan_kw = dict(truth["plan"])
+    names = [v["camera"]["name"] for v in truth["views"]]
+    with ProcessPoolExecutor(workers) as ex:
+        results = list(ex.map(_decode_job, [(str(root / f"{nm}.mp4"), dict(plan_kw)) for nm in names]))
+    n = len(truth["points"])
+    per_view, scores, views = [], [], []
+    for nm, tv, res in zip(names, truth["views"], results):
+        uv_true = np.array(tv["uv"], float)
+        uv_true[uv_true[:, 0] < 0] = np.nan
+        vis = np.array(tv["visible"], bool)
+        sc = score_view(res, uv_true, vis)
+        # Wrong IDs: confident detections far from their own LED but close to another.
+        uv, w = _uv_from(res, n)
+        ok = np.isfinite(uv).all(1)
+        d_own = np.linalg.norm(uv - uv_true, axis=1)
+        sc["wrong_id"] = int((ok & ~(d_own <= GROSS_PX * max(res["image_size"]) / 1080)).sum())
+        sc["sync"] = res["sync"]
+        scores.append(sc)
+        w_img, h_img = res["image_size"]
+        views.append(ViewObs(nm, w_img, h_img, uv, w))
+    out = {"dataset": root.name, "plan": plan_kw, "views": scores}
+    try:
+        sol = Solver(views).solve()
+        out["3d"] = position_errors(sol.points, np.array(truth["points"]), truth["pitch"])
+        out["3d"]["reproj_px"] = sol.cost_px
+    except RuntimeError as e:
+        out["3d"] = {"error": str(e)}
+    return out
+
+
+def summarise_video(r: dict) -> str:
+    v = r["views"]
+    tot = lambda k: sum(x[k] for x in v)
+    d3 = r["3d"]
+    s3 = (f"3D median {d3['median_cm']:.2f}cm p90 {d3['p90_cm']:.2f} >10cm {d3['over_10cm']} swaps {d3['id_swaps']}"
+          if "median_cm" in d3 else f"3D failed: {d3.get('error')}")
+    return (f"{r['dataset']}: visible {tot('visible')} correct {tot('correct')} "
+            f"recall {tot('correct') / max(tot('visible'), 1):.3f} wrong-ID {tot('wrong_id')} "
+            f"median2D {np.mean([x['median_err_px'] for x in v]):.2f}px | {s3}")
