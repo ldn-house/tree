@@ -248,7 +248,7 @@ def _try_effect(rt, name, data, ext):
     render two frames. Only if that all works does it replace the overlay."""
     import os
 
-    stage_mod = "%s%s__new" % (fxmod.PREFIX, name)
+    stage_mod = fxmod.PREFIX + name + fxmod.STAGING
     stage = "%s/%s%s" % (fxmod.OVERLAY, stage_mod, ext)
     bootmgr.makedirs(fxmod.OVERLAY)
     with open(stage, "wb") as f:

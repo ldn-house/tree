@@ -152,7 +152,7 @@ class Updates:
         if self.rt.ha:
             self.rt.ha.mark("update")
 
-    async def install_stream(self, read_chunk, length, source, require_signature=False, dry_run=False):
+    async def install_stream(self, read_chunk, length, source, require_signature=None, dry_run=False):
         """Feed a bundle from read_chunk() (async, returns bytes or None at
         the end) into the inactive slot. Returns the manifest. Raises
         bootmgr.InstallError (or the reader's error) on any problem; the

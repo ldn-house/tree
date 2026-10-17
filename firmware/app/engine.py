@@ -30,6 +30,7 @@ MAX_FAILS = 3
 SLOW_US = 500000
 FALLBACK = "fallback"
 BLACK_REFRESH_MS = 2000
+T_RESTART_MS = 1 << 29  # ~6 days
 
 
 class Ctx:
@@ -66,7 +67,8 @@ class Engine:
         self.mod = None
         self.inst = None
         self.ctx = None
-        self.t_acc = 0  # effect clock, microseconds (scaled by speed)
+        self.t_ms = 0  # effect clock (scaled by speed), always a small int
+        self.t_frac = 0  # sub-millisecond remainder, microseconds
         self.t_last = time.ticks_ms()
         self.frames_ok = 0
         self.slow = 0
@@ -92,18 +94,21 @@ class Engine:
     # -- boot-time quarantine --
 
     def boot_quarantine(self, reset_cause):
+        """Only a watchdog reset can mean an effect hung; after a power cut
+        the probe file just records what happened to be starting."""
         names = self.fx.names()
-        try:
-            with open(PROBE) as f:
-                name = f.read().strip()
-            if name:
-                self._quarantine(name, "it was starting when the board last reset")
-            self.clear_probe()
-        except OSError:
-            pass
-        idx = hw.scratch_get()
-        if reset_cause == "wdt" and idx is not None and idx < len(names):
-            self._quarantine(names[idx], "it was running when the watchdog fired")
+        if reset_cause == "wdt":
+            try:
+                with open(PROBE) as f:
+                    name = f.read().strip()
+                if name:
+                    self._quarantine(name, "it was starting when the watchdog reset the board")
+            except OSError:
+                pass
+            idx = hw.scratch_get()
+            if idx is not None and idx < len(names):
+                self._quarantine(names[idx], "it was running when the watchdog fired")
+        self.clear_probe()
         hw.scratch_set(None)
 
     def _quarantine(self, name, why):
@@ -238,7 +243,8 @@ class Engine:
         self.mod = mod
         self.ctx = ctx
         self.inst = inst
-        self.t_acc = 0
+        self.t_ms = 0
+        self.t_frac = 0
         self.t_last = time.ticks_ms()
         self.frames_ok = 0
         self.slow = 0
@@ -324,10 +330,16 @@ class Engine:
         self.t_last = now
         if dt < 0 or dt > 1000:
             dt = 0 if dt < 0 else 1000
-        self.t_acc += int(dt * 1000 * self.state.get("speed"))
+        # Accumulate scaled time so t_ms stays monotonic when speed changes.
+        self.t_frac += int(dt * 1000 * self.state.get("speed"))
+        self.t_ms += self.t_frac // 1000
+        self.t_frac %= 1000
+        if self.t_ms >= T_RESTART_MS:
+            # Restart before t_ms leaves small-int range (docs/effect-api.md).
+            self.reload = True
         t0 = time.ticks_us()
         try:
-            self.inst.render(self.t_acc // 1000, self.raw)
+            self.inst.render(self.t_ms, self.raw)
         except Exception as e:
             self._fail(self.name, e)
             return

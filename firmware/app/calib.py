@@ -12,6 +12,7 @@ time. The next frame is expanded and run through the output stage during the
 current frame's hold.
 """
 
+import gc
 import struct
 import time
 
@@ -37,7 +38,9 @@ MAX_DELAY_MS = 30000
 IMPLICIT_HOLD_MS = 2000
 STATIC_REFRESH_MS = 1000
 SPIN_US = 2500
-LUT_CACHE = 6
+LUT_CACHE = 8
+GC_SLACK_US = 12000
+MIN_LEAD_MS = 10
 LEGACY_LED = (255, 255, 255)
 LEGACY_BINARY = (80, 80, 80)
 
@@ -118,7 +121,7 @@ class Sequence:
         with channel c at levels[c] for each set bit."""
         lut = self._luts.get(levels)
         if lut is None:
-            if len(self._luts) >= LUT_CACHE:
+            if len(self._luts) >= 2 * LUT_CACHE:
                 self._luts.clear()
             lut = []
             for v in range(256):
@@ -132,6 +135,16 @@ class Sequence:
             self._luts[levels] = lut
         return lut
 
+    def _mono_lut(self, levels):
+        """Like _lut but as 24-byte chunks, so mono frames (most of a
+        standard sequence) expand with slice copies and no allocation."""
+        key = ("b",) + levels
+        lut = self._luts.get(key)
+        if lut is None:
+            lut = [x.to_bytes(24, "big") for x in self._lut(levels)]
+            self._luts[key] = lut
+        return lut
+
     def expand(self, k, out):
         """Write frame k as logical RGB into out (bytearray(3 * n))."""
         d = self.data
@@ -142,10 +155,10 @@ class Sequence:
         p = pos + seqfile.FRAME_HEADER_SIZE
         total = 3 * self.n
         if fflags & seqfile.FLAG_MONO:
-            lut = self._lut((lr, lg, lb))
+            lut = self._mono_lut((lr, lg, lb))
             for j in range(nb):
                 o = 24 * j
-                chunk = lut[d[p + j]].to_bytes(24, "big")
+                chunk = lut[d[p + j]]
                 if o + 24 <= total:
                     out[o : o + 24] = chunk
                 else:
@@ -162,6 +175,21 @@ class Sequence:
                 else:
                     out[o:total] = chunk[: total - o]
 
+    def prewarm(self):
+        """Build every LUT playback will need, so none is built (slowly, in
+        Python) between two deadlines."""
+        d = self.data
+        for pos in self.offsets:
+            lv = (d[pos + 3], d[pos + 4], d[pos + 5])
+            if d[pos + 2] & seqfile.FLAG_MONO:
+                self._mono_lut(lv)
+            else:
+                self._lut((lv[0], 0, 0))
+                self._lut((0, lv[1], 0))
+                self._lut((0, 0, lv[2]))
+        if len(self._luts) > LUT_CACHE:
+            log("calibration: %d distinct levels; LUTs will be rebuilt during playback" % len(self._luts))
+
     def info(self):
         return {"crc32": "%08x" % self.crc, "frames": self.frames, "loop_ms": self.loop_ms}
 
@@ -176,8 +204,9 @@ class Log:
         self.over_4ms = 0
         self.capped = 0
         self.by_frame = []
+        self.worst = None  # (loop, frame) of the latest latch
 
-    def record(self, late_us, skipped=False):
+    def record(self, late_us, skipped=False, where=None):
         if skipped:
             self.skipped += 1
         else:
@@ -185,6 +214,7 @@ class Log:
             self.late_sum += late_us
             if late_us > self.late_max:
                 self.late_max = late_us
+                self.worst = where
             if late_us > 4000:
                 self.over_4ms += 1
         if len(self.by_frame) < 600:
@@ -204,6 +234,7 @@ class Log:
                 "over_4ms": self.over_4ms,
             },
             "capped_frames": self.capped,
+            "worst_frame": self.worst,
             "late_us_by_frame": self.by_frame,
         }
 
@@ -250,6 +281,8 @@ class Calib:
     def refresh(self, ttl_s=None):
         if ttl_s is not None:
             self.ttl_s = min(TTL_MAX_S, max(1, ttl_s))
+        if self.implicit and self.state == "locked":
+            return  # an implicit lock ends 2 s after playback, polls or not
         if self.state != "idle":
             t = time.ticks_add(time.ticks_ms(), self.ttl_s * 1000)
             if time.ticks_diff(t, self.expires) > 0:
@@ -375,6 +408,10 @@ class Calib:
             raise HTTPError(400, "delay_ms out of range")
         implicit = self.state == "idle"
         self.lock(ttl_s, implicit=implicit)
+        seq.prewarm()
+        # The first latch needs the frame on the wire first: T0 can't be
+        # sooner than one write (plus margin) after the request.
+        delay_ms = max(delay_ms, self.rt.driver.write_us // 1000 + MIN_LEAD_MS)
         t0 = time.ticks_add(time.ticks_us(), delay_ms * 1000)
         self.state = "playing"
         self.log = Log(name)
@@ -441,7 +478,7 @@ class Calib:
                     lg.record(late, skipped=True)
                 else:
                     drv.write(bufs[bi])
-                    lg.record(late)
+                    lg.record(late, where=(loop, k))
                     if capped:
                         lg.capped += 1
                 info["frame"] = k
@@ -459,6 +496,10 @@ class Calib:
                 seq.expand(k, raw)
                 out.process(raw, bufs[bi], 255)
                 capped = out.capped
+                # Collect garbage now, in the hold, rather than letting an
+                # automatic collection land on a deadline.
+                if time.ticks_diff(time.ticks_add(due, -write_us), time.ticks_us()) > GC_SLACK_US:
+                    gc.collect()
                 self.hb = time.ticks_ms()
                 await asyncio.sleep_ms(0)
             # Hold the last frame for its duration, then all off.

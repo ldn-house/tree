@@ -22,7 +22,7 @@ PREFIX = "fx_"
 def valid_name(name):
     if not isinstance(name, str) or not 1 <= len(name) <= 32 or name == "auto":
         return False
-    if not ("a" <= name[0] <= "z"):
+    if not ("a" <= name[0] <= "z") or "__" in name:
         return False
     for ch in name:
         if not ("a" <= ch <= "z" or "0" <= ch <= "9" or ch == "_"):
@@ -44,10 +44,25 @@ def module_meta(mod):
     }
 
 
+STAGING = "__new"
+
+
+def clean_staging():
+    """Remove half-validated pushes (the board reset mid-validation)."""
+    try:
+        for f in os.listdir(OVERLAY):
+            if STAGING in f:
+                os.remove(OVERLAY + "/" + f)
+                log("fx: removed unvalidated push " + f)
+    except OSError:
+        pass
+
+
 class Effects:
     def __init__(self, slot_dir=None):
         if OVERLAY not in sys.path:
             sys.path.append(OVERLAY)
+        clean_staging()
         self.base = []
         self.error = None
         try:
@@ -78,7 +93,7 @@ class Effects:
             for f in os.listdir(OVERLAY):
                 if f.startswith(PREFIX) and (f.endswith(".py") or f.endswith(".mpy")):
                     name = f[len(PREFIX) : f.rindex(".")]
-                    if valid_name(name) and name not in out:
+                    if valid_name(name) and STAGING not in name and name not in out:
                         out.append(name)
         except OSError:
             pass

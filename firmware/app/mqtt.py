@@ -265,6 +265,13 @@ class MQTT:
             try:
                 await self._session(wifi)
             except Exception as e:
+                log("mqtt: session error: %r" % (e,))
+                try:
+                    import sys
+
+                    sys.print_exception(e)
+                except Exception:
+                    pass
                 self._drop("session error: %r" % (e,))
             await self._wait(1)
 

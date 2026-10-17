@@ -31,7 +31,8 @@ REDISCOVER_DELAY_MS = 3000
 
 
 def _title(name):
-    return name.replace("_", " ").capitalize()
+    name = name.replace("_", " ")
+    return name[:1].upper() + name[1:]  # no str.capitalize() in MicroPython
 
 
 def _step(lo, hi):
@@ -65,7 +66,8 @@ class HA:
         mqtt.subs = [self.t_set, self.t_cmd + "#", self.t_cal_set, self.t_ha_status]
         mqtt.on_connect = self.on_connect
         mqtt.on_message = self.on_message
-        self.dirty = {"light": True, "settings": True, "update": True, "calib": True, "diag": True}
+        self.dirty = {"light": False, "settings": False, "update": False, "calib": False, "diag": False}
+        self.ready = False  # discovery published for this session
         self.rediscover_at = None
         self.last_diag = 0
         self.last_cal = 0
@@ -367,17 +369,19 @@ class HA:
             self.last_diag = time.ticks_ms()
 
     async def on_connect(self):
+        self.ready = False
         await self.mqtt.publish(self.t_avail, "online", retain=True)
         await self.publish_discovery()
         for k in self.dirty:
             self.dirty[k] = True
+        self.ready = True
 
     async def run(self):
         while True:
             now = time.ticks_ms()
             self.hb = now
             await asyncio.sleep_ms(200)
-            if not self.mqtt.connected:
+            if not self.mqtt.connected or not self.ready:
                 continue
             calib = self.rt.calib
             if self.rediscover_at is not None and time.ticks_diff(now, self.rediscover_at) >= 0:

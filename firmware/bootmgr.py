@@ -566,7 +566,7 @@ class Installer:
     inactive slot is touched until commit().
     """
 
-    def __init__(self, length, key=None, require_signature=False, allow_during_trial=False):
+    def __init__(self, length, key=None, require_signature=None, allow_during_trial=False):
         st = read_state()
         if st["safe"] is None and st["trial"] and not allow_during_trial:
             raise InstallError("the running update is not confirmed yet")
@@ -574,7 +574,8 @@ class Installer:
             raise InstallError("missing or too small Content-Length")
         self.length = length
         self.key = key
-        self.require_signature = require_signature or bool(key)
+        # Default: with a key configured, every bundle must be signed.
+        self.require_signature = bool(key) if require_signature is None else require_signature
         self.slot = other(st["active"]) if st["active"] else "a"
         self.dir = slot_dir(self.slot)
         self.got = 0
@@ -784,9 +785,11 @@ class Installer:
 
 
 def install_file(path, commit_after=True):
-    """Install a bundle file already on the device (USB installs)."""
+    """Install a bundle file already on the device (USB installs). Someone
+    with USB access owns the board anyway, so an unsigned bundle is accepted
+    here; a signature that is present must still be valid."""
     size = os.stat(path)[6]
-    inst = Installer(size, config_value("UPDATE_KEY"), allow_during_trial=True)
+    inst = Installer(size, config_value("UPDATE_KEY"), require_signature=False, allow_during_trial=True)
     try:
         with open(path, "rb") as f:
             while True:

@@ -22,6 +22,7 @@ CHUNK_TIMEOUT = 10
 MAX_LINE = 1024
 MAX_HEADERS = 32
 MAX_CONNECTIONS = 4
+MAX_DRAIN = 512 * 1024
 
 REASONS = {
     200: "OK",
@@ -279,9 +280,26 @@ class Server:
             self.active -= 1
             await self._close(w)
 
+    async def _drain(self, req):
+        """Read and drop an unread request body before answering, so the
+        client gets the error instead of a reset while it is still sending."""
+        left = req.length if req.left is None else req.left
+        if not left or left > MAX_DRAIN:
+            return
+        try:
+            while left > 0:
+                chunk = await asyncio.wait_for(req.reader.read(min(2048, left)), 2)
+                if not chunk:
+                    return
+                left -= len(chunk)
+        except Exception:
+            pass
+
     async def _error(self, req, w, code, msg):
         try:
             if req is not None:
+                if req.length:
+                    await self._drain(req)
                 if not req.responded:
                     await req.send(code, json.dumps({"error": msg}))
             else:

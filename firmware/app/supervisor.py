@@ -100,6 +100,7 @@ class Supervisor:
                 self.healthy = True
                 if bootmgr.mark_healthy(rt.slot):
                     log("supervisor: update %s confirmed healthy" % rt.version)
+                    rt.info["event"] = "confirmed %s" % rt.version
                 rt.info["trial"] = False
                 if rt.ha:
                     rt.ha.mark("diag")
