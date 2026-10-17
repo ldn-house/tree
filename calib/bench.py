@@ -186,8 +186,10 @@ def bench_video(root: Path, workers: int = 4) -> dict:
         w_img, h_img = res["image_size"]
         views.append(ViewObs(nm, w_img, h_img, uv, w))
     out = {"dataset": root.name, "plan": plan_kw, "views": scores}
+    usable = [v for v in views if np.isfinite(v.uv).all(1).sum() >= 15]
+    out["views_used_3d"] = len(usable)
     try:
-        sol = Solver(views).solve()
+        sol = Solver(usable).solve()
         out["3d"] = position_errors(sol.points, np.array(truth["points"]), truth["pitch"])
         out["3d"]["reproj_px"] = sol.cost_px
     except RuntimeError as e:
@@ -203,4 +205,4 @@ def summarise_video(r: dict) -> str:
           if "median_cm" in d3 else f"3D failed: {d3.get('error')}")
     return (f"{r['dataset']}: visible {tot('visible')} correct {tot('correct')} "
             f"recall {tot('correct') / max(tot('visible'), 1):.3f} wrong-ID {tot('wrong_id')} "
-            f"median2D {np.mean([x['median_err_px'] for x in v]):.2f}px | {s3}")
+            f"median2D {np.nanmean([x['median_err_px'] for x in v]):.2f}px | {s3}")

@@ -266,8 +266,16 @@ class Sensor:
         return (np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8)
 
 
-def radiance(view: View, led_rgb: np.ndarray, p: SimParams, ambient: float) -> np.ndarray:
-    """Linear scene radiance (H, W, 3) for per-LED drive levels led_rgb (n, 3), 0-255."""
+def radiance(view: View, led_rgb: np.ndarray, p: SimParams, ambient: float,
+             band_drives: np.ndarray | None = None) -> np.ndarray:
+    """Linear scene radiance (H, W, 3) for per-LED drive levels led_rgb (n, 3), 0-255.
+
+    With a rolling shutter, each image row samples the scene at its own time.
+    led_rgb is each LED's drive at its own row, which is right for light that
+    lands near the LED (core, halo, needle glow). band_drives (B, n, 3) gives
+    every LED's drive at the times of B horizontal bands, for the light that
+    spreads far (wall glow, room fill), which is composited band by band.
+    """
     cam = view.cam
     sc = _scale(cam)
     shape = (cam.height, cam.width)
@@ -279,11 +287,47 @@ def radiance(view: View, led_rgb: np.ndarray, p: SimParams, ambient: float) -> n
         img += e * _blur(direct, sigma * sc)
     glow_src = _splat(shape, view.emit_uv, drive * (view.glow_vis * p.led_gain * p.glow_gain)[:, None])
     glow = _blur(glow_src, view.glow_sigma_px) * (view.foliage ** 2)[..., None] * 1.2
-    wall_src = _splat(shape, view.uv, drive * p.led_gain)
-    wall = _blur(wall_src, 0.12 * cam.width) * view.wall[..., None] * p.wall_gain * 60
-    total = drive.sum(0)
-    fill = view.background * (ambient + p.room_fill * total[None, None, :] / 3)
-    return fill + view.fixtures + glow + wall + img
+    def far_light(dr):
+        wall_src = _splat(shape, view.uv, dr * p.led_gain)
+        wall = _blur(wall_src, 0.12 * cam.width) * view.wall[..., None] * p.wall_gain * 60
+        fill = view.background * (ambient + p.room_fill * dr.sum(0)[None, None, :] / 3)
+        return wall + fill
+
+    if band_drives is None:
+        far = far_light(drive)
+    else:
+        B = len(band_drives)
+        far = np.empty_like(img)
+        edges = np.linspace(0, cam.height, B + 1).astype(int)
+        for b, bd in enumerate(band_drives):
+            far[edges[b]:edges[b + 1]] = far_light((bd / 255.0) @ p.crosstalk.T)[edges[b]:edges[b + 1]]
+    return far + view.fixtures + glow + img
+
+
+def band_drive(view: View, plan_rgb: np.ndarray, starts_ms: np.ndarray, durations_ms: np.ndarray,
+               frame_t_ms: float, p: SimParams, bands: int = 8, loop_ms: float | None = None) -> np.ndarray:
+    """Every LED's exposure-integrated drive at the time of each of `bands` row bands."""
+    out = []
+    for b in range(bands):
+        frac = (b + 0.5) / bands
+        t = frame_t_ms + frac * p.readout_ms
+        out.append(_window_drive(plan_rgb, starts_ms, durations_ms, np.array([t]), p.exposure_ms,
+                                 loop_ms)[0])
+    return np.stack(out)
+
+
+def _window_drive(plan_rgb, starts_ms, durations_ms, t0, exposure_ms, loop_ms):
+    """Mean drive over [t0, t0 + exposure] for each t0 (shape (k,)), all LEDs: (k, n, 3)."""
+    ends = starts_ms + durations_ms
+    total = ends[-1]
+    t1 = t0 + exposure_ms
+    acc = np.zeros((len(t0),) + plan_rgb.shape[1:], np.float32)
+    for shift in ((0.0,) if loop_ms is None else (-total, 0.0, total)):
+        ov = np.clip(np.minimum(t1[:, None], ends[None] + shift) - np.maximum(t0[:, None], starts_ms[None] + shift),
+                     0, None)  # (k, F)
+        for f in np.nonzero(ov.any(0))[0]:
+            acc += (ov[:, f] / exposure_ms)[:, None, None] * plan_rgb[f][None]
+    return acc
 
 
 def encode_jpeg(img_rgb: np.ndarray, quality: int) -> np.ndarray:

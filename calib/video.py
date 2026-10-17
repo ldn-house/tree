@@ -28,7 +28,7 @@ import numpy as np
 from .camera import Camera
 from .detect import SRGB_LUT, Detection
 from .layout import Layout
-from .render import (SimParams, Sensor, ambient_series, make_view, radiance,
+from .render import (SimParams, Sensor, ambient_series, band_drive, make_view, radiance,
                      rolling_shutter_drive)
 from .sequence import Plan, SequenceParams, build, sequential_plan
 
@@ -76,7 +76,8 @@ def render_video(layout: Layout, cam: Camera, plan: Plan, params: SimParams, spe
         t_tree = start + tau * (1 + spec.clock_ppm * 1e-6)
         times.append(t_tree)
         drive = rolling_shutter_drive(view, rgb, starts, durs, t_tree % loop, params, loop_ms=loop)
-        scene = radiance(view, drive, params, amb[k])
+        bands = band_drive(view, rgb, starts, durs, t_tree % loop, params, loop_ms=loop)
+        scene = radiance(view, drive, params, amb[k], band_drives=bands)
         if spec.awb:
             # Grey-world AWB with lag: gains drift towards making the scene grey.
             mean = scene[::8, ::8].reshape(-1, 3).mean(0) * wb + 1e-6
@@ -129,7 +130,7 @@ class DecodeParams:
     guard_ms: float = 4.0
     readouts_ms: tuple = (0.0, 10.0, 20.0, 30.0)
     exposures_ms: tuple = (2.0, 8.0, 16.0, 30.0)
-    min_margin: float = 0.25        # per-pixel decode margin (0..1) to keep a pixel
+    min_margin: float = 0.35        # per-pixel decode margin, relative to the code's maximum
     min_amplitude_sigma: float = 6.0
     min_pixels: int = 3
 
@@ -138,10 +139,16 @@ def _linear(frame_bgr: np.ndarray) -> np.ndarray:
     return SRGB_LUT[frame_bgr][..., ::-1]  # RGB, linear
 
 
-def read_small(path: Path, ds: int, bands: int):
+def read_small(path: Path, ds: int, bands: int, keep: bool = False):
+    """Downsampled linear frames and a per-band sync series built from LED pixels.
+
+    The series uses only pixels that carry direct LED light: the top 2% by
+    temporal variation of local contrast. Away from the LEDs the image follows
+    the camera's exposure and noise, not the tree, and that biases the timing.
+    """
     cap = cv2.VideoCapture(str(path))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    series, ts = [], []
+    ts, smalls = [], []
     h = w = None
     while True:
         ok, fr = cap.read()
@@ -150,19 +157,30 @@ def read_small(path: Path, ds: int, bands: int):
         ts.append(cap.get(cv2.CAP_PROP_POS_MSEC))
         h, w = fr.shape[:2]
         small = cv2.resize(fr, (w // ds, h // ds), interpolation=cv2.INTER_AREA)
-        lum = _linear(small).mean(-1)
-        # Sparkle: light above the local level, relative to that level. Auto
-        # exposure scales the whole image, so the ratio ignores it; the room and
-        # foliage are smooth, the LEDs are points.
-        base = cv2.GaussianBlur(lum, (0, 0), 3)
-        sparkle = np.maximum(lum - base, 0)
-        series.append([sp.sum() / (bs.sum() + 1e-6) for sp, bs in
-                       zip(np.array_split(sparkle, bands, axis=0), np.array_split(base, bands, axis=0))])
+        smalls.append(_linear(small).astype(np.float32))
     cap.release()
     ts = np.array(ts)
     if len(ts) > 1 and (np.diff(ts) <= 0).any():
         ts = np.arange(len(ts)) * 1000 / fps
-    return np.array(series), ts, fps, (w, h)
+    # Local contrast (light above the local level, relative to that level) is
+    # invariant to auto exposure, and static for light fittings and texture,
+    # so only blinking LEDs vary in time.
+    lum = np.stack([f.mean(-1) for f in smalls])            # (F, h, w)
+    base = np.stack([cv2.GaussianBlur(l, (0, 0), 3) for l in lum])
+    rel = np.maximum(lum - base, 0) / (base + 1e-4)
+    var = rel.std(0)
+    mask = var > np.percentile(var, 98)
+    rows = np.array_split(np.arange(lum.shape[1]), bands)
+    series = np.stack([np.where(mask[r][None], rel[:, r], 0).sum((1, 2)) / max(mask[r].sum(), 1)
+                       for r in rows], 1)
+    # Frame-to-frame change energy of LED pixels per band: every LED changes at
+    # every pattern/complement boundary, so this carries the symbol clock.
+    diff = np.abs(np.diff(rel, axis=0))
+    change = np.stack([np.where(mask[r][None], diff[:, r], 0).sum((1, 2)) / max(mask[r].sum(), 1)
+                       for r in rows], 1)
+    if keep:
+        return series, ts, fps, (w, h), smalls, change
+    return series, ts, fps, (w, h)
 
 
 def plan_brightness(plan: Plan) -> np.ndarray:
@@ -171,80 +189,216 @@ def plan_brightness(plan: Plan) -> np.ndarray:
     return p / max(p.max(), 1)
 
 
+def _sync_scores(y: np.ndarray, ts: np.ndarray, tmpl: np.ndarray, loop: float, phases: np.ndarray,
+                 band_frac: np.ndarray, ro: float, ex: float) -> np.ndarray:
+    """NCC between the (F, B) series and the template for each candidate phase."""
+    k = max(1, int(round(ex)))
+    box = np.convolve(np.concatenate([tmpl, tmpl[:k]]), np.ones(k) / k, "valid")[:len(tmpl)]
+    t = ts[:, None] + band_frac[None, :] * ro
+    tt = np.round(t[None] + phases[:, None, None]).astype(int) % int(loop)
+    pred = box[tt]
+    pred = pred - pred.mean(1, keepdims=True)
+    pred /= pred.std(1, keepdims=True) + 1e-9
+    return (pred * y[None]).mean((1, 2))
+
+
 def find_sync(series: np.ndarray, ts: np.ndarray, plan: Plan, dp: DecodeParams) -> dict:
-    """Loop phase, readout and exposure that best explain the brightness series."""
+    """Loop phase, rolling-shutter readout and exposure from the sparkle series.
+
+    Stage 1 uses the whole frame (one band), which measures the frame-centre
+    time robustly: phase + readout / 2. Stage 2 splits the frame into bands and
+    fits only the readout, with the phase tied to the stage 1 estimate.
+    """
     loop = plan.loop_ms
     bright = plan_brightness(plan)
     starts = plan.starts_ms()
-    # Template sampled at 1 ms over one loop.
     grid = np.arange(int(loop))
-    idx = np.searchsorted(starts, grid, side="right") - 1
-    tmpl = bright[idx]
-    n_frames, nb = series.shape
-    y = series - series.mean(0, keepdims=True)
-    y /= y.std(0, keepdims=True) + 1e-9
-    band_frac = (np.arange(nb) + 0.5) / nb
-    best = None
+    tmpl = bright[np.searchsorted(starts, grid, side="right") - 1]
+    nb = series.shape[1]
+
+    def norm(x):
+        x = x - x.mean(0, keepdims=True)
+        return x / (x.std(0, keepdims=True) + 1e-9)
+
+    whole = norm(series.mean(1, keepdims=True))
     phases = np.arange(0, loop, 1.0)
-    for ro in dp.readouts_ms:
-        for ex in dp.exposures_ms:
-            k = max(1, int(ex))
-            box = np.convolve(np.concatenate([tmpl, tmpl[:k]]), np.ones(k) / k, "valid")[:len(tmpl)]
-            # Sample time for frame i, band b, phase p: (ts[i] + band*ro + p) mod loop
-            t = ts[:, None] + band_frac[None, :] * ro  # (F, B)
-            tt = (t[None] + phases[:, None, None]).astype(int) % int(loop)
-            pred = box[tt]  # (P, F, B)
-            pred = pred - pred.mean(1, keepdims=True)
-            pred /= pred.std(1, keepdims=True) + 1e-9
-            score = (pred * y[None]).mean((1, 2))
-            j = int(np.argmax(score))
-            if best is None or score[j] > best["score"]:
-                best = {"score": float(score[j]), "phase_ms": float(phases[j]), "readout_ms": ro,
-                        "exposure_ms": ex}
-    # Refine phase to 0.25 ms around the best.
-    return best
+    best = None
+    for ex in dp.exposures_ms:
+        sc = _sync_scores(whole, ts, tmpl, loop, phases, np.array([0.5]), 0.0, ex)
+        j = int(np.argmax(sc))
+        if best is None or sc[j] > best[0]:
+            best = (float(sc[j]), float(phases[j]), ex)
+    score1, centre, ex = best
+    # centre is the phase that puts the frame centre (band 0.5) on the template;
+    # with readout ro the row-0 phase is centre - ro / 2.
+    y = norm(series)
+    band_frac = (np.arange(nb) + 0.5) / nb
+    best2 = None
+    for ro in np.arange(0, 41, 5.0):
+        ph = centre - 0.5 * ro + np.arange(-6, 7, 1.0)
+        sc = _sync_scores(y, ts, tmpl, loop, ph % loop, band_frac, ro, ex)
+        j = int(np.argmax(sc))
+        if best2 is None or sc[j] > best2[0]:
+            best2 = (float(sc[j]), float(ph[j] % loop), float(ro))
+    return {"score": score1, "band_score": best2[0], "phase_ms": best2[1], "readout_ms": best2[2],
+            "exposure_ms": float(ex)}
 
 
-def symbol_images(path: Path, plan: Plan, sync: dict, dp: DecodeParams, ts: np.ndarray,
-                  channels: int) -> tuple[np.ndarray, np.ndarray]:
-    """Average each tree frame's image over all clean rows of all frames and loops."""
-    cap = cv2.VideoCapture(str(path))
+def accumulate(frames, ts: np.ndarray, plan: Plan, sync: dict, guard_ms: float, channels: int):
+    """Average each tree frame's image over the clean rows of all video frames.
+
+    A row of a video frame is clean for tree frame j if its exposure window,
+    [t + row / H * readout, + exposure], lies inside frame j shrunk by the guard.
+    """
     loop = plan.loop_ms
     starts = plan.starts_ms().astype(float)
     ends = starts + plan.duration_ms
     ro, ex, ph = sync["readout_ms"], sync["exposure_ms"], sync["phase_ms"]
-    acc = None
-    wsum = None
-    k = 0
-    while True:
-        ok, fr = cap.read()
-        if not ok:
-            break
+    acc = wsum = None
+    for k, lin in enumerate(frames):
         if k >= len(ts):
             break
-        lin = _linear(fr)
-        if channels == 1:
+        if channels == 1 and lin.shape[-1] != 1:
             lin = lin.mean(-1, keepdims=True)
         H = lin.shape[0]
         if acc is None:
             acc = np.zeros((plan.n_frames, H, lin.shape[1], channels), np.float32)
             wsum = np.zeros((plan.n_frames, H), np.float32)
-        t0 = (ts[k] + ph)  # tree time (unwrapped within this clip) of row 0 exposure start
-        rows = np.arange(H)
-        r_start = t0 + rows / H * ro
+        r_start = ts[k] + ph + np.arange(H) / H * ro
         r_end = r_start + ex
         loop_idx = np.floor(r_start / loop)
         for L in np.unique(loop_idx):
             s_loc = r_start - L * loop
             e_loc = r_end - L * loop
             for j in np.nonzero((ends > s_loc.min() - 1) & (starts < e_loc.max() + 1))[0]:
-                good = (s_loc >= starts[j] + dp.guard_ms) & (e_loc <= ends[j] - dp.guard_ms)
+                good = (s_loc >= starts[j] + guard_ms) & (e_loc <= ends[j] - guard_ms)
                 if good.any():
                     acc[j, good] += lin[good]
                     wsum[j, good] += 1
-        k += 1
-    cap.release()
     return acc, wsum
+
+
+def _video_frames(path: Path):
+    cap = cv2.VideoCapture(str(path))
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        yield _linear(fr)
+    cap.release()
+
+
+def symbol_images(path: Path, plan: Plan, sync: dict, dp: DecodeParams, ts: np.ndarray,
+                  channels: int) -> tuple[np.ndarray, np.ndarray]:
+    return accumulate(_video_frames(path), ts, plan, sync, dp.guard_ms, channels)
+
+
+def decode_quality(acc: np.ndarray, wsum: np.ndarray, plan: Plan, colour: bool) -> float:
+    """Amplitude-weighted mean decode margin: how cleanly the symbols decode."""
+    if (wsum[[f for f in range(plan.n_frames) if plan.roles[f] in ("code", "off")]] == 0).mean() > 0.5:
+        return 0.0
+    accn = acc / np.maximum(wsum[..., None, None], 1e-6)
+    off = accn[plan.index("off")[0]]
+    amp = np.zeros(off.shape[:2], np.float32)
+    for f in range(plan.n_frames):
+        if plan.roles[f] == "code":
+            amp = np.maximum(amp, np.abs(accn[f] - off).max(-1))
+    thr = np.percentile(amp, 97)
+    pix = np.nonzero(amp > thr)
+    if len(pix[0]) < 10:
+        return 0.0
+    sb, a = _soft_bits(accn, plan, pix, colour)
+    W = plan.codebook.words.astype(np.float32) * 2 - 1
+    score = sb @ W.T / plan.codebook.n_bits
+    part = -np.partition(-score, 1, axis=1)
+    cb = plan.codebook
+    margin = (part[:, 0] - part[:, 1]) / (2 * cb.min_distance / cb.n_bits)
+    return float(np.average(np.clip(margin, 0, 1), weights=a))
+
+
+def refine_sync_transitions(change: np.ndarray, ts: np.ndarray, plan: Plan, sync: dict,
+                            span_ms: float = 64.0, n_sample: int = 120, seed: int = 0,
+                            series: np.ndarray | None = None) -> dict:
+    """Refine phase, readout and exposure by matching frame-to-frame change energy.
+
+    For each candidate, predict for every band the mean |change| of a sample
+    of LEDs' exposure-integrated drive between consecutive video frames and
+    correlate it with the measured change energy of LED pixels. That template
+    is nearly periodic in the symbol length, so the brightness correlation
+    (precise to tens of ms but unambiguous) is added to pick the right symbol.
+    """
+    from .render import _window_drive
+    rng = np.random.default_rng(seed)
+    rgb = plan.rgb().mean(-1)                        # (F_tree, n) mono drive
+    leds = rng.choice(rgb.shape[1], min(n_sample, rgb.shape[1]), replace=False)
+    rgb = rgb[:, leds][..., None]
+    loop = plan.loop_ms
+    starts = plan.starts_ms().astype(float)
+    durs = plan.duration_ms.astype(float)
+    B = change.shape[1]
+    frac = (np.arange(B) + 0.5) / B
+    valid = change.std(0) > 0
+    y = change[:, valid]
+    y = (y - y.mean(0)) / (y.std(0) + 1e-9)
+    bright_tmpl = plan_brightness(plan)[np.searchsorted(starts, np.arange(int(loop)), side="right") - 1]
+    whole = None
+    if series is not None:
+        whole = series.mean(1, keepdims=True)
+        whole = (whole - whole.mean()) / (whole.std() + 1e-9)
+    def evaluate(centre, dphs, exs, ros):
+        best = None
+        for ex in exs:
+            for ro in ros:
+                bsc = np.zeros(len(dphs))
+                if whole is not None:
+                    bsc = _sync_scores(whole, ts, bright_tmpl, loop, (centre + dphs + 0.5 * ro) % loop,
+                                       np.array([0.0]), 0.0, ex)
+                for dph, b_score in zip(dphs, bsc):
+                    ph = centre + dph
+                    t = (ts[:, None] + ph + frac[None, valid] * ro) % loop       # (F, Bv)
+                    d = _window_drive(rgb, starts, durs, t.ravel(), ex, loop)[..., 0]
+                    d = d.reshape(t.shape + (len(leds),))
+                    pred = np.abs(np.diff(d, axis=0)).mean(-1)                    # (F-1, Bv)
+                    pred = (pred - pred.mean(0)) / (pred.std(0) + 1e-9)
+                    sc = float((pred * y).mean()) + float(b_score)
+                    if best is None or sc > best[0]:
+                        best = (sc, ph % loop, ro, ex)
+        return best
+
+    # Coarse over the full span on a reduced grid, then fine around the best.
+    coarse = evaluate(sync["phase_ms"], np.arange(-span_ms, span_ms + 1, 4.0), (4.0, 12.0, 24.0),
+                      (0.0, 10.0, 20.0, 30.0, 40.0))
+    best = evaluate(coarse[1], np.arange(-6, 7, 1.0), (2.0, 8.0, 16.0, 33.0), (0.0, 10.0, 20.0, 30.0, 40.0))
+    out = dict(sync)
+    out.update({"phase_ms": float(best[1]), "readout_ms": best[2], "exposure_ms": best[3],
+                "transition_score": best[0]})
+    return out
+
+
+def refine_sync(smalls: list, ts: np.ndarray, plan: Plan, sync: dict, dp: DecodeParams,
+                colour: bool) -> dict:
+    """Coordinate search on phase, readout and exposure maximising decode quality."""
+    channels = 3 if colour else 1
+    frames = smalls if channels == 3 else [f.mean(-1, keepdims=True) for f in smalls]
+    best = dict(sync)
+
+    def q(c):
+        acc, wsum = accumulate(frames, ts, plan, c, dp.guard_ms, channels)
+        return decode_quality(acc, wsum, plan, colour)
+
+    best["quality"] = q(best)
+    for _round in range(2):
+        for key, grid in (("phase_ms", best["phase_ms"] + np.arange(-36, 37, 4.0)),
+                          ("readout_ms", np.arange(0, 41, 5.0)),
+                          ("exposure_ms", np.array([2.0, 4.0, 8.0, 16.0, 24.0, 33.0])),
+                          ("phase_ms", best["phase_ms"] + np.arange(-4, 5, 1.0))):
+            for val in grid:
+                cand = dict(best)
+                cand[key] = float(val % plan.loop_ms) if key == "phase_ms" else float(val)
+                qq = q(cand)
+                if qq > best["quality"] + 1e-4:
+                    best, best["quality"] = cand, qq
+    return best
 
 
 def _soft_bits(acc: np.ndarray, plan: Plan, pix: tuple, colour: bool):
@@ -305,7 +459,10 @@ def decode_symbols(acc: np.ndarray, wsum: np.ndarray, plan: Plan, dp: DecodePara
     s1 = score[np.arange(len(score)), top2[:, 0]]
     s2 = score[np.arange(len(score)), top2[:, 1]]
     first = np.where(s1 >= s2, top2[:, 0], top2[:, 1])
-    margin = np.abs(s1 - s2)
+    # The best-vs-second gap can be at most 2 d / n for a code of minimum
+    # distance d, so normalise it to [0, 1] to compare codes fairly.
+    cb = plan.codebook
+    margin = np.abs(s1 - s2) / (2 * cb.min_distance / cb.n_bits)
     best = np.maximum(s1, s2)
     keep = (margin >= dp.min_margin) & (best > 0.5)
     ids = np.full(off.shape[:2], -1, np.int32)
@@ -348,7 +505,7 @@ def blobs(dec: dict, n: int, dp: DecodeParams) -> dict[int, Detection | None]:
         cx = float((xa[core] * wc).sum() / wc.sum())
         cy = float((ya[core] * wc).sum() / wc.sum())
         mm = float(np.average(marg[ya, xa], weights=wa))
-        conf = float(np.clip(mm * 1.5, 0, 1) * (1 - min(second, 1)) * min(1.0, sel.sum() / 6))
+        conf = float(np.clip(mm * 1.2, 0, 1) * (1 - min(second, 1)) * min(1.0, sel.sum() / 6))
         out[led] = Detection(cx + 0.0, cy + 0.0, float(aa.max()), float(np.log10(sel.sum())), mm, float(second),
                              0.0, conf)
     return out
@@ -374,11 +531,13 @@ def decode_sequential(acc: np.ndarray, wsum: np.ndarray, plan: Plan) -> dict[int
 
 def decode_video(path: Path, plan: Plan, dp: DecodeParams | None = None, verbose: bool = False) -> dict:
     dp = dp or DecodeParams()
-    series, ts, fps, (w, h) = read_small(path, dp.downsample, dp.bands)
+    series, ts, fps, (w, h), smalls, change = read_small(path, dp.downsample, dp.bands, keep=True)
+    colour = plan.params.colour
     sync = find_sync(series, ts, plan, dp)
+    sync = refine_sync_transitions(change, ts, plan, sync, series=series)
+    del smalls
     if verbose:
         print(f"  {path.name}: {len(ts)} frames @ {fps:.1f} fps, sync {sync}")
-    colour = plan.params.colour
     channels = 3 if colour else 1
     acc, wsum = symbol_images(path, plan, sync, dp, ts, channels)
     missing = [i for i in range(plan.n_frames) if wsum[i].max() == 0]
