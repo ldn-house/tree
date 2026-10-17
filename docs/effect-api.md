@@ -123,6 +123,44 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 | `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
 | `./render.py all` | Every effect, plus `renders/overview.png` and `renders/summary.json`. |
 | `micropython tools/mp_check.py` | Allocation check under MicroPython. |
+| `./new_effect.py <name> [--flat]` | Scaffold `effects/<name>.py` from a template, register it in `EFFECTS` and render it once. |
+| `./render.py <effect> --watch` | Re-render on every save in `effects/`. |
+| `./serve.py` | Browser viewer (`viewer/`), hot-reloads changed effect files. |
+| `./push_effect.py <effect...> --host H [--select]` | Run the local checks, then push just those files to the tree over Wi-Fi (see below). |
 | `./smoke.py [effect...]` | Everything CI checks: metadata, pure imports, renders without exceptions, not all-black, within budget, deterministic, survives params at min/max and no coordinates, mpy-cross compile, MicroPython allocation check. |
 
 The renderer draws front, side and top projections of the real coordinates. Display brightness is gamma-lifted (1/2.2) so that dim output stays visible; the numbers in `metrics.json` are the actual output values.
+
+## Pushing one effect over OTA
+
+`./push_effect.py` updates effect files on a running tree without a firmware build or a reboot:
+
+1. It runs the smoke checks on each effect and compiles every file with mpy-cross. Failures stop the push.
+2. `GET /effects` reads what the device has.
+3. If an effect isn't registered on the device yet, it adds `effects/__init__.py` to the push. It refuses when that registry would list effects the device lacks.
+4. It uploads with `POST /effects/<module>`: shared modules (`_util`, `_output`, `_coords`) first, effect modules next, `__init__` last.
+5. It re-reads `GET /effects` and checks that every SHA-256 matches.
+6. With `--select`, it calls `POST /effects/<name>/select`.
+
+`tools/mock_tree.py` implements the device side for local testing and is an executable reference for it.
+
+### What the firmware needs to provide
+
+On the existing HTTP server (port 8080), with whatever authentication the rest of the OTA API uses. The client sends `Authorization: Bearer $TREE_TOKEN` when a token is set.
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /effects` | `200` JSON `{"effects": [...EFFECTS in order], "files": {"<module>": "<sha256 hex>", ...}, "current": "<name or null>"}`. `files` covers every `effects/*.py` on the device, keyed by module name without `.py`. |
+| `POST /effects/<module>` | Body: the file's source; `Content-Length` required; `X-Content-SHA256` header. `<module>` matches `[A-Za-z_][A-Za-z0-9_]*`. See the steps below. |
+| `POST /effects/<name>/select` | Lock the tree to effect `<name>`, as choosing it in Home Assistant does. `200 {"ok": true, "current": name}`, `404` if unknown. |
+
+`POST /effects/<module>` must handle the upload as follows:
+
+1. Reject unless exactly `Content-Length` bytes arrived and their SHA-256 matches the header (`400`).
+2. Write to `effects/<module>.py.tmp` and `compile()` it.
+3. Keep the old file as `.bak`, rename the new one into place, and drop `effects` and `effects.*` from `sys.modules`.
+4. For an effect module, import it, construct `Effect(ctx)` and render one frame. For `__init__` or a shared module, do that for every registered effect.
+5. On any failure, restore the `.bak`, purge again, and reply `422 {"ok": false, "error": "<exception text>"}`. The previously working version must keep running.
+6. On success, reply `200 {"ok": true, "file": "effects/<module>.py", "bytes": n, "sha256": "<hex>"}`. If the replaced effect is the one currently running, restart it from the new module. No reboot.
+
+The runtime should also skip any name in `EFFECTS` whose module is missing or fails to import, rather than stopping. Files pushed this way persist until the next full firmware update overwrites them.

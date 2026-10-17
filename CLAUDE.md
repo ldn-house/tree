@@ -57,6 +57,9 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 - `serve.py` - Local HTTP server for the viewer (with hot reload)
 - `effects/` - Pure effect modules plus shared output stage and coordinate loading (see `docs/effect-api.md`)
 - `render.py` - Headless effect renderer (GIF, contact sheet, metrics)
+- `smoke.py` - Validates every effect (CI: `.github/workflows/effects.yml`)
+- `new_effect.py` / `push_effect.py` - Scaffold an effect; push effect files over OTA
+- `tools/` - `mp_check.py` (MicroPython allocation check), `mock_tree.py` (local stand-in for the effects OTA API)
 
 ### Calibration Tools (for 3D coordinate mapping)
 
@@ -134,7 +137,7 @@ Effects live in `effects/`, one module per effect, written against the pure API 
 
 To add an effect, create `effects/<name>.py` with `NAME`, `DURATION_MS`, `PARAMS`, `NEEDS_COORDS` and an `Effect` class, then add the name to `EFFECTS` in `effects/__init__.py`. `render()` must not allocate on MicroPython, so use integer maths over tables precomputed in `__init__` (see `effects/_util.py`).
 
-Check changes headlessly:
+Scaffold one with `./new_effect.py <name>` (add `--flat` for a template that doesn't need coordinates). Check changes headlessly:
 
 ```bash
 ./render.py <effect>            # renders/<effect>/{sheet.png,anim.gif,metrics.json}
@@ -145,3 +148,5 @@ micropython tools/mp_check.py   # every render() is allocation-free on MicroPyth
 ```
 
 Attach `sheet.png` (and the GIF) to PRs that change an effect.
+
+To try an effect on the tree without a firmware update, use `./push_effect.py <name> --host <ip> --select`. It needs the firmware's effects OTA API; see "Pushing one effect over OTA" in `docs/effect-api.md`.

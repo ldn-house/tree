@@ -100,6 +100,8 @@ def check_render(rep, name, mod, coords, seconds, fps):
     again = render.run_effect(name, seconds, fps, seed=1, coords=coords)["metrics"]
     rep.check(again["frames_sha256"] == m["frames_sha256"], name, "not deterministic for a fixed seed")
     p = m["power"]
+    if not m["frames"]:
+        return
     print(f"       {m['frames']} frames, cap {100 * p['cap_engaged_rate']:.0f}%, "
           f"peak {p['current_a']['peak']:.2f} A, lit {m['lit_fraction']['mean']:.0%}, "
           f"{res['perf']['render_ms_mean']} ms/frame")
