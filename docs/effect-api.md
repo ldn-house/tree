@@ -47,14 +47,14 @@ class Effect:
 |---|---|
 | `ctx.n` | LED count (500). |
 | `ctx.coords` | `None`, or a list of `n` entries, each `(x, y, z)` or `None`; see [Coordinates](#coordinates). |
-| `ctx.params` | Dict of current param values. Values may be replaced between frames, so read them in `render()` (see `Param` below). |
+| `ctx.params` | Dict of current param values. The runtime assigns new values into this same dict between frames, and never swaps the dict itself, since effects keep a reference to it. Read params in `render()` (see `Param` below). |
 | `ctx.random` | Random source with `seed()`, `random()` and `getrandbits(k)`. On the Pico this is the `random` module; in the renderer and viewer it is `random.Random(seed)`. Use this, never the global `random`. |
 
 `effects.Ctx(n, coords, params, random)` builds one; the runtime may use any object with these attributes.
 
 ### render(t_ms, frame)
 
-- `t_ms`: int milliseconds since the effect started; monotonic, non-decreasing. The runtime restarts the effect (new `Effect(ctx)`, `t_ms` from 0) before `t_ms` reaches 2^29 (about 6 days), so it always stays a MicroPython small int.
+- `t_ms`: int milliseconds since the effect started; monotonic, non-decreasing. A global speed control scales the clock: the runtime accumulates scaled time, so `t_ms` never jumps backwards. Helpers treat a single step over 1 s as a stall and don't animate across it. The runtime restarts the effect (new `Effect(ctx)`, `t_ms` from 0) before `t_ms` reaches 2^29 (about 6 days), so it always stays a MicroPython small int.
 - `frame`: `bytearray(3 * n)`, RGB order, linear 0-255, **not** brightness-scaled or power-capped. Write every pixel on every call; the buffer is reused and holds the previous frame.
 - Frame rate is the runtime's choice (target 30-60 fps, measured) and may vary. Animate from `t_ms`, never from a frame count.
 
