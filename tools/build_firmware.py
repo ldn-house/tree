@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["mpy-cross==1.29.0.post2"]
+# dependencies = ["mpy-cross==1.27.0.post2"]
 # ///
 """Build the firmware bundle that the device installs (see firmware/bootmgr.py).
 
@@ -55,8 +55,13 @@ def version_info():
         version = commit[:7]
         if not os.environ.get("GITHUB_SHA") and git("status", "--porcelain", "--untracked-files=no"):
             version += "-dirty"
-    built = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {"version": version, "commit": commit, "ref": ref, "built": built}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # "generation" orders bundles for the device's anti-replay floor: it is
+    # signed with the manifest, and the device refuses a bundle older than one
+    # it has already confirmed healthy. Build time works for CI and local
+    # builds alike; equal generations are accepted.
+    return {"version": version, "commit": commit, "ref": ref, "built": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generation": int(now.timestamp())}
 
 
 def bootmgr_api():
@@ -149,12 +154,15 @@ def main():
     ap.add_argument("--key", default=os.environ.get("FIRMWARE_SIGNING_KEY") or None, help="HMAC signing key")
     ap.add_argument("--source", action="store_true", help="bundle .py sources instead of .mpy")
     ap.add_argument("--version", help="override the version string")
+    ap.add_argument("--generation", type=int, help="override the generation (anti-replay order)")
     ap.add_argument("--app", default=str(ROOT / "firmware" / "app"), help=argparse.SUPPRESS)  # tests: patched app
     args = ap.parse_args()
 
     info = version_info()
     if args.version:
         info["version"] = args.version
+    if args.generation is not None:
+        info["generation"] = args.generation
     with tempfile.TemporaryDirectory() as tmp:
         files = collect(Path(args.effects), args.source, Path(tmp), Path(args.app))
     data, mbytes, manifest = bundle(files, info, args.key)

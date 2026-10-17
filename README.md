@@ -30,7 +30,7 @@ uv automatically handles dependencies.
 
 ### Updates that can't brick the tree
 
-The firmware has two slots. An update is written to the unused slot, verified (sizes, SHA-256 hashes, optional signature, compile checks) and booted as a trial; if it doesn't come up healthy it is rolled back automatically. If nothing will boot, the tree drops into a safe mode that still accepts a new bundle over Wi-Fi. The small recovery layer that does this is only ever written over USB. See CLAUDE.md for details.
+The firmware has two slots. An update is staged, verified (sizes, SHA-256 hashes, signature, an anti-replay generation, compile checks), only then copied over the unused slot, and booted as a trial; if it doesn't come up healthy it is rolled back automatically. A rejected update changes nothing. If nothing will boot, or the flash can't be written, the tree drops into a safe mode that still accepts a new bundle (or a fixed config) over Wi-Fi. The small recovery layer that does this is installed over USB and no update path writes it. Code you install yourself (firmware, hot-pushed effects) is trusted and runs with full access, so set `UPDATE_KEY` to require your signature on all of it. See CLAUDE.md, "Trust model".
 
 ## Home Assistant Integration
 

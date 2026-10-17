@@ -8,7 +8,7 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 
 ## Hardware
 
-- **Target**: Pi Pico 2W running MicroPython (>= 1.25; bundles are mpy v6.3 bytecode)
+- **Target**: Pi Pico 2W running MicroPython 1.27.0 (RPI_PICO2_W; bundles are mpy v6.3 bytecode from mpy-cross 1.27). Measured on the board: 452,544 bytes heap free at an idle REPL, 2,621,440-byte filesystem
 - **LEDs**: 500x WS2811 12V RGB strip, RGB on the wire (`COLOR_ORDER`)
 - **Data signal**: 3.3V GPIO (GP0) → level shifter → 5V to LEDs, driven by a PIO state machine fed by DMA
 
@@ -36,18 +36,20 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 tools/build_firmware.py
 
 # Offline firmware tests: MicroPython unix port, mocked hardware, local mosquitto
-uv run --with pytest --with paho-mqtt --with mpy-cross==1.29.0.post2 pytest tests/firmware
+uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware
 ```
 
-OTA needs `HTTP_TOKEN` (config.py, `$TREE_TOKEN` or `--token`). config.py only ever goes over USB.
+OTA needs `HTTP_TOKEN` (config.py, `$TREE_TOKEN` or `--token`). `./flash.py --ota --config` replaces config.py over Wi-Fi (sent as JSON values, signed with `UPDATE_KEY`); flash.py validates config.py before sending it anywhere. The first USB install also removes the old single-slot firmware files (`ota.py`, `mqtt.py`, `selfupdate.py`, `github.py`, `version.py`, `lib/umqtt`, `lib/ssl.mpy`) and keeps `config.py` and the root `coords_compact.txt`.
 
 ## Architecture
 
 Firmware lives in `firmware/`:
 
-- **Recovery layer** (USB only; nothing on the network can write it): `boot.py`, `main.py`, `bootmgr.py`, `safemode.py`.
-  - `bootmgr.py` keeps `/boot.json` (active slot, previous slot, trial flag, boot counter) and installs update bundles into the inactive slot `/fw/a` or `/fw/b`, verifying size, SHA-256, signature, `.mpy` version and Python syntax. Switching is one atomic rename of `boot.json`.
-  - A freshly installed slot is a *trial*: if the device reboots before the app reports healthy, the next boot rolls back. A confirmed slot that fails 3 boots in a row falls back to the previous slot, then to **safe mode** (`safemode.py`: Wi-Fi + minimal authenticated HTTP server that accepts a new bundle).
+- **Recovery layer** (installed over USB; no update, upload or API path writes it): `boot.py`, `main.py`, `bootmgr.py`, `safemode.py`. See "Trust model" for what that does and doesn't protect against.
+  - `bootmgr.py` keeps `/boot.json` (active slot, previous slot, trial flag, boot counter, generation floor). Bundles stream into staging (`/fw/new`), are verified (size, SHA-256, signature, generation, `.mpy` version, Python syntax), and only then replace the inactive slot `/fw/a` or `/fw/b`; switching is one atomic rename of `boot.json`. A rejected upload or a dry-run never touches either slot, and a real install is refused while the running firmware is an unconfirmed trial.
+  - A freshly installed slot is a *trial*: if the device reboots before the app reports healthy, the next boot rolls back. A confirmed slot that fails 3 boots in a row falls back to the previous slot, then to **safe mode** (`safemode.py`: Wi-Fi + minimal authenticated HTTP server that accepts a new bundle or a new config). If the boot can't even be recorded (flash full or failing), main.py goes straight to safe mode, which first reclaims staging, the 256 KB recovery reserve (`/fw/reserve.bin`), hot-pushed effects and logs.
+  - Anti-replay: each bundle's manifest carries a signed `generation` (build time). Once a generation is confirmed healthy it becomes the floor, and older bundles are refused unless the request says `allow_downgrade=1` (`flash.py --allow-downgrade`; USB installs always may). Self-update from GitHub never downgrades.
+  - Config: the last config.py that loaded is kept as `/config.good.json`; if config.py breaks, both the app and safe mode use it, so the tree stays reachable and `PUT /config` can fix it.
   - `boot.py` only keeps an already-running watchdog fed by a timer, so mpremote sessions (which soft-reset without running main.py) are never cut off. The boot counter is in main.py's path.
 - **App** (`firmware/app/`, one slot, replaced by updates): a single asyncio event loop, no threads.
   - `runtime.py` wires tasks together; `supervisor.py` owns the 8 s hardware watchdog and feeds it only while every task heartbeats, decides health, confirms trial updates and performs reboots.
@@ -60,7 +62,13 @@ Firmware lives in `firmware/`:
 - `tests/firmware/` — the firmware on the MicroPython unix port: `mocks/` (machine, rp2, network), `devsim.py` (simulated resets and watchdog), unit tests in `mp/`, and device tests for updates, faults, MQTT and calibration.
 - `config.py` — WiFi, token, MQTT, signing key (gitignored; see `config.example.py`)
 
-Flash layout on the device: recovery files and `config.py` at `/`, slots in `/fw/a` and `/fw/b`, hot-pushed effects in `/fx`, plus `/boot.json`, `/state.json`, `/coords.txt`.
+Flash layout on the device: recovery files and `config.py` at `/`, slots in `/fw/a` and `/fw/b`, staging in `/fw/new`, the recovery reserve `/fw/reserve.bin`, hot-pushed effects in `/fx`, plus `/boot.json`, `/config.good.json`, `/state.json`, `/coords.txt`.
+
+### Trust model
+
+- Updates can't brick the tree: truncated, corrupt, wrongly signed, replayed or otherwise rejected bundles change nothing, and a bundle that installs but doesn't come up healthy is rolled back automatically.
+- Code you choose to run is trusted. Firmware bundles and hot-pushed effects execute with full access to the flash (MicroPython has no sandbox), so they *could* overwrite the recovery layer or erase the filesystem; that would need USB to fix. With `UPDATE_KEY` set, bundles, effects and config uploads must all be signed with it, so the HTTP token alone can't run code. Without `UPDATE_KEY`, the HTTP token is full administrative access, including code execution.
+- A frozen recovery layer (custom MicroPython UF2) would make the recovery code itself unmodifiable from Python; it is not implemented (see PR #21's discussion of review item H4).
 
 ### Calibration Tools (for 3D coordinate mapping)
 
@@ -73,15 +81,18 @@ Flash layout on the device: recovery files and `config.py` at `/`, slots in `/fw
 
 Port 8080. Mutating endpoints need `Authorization: Bearer <HTTP_TOKEN>` (or `X-Tree-Token`); read-only ones are open. Source of truth: `firmware/app/api.py` and `firmware/app/calib.py`.
 
+Signatures (`X-Signature`) are hex HMAC-SHA256 with `UPDATE_KEY` over `b"tree-<kind>\n" + message`: kind `effect` with message `name + "\n" + module bytes`, kind `config` with the JSON body. Request heads are bounded (1 KB per line, 4 KB in total) and every request has a whole-request deadline.
+
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/`, `/status` | GET | | Status: version, slot, boot/trial state, effect, Wi-Fi, MQTT, update, supervisor |
 | `/health` | GET | | `{"ok", "healthy", "problems"}` |
 | `/log`, `/mqtt`, `/frame`, `/effects`, `/gc` | GET | | Recent log, MQTT client state, last wire frame (base64), effect list |
 | `/state` | POST | yes | JSON `{power, brightness, effect, speed, auto_s, params}` |
-| `/effects/<name>` | PUT/DELETE | yes | Hot-push (validated, no reboot) or remove an effect module |
+| `/effects/<name>` | PUT/DELETE | yes | Hot-push (validated, no reboot; `X-Signature` required when `UPDATE_KEY` is set) or remove an effect module |
+| `/config` | PUT | yes | Replace config.py from JSON values (no code accepted); `X-Signature` required when `UPDATE_KEY` is set; reboots |
 | `/files/coords.txt` | PUT | yes | Coordinates in the contract frame (`coords_compact.txt` for legacy files) |
-| `/update` | POST | yes | Firmware bundle; `?dry_run=1` verifies only. Reboots into it as a trial |
+| `/update` | POST | yes | Firmware bundle; `?dry_run=1` verifies only, `?allow_downgrade=1` accepts an older generation. Reboots into it as a trial |
 | `/update/status` | GET | | Progress of the current or last update |
 | `/update/github?channel=main\|stable` | POST | yes | Self-update from GitHub Releases (needs `UPDATE_KEY`) |
 | `/update/github/check` | GET | yes | Latest version on a channel |

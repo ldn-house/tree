@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["mpremote", "httpx", "mpy-cross==1.29.0.post2"]
+# dependencies = ["mpremote", "httpx", "mpy-cross==1.27.0.post2"]
 # ///
 """Install firmware on the tree's Pico, over USB or Wi-Fi (OTA).
 
@@ -17,6 +17,8 @@ OTA (needs HTTP_TOKEN, from config.py, $TREE_TOKEN or --token):
     ./flash.py --ota --host tree.local --coords        push coordinates only
     ./flash.py --ota --host tree.local --status        show status (read-only)
     ./flash.py --ota --host tree.local --rollback      boot the previous firmware
+    ./flash.py --ota --host tree.local --config        replace config.py (signed with UPDATE_KEY)
+    ./flash.py --ota --host tree.local --bundle X --allow-downgrade   install an older build on purpose
 
 An OTA update is installed into the inactive slot, verified on the device and
 booted as a trial; flash.py waits until the device confirms it healthy, or
@@ -121,8 +123,47 @@ def inspect(bundle: Path, key=None):
 FEEDER = "import machine\n_w = machine.WDT(timeout=8000)\n_t = machine.Timer(period=1000, callback=lambda t: _w.feed())"
 
 
+# Files from the old single-slot firmware. lib/ssl.mpy is an old mip copy of
+# ssl; the frozen ssl comes first on the rp2's default sys.path, but it is
+# removed anyway so nothing can pick it up. config.py and coords_compact.txt
+# (the user's coordinates, still read) stay.
+LEGACY = ["ota.py", "mqtt.py", "selfupdate.py", "github.py", "version.py", "lib/ssl.mpy"]
+LEGACY_DIRS = ["lib/umqtt"]
+CLEANUP = (
+    "import os\n"
+    "def _rm(p):\n"
+    "    try:\n"
+    "        if os.stat(p)[0] & 0x4000:\n"
+    "            for e in os.listdir(p):\n"
+    "                _rm(p + '/' + e)\n"
+    "            os.rmdir(p)\n"
+    "        else:\n"
+    "            os.remove(p)\n"
+    "        print('removed legacy', p)\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "for _p in %r:\n"
+    "    _rm(_p)\n"
+) % (LEGACY + LEGACY_DIRS,)
+
+
+def check_config(path: Path):
+    """Refuse to install a config.py the device couldn't use (review M9):
+    it must run, and have the settings recovery depends on."""
+    try:
+        cfg = runpy.run_path(str(path))
+    except Exception as e:
+        die(f"{path} does not load: {e!r}")
+    for k in ("WIFI_SSID", "HTTP_TOKEN"):
+        if not isinstance(cfg.get(k), str) or not cfg[k]:
+            die(f"{path} has no {k}")
+    if len(cfg["HTTP_TOKEN"]) < 8:
+        die("HTTP_TOKEN must be at least 8 characters")
+    return {k: v for k, v in cfg.items() if k.isupper() and isinstance(v, (str, int, float, bool, type(None)))}
+
+
 def usb(bundle: Path, extra_files):
-    cmd = ["mpremote", "exec", FEEDER]
+    cmd = ["mpremote", "exec", FEEDER, "+", "exec", CLEANUP]
     for f in RECOVERY:
         cmd += ["+", "cp", str(ROOT / "firmware" / f), f":{f}"]
     for src, dest in extra_files:
@@ -175,7 +216,20 @@ class Tree:
         return None
 
 
-def ota_update(tree: Tree, bundle: Path, manifest):
+def sign(key, kind, body: bytes):
+    return hmac.new(key.encode(), b"tree-" + kind.encode() + b"\n" + body, hashlib.sha256).hexdigest()
+
+
+def ota_config(tree: Tree, cfg_values, key):
+    body = json.dumps(cfg_values).encode()
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["X-Signature"] = sign(key, "config", body)
+    res = tree.call("PUT", "/config", content=body, headers=headers)
+    print(f"config.py replaced ({', '.join(res['written'])}); the device is rebooting.")
+
+
+def ota_update(tree: Tree, bundle: Path, manifest, allow_downgrade=False):
     try:
         before = tree.status()
     except Exception as e:
@@ -185,7 +239,8 @@ def ota_update(tree: Tree, bundle: Path, manifest):
     else:
         print(f"Device runs {before['version']} (slot {before['slot']}); installing {manifest['version']}.")
     data = bundle.read_bytes()
-    res = tree.call("POST", "/update", content=data, headers={"Content-Type": "application/octet-stream"}, timeout=120.0)
+    path = "/update?allow_downgrade=1" if allow_downgrade else "/update"
+    res = tree.call("POST", path, content=data, headers={"Content-Type": "application/octet-stream"}, timeout=300.0)
     print(f"Installed {res.get('installed')}; rebooting into it as a trial.")
     st = tree.wait(lambda s: s.get("version") == manifest["version"] or "rolled back" in s.get("boot", {}).get("status", ""),
                    120)
@@ -217,6 +272,8 @@ def main():
     ap.add_argument("--status", action="store_true", help="OTA: print device status and exit")
     ap.add_argument("--rollback", action="store_true", help="OTA: boot the previous firmware")
     ap.add_argument("--reboot", action="store_true", help="OTA: reboot the device")
+    ap.add_argument("--allow-downgrade", action="store_true",
+                    help="OTA: install a bundle older than the newest one the device has confirmed")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -243,7 +300,8 @@ def main():
             print(tree.call("POST", "/reboot"))
             return
         if args.config:
-            die("config.py can only be changed over USB (it holds the token and Wi-Fi settings)")
+            ota_config(tree, check_config(ROOT / "config.py"), key)
+            return
         if args.coords:
             res = tree.call("PUT", "/files/coords_compact.txt", content=coords.read_bytes())
             print(f"Coordinates stored: {res['known']} of {res['leds']} LEDs placed.")
@@ -271,10 +329,11 @@ def main():
         print(f"Bundle {manifest['version']} ({manifest.get('ref')}, built {manifest.get('built')}), "
               f"{len(manifest['files'])} files, {'signed' if manifest['signed'] else 'unsigned'}")
         if args.ota:
-            ota_update(Tree(args.host, port, token), bundle, manifest)
+            ota_update(Tree(args.host, port, token), bundle, manifest, args.allow_downgrade)
         else:
             extra = []
             if args.config:
+                check_config(ROOT / "config.py")
                 extra.append((ROOT / "config.py", "config.py"))
             if args.coords:
                 extra.append((coords, "coords_compact.txt"))
