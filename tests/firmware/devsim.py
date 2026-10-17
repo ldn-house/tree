@@ -260,7 +260,7 @@ def wait_for(pred, timeout=30, interval=0.2, what="condition"):
 
 
 def build_bundle(out: Path, effects: Path | None = None, key: str | None = None, version: str | None = None,
-                 source=False, app: Path | None = None):
+                 source=False, app: Path | None = None, generation: int | None = None):
     import sys
 
     cmd = [sys.executable, str(ROOT / "tools" / "build_firmware.py"), "--out", str(out)]
@@ -271,7 +271,10 @@ def build_bundle(out: Path, effects: Path | None = None, key: str | None = None,
         cmd += ["--version", version]
     if source:
         cmd.append("--source")
+    app = app or os.environ.get("DEVSIM_APP")  # e.g. an older firmware/app to show a regression
     if app:
         cmd += ["--app", str(app)]
+    if generation is not None:
+        cmd += ["--generation", str(generation)]
     subprocess.run(cmd, check=True, capture_output=True)
     return out / "tree-firmware.bin"

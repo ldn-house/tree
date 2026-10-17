@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  MICROPYTHON_VERSION: v1.29.0
+  MICROPYTHON_VERSION: v1.27.0
 
 jobs:
   build:
@@ -32,7 +32,7 @@ jobs:
         # Installed over USB only; mpy-cross catches syntax errors.
         run: |
           for f in firmware/*.py; do
-            uvx --from mpy-cross==1.29.0.post2 mpy-cross -o /dev/null "$f"
+            uvx --from mpy-cross==1.27.0.post2 mpy-cross -o /dev/null "$f"
           done
 
       - name: Build bundle (mpy-cross compiles every module)
@@ -53,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the review regression test compares with an older commit
       - uses: astral-sh/setup-uv@v6
 
       - name: Install mosquitto
@@ -63,7 +65,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/micropython-bin
-          key: micropython-unix-${{ env.MICROPYTHON_VERSION }}
+          key: micropython-unix-${{ env.MICROPYTHON_VERSION }}-32bit
 
       - name: Build the MicroPython unix port
         if: steps.mp-cache.outputs.cache-hit != 'true'
@@ -74,13 +76,19 @@ jobs:
           make -C /tmp/mp/ports/unix -j"$(nproc)"
           mkdir -p ~/micropython-bin
           cp /tmp/mp/ports/unix/build-standard/micropython ~/micropython-bin/
+          # 32-bit build: objects the size they are on the RP2350, for the
+          # board-sized heap test (tests/firmware/test_heap.py).
+          sudo apt-get install -y gcc-multilib
+          make -C /tmp/mp/ports/unix MICROPY_FORCE_32BIT=1 MICROPY_PY_FFI=0 BUILD=build-32 -j"$(nproc)"
+          cp /tmp/mp/ports/unix/build-32/micropython ~/micropython-bin/micropython32
 
       - name: Firmware tests (unix port, simulated hardware, local broker)
         env:
           MOSQUITTO: /usr/sbin/mosquitto
         run: |
           export MICROPYTHON="$HOME/micropython-bin/micropython"
-          uv run --with pytest --with paho-mqtt --with mpy-cross==1.29.0.post2 pytest tests/firmware -q
+          export MICROPYTHON32="$HOME/micropython-bin/micropython32"
+          uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware -q
 
   publish:
     needs: [build, test]

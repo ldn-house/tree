@@ -80,9 +80,8 @@ def reset_flash():
         bootmgr.rmtree(p)
 
 
-def install(data, key=None, chunk=7, require=None, length=None):
-    inst = bootmgr.Installer(len(data) if length is None else length, key, require_signature=require,
-                             allow_during_trial=True)
+def install(data, key=None, chunk=7, require=None, length=None, **kw):
+    inst = bootmgr.Installer(len(data) if length is None else length, key, require_signature=require, **kw)
     try:
         for i in range(0, len(data), chunk):
             inst.feed(data[i : i + chunk])
@@ -94,15 +93,20 @@ def install(data, key=None, chunk=7, require=None, length=None):
     return inst
 
 
+def install_commit(data, **kw):
+    install(data, **kw)
+    return bootmgr.commit(allow_during_trial=True)
+
+
 @test
 def installer_good_bundle_and_commit():
     reset_flash()
-    inst = install(make_bundle(GOOD))
-    assert inst.slot == "a"
-    assert bootmgr.slot_ok("a")
+    install(make_bundle(GOOD))
+    assert bootmgr.exists(bootmgr.STAGE + "/manifest.json") and not bootmgr.exists("fw/a")
+    assert bootmgr.commit() == "a"
+    assert bootmgr.slot_ok("a") and not bootmgr.exists(bootmgr.STAGE)
     with open("fw/a/app/x.py") as f:
         assert f.read() == "X = 1\n"
-    bootmgr.commit("a")
     st = bootmgr.read_state()
     assert st["active"] == "a" and st["trial"] and st["boots"] == 0
 
@@ -111,11 +115,11 @@ def installer_good_bundle_and_commit():
 def installer_truncated_upload_is_rejected():
     reset_flash()
     data = make_bundle(GOOD)
-    inst = bootmgr.Installer(len(data), None, allow_during_trial=True)
+    inst = bootmgr.Installer(len(data), None)
     inst.feed(data[: len(data) - 5])
     raises(lambda: list(inst.finish()), "truncated")
     inst.abort()
-    assert not bootmgr.slot_ok("a") and not bootmgr.exists("fw/a")
+    assert not bootmgr.exists("fw/a") and not bootmgr.exists(bootmgr.STAGE)
 
 
 @test
@@ -123,7 +127,7 @@ def installer_length_mismatch_rejected_before_writing():
     reset_flash()
     data = make_bundle(GOOD)
     raises(lambda: install(data, length=len(data) + 100), "Content-Length")
-    assert not bootmgr.exists("fw/a")
+    assert not bootmgr.exists("fw/a") and not bootmgr.exists(bootmgr.STAGE)
 
 
 @test
@@ -132,7 +136,7 @@ def installer_bad_hash():
     data = bytearray(make_bundle(GOOD))
     data[-12] ^= 0x01  # inside app/x.py's body (data/a.txt is empty)
     raises(lambda: install(bytes(data)), "sha256 mismatch")
-    assert not bootmgr.slot_ok("a")
+    assert not bootmgr.slot_ok("a") and not bootmgr.exists(bootmgr.STAGE)
 
 
 @test
@@ -201,13 +205,15 @@ def installer_mpy_version_check():
 @test
 def installer_targets_inactive_slot_and_refuses_during_trial():
     reset_flash()
-    install(make_bundle(GOOD))
-    bootmgr.commit("a")
-    raises(lambda: bootmgr.Installer(100, None), "not confirmed")
-    bootmgr.mark_healthy("a")
+    assert install_commit(make_bundle(GOOD)) == "a"
+    # Staging during a trial is harmless; replacing the fallback is not.
     inst = install(make_bundle(GOOD, version="t2"))
-    assert inst.slot == "b"
-    bootmgr.commit("b")
+    assert bootmgr.install_refused() == "the running update is not confirmed yet"
+    raises(lambda: bootmgr.commit(), "not confirmed")
+    inst.abort()
+    bootmgr.mark_healthy("a")
+    install(make_bundle(GOOD, version="t2"))
+    assert bootmgr.commit() == "b"
     st = bootmgr.read_state()
     assert st["active"] == "b" and st["previous"] == "a"
 
@@ -215,13 +221,19 @@ def installer_targets_inactive_slot_and_refuses_during_trial():
 # -- boot decisions ------------------------------------------------------------
 
 
-def two_slots():
+def two_slots(g1=0, g2=0):
     reset_flash()
-    install(make_bundle(GOOD, version="v1"))
-    bootmgr.commit("a")
+    install_commit(make_bundle(GOOD, version="v1", mutate=_gen(g1)))
     bootmgr.mark_healthy("a")
-    install(make_bundle(GOOD, version="v2"))
-    bootmgr.commit("b")
+    install_commit(make_bundle(GOOD, version="v2", mutate=_gen(g2)))
+
+
+def _gen(g):
+    def m(man):
+        if g:
+            man["generation"] = g
+
+    return m
 
 
 @test
@@ -275,8 +287,9 @@ def boot_repeated_failures_fall_back_then_safe_mode():
 def boot_incomplete_slot_and_empty_flash():
     reset_flash()
     assert bootmgr.decide(bootmgr.read_state())[0] == "safe"
-    install(make_bundle(GOOD))
-    st = bootmgr.read_state()  # no boot.json yet
+    install_commit(make_bundle(GOOD))
+    os.remove("boot.json")
+    st = bootmgr.read_state()  # no boot.json: a complete slot is still found
     assert bootmgr.decide(st) == ("app", "a")
     os.remove("fw/a/manifest.json")
     st = {"active": "a", "previous": None, "trial": False, "boots": 0, "bad": None, "safe": None,
@@ -287,7 +300,7 @@ def boot_incomplete_slot_and_empty_flash():
 @test
 def boot_json_corrupt_is_recovered():
     reset_flash()
-    install(make_bundle(GOOD))
+    install_commit(make_bundle(GOOD))
     with open("boot.json", "w") as f:
         f.write("{garbage")
     st = bootmgr.read_state()
@@ -307,6 +320,280 @@ def manual_rollback():
 def hmac_matches_rfc4231_case2():
     mac = bootmgr.hmac_sha256(b"Jefe", b"what do ya want for nothing?")
     assert bootmgr.hexlify(mac) == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+
+
+
+# -- review round 1 regressions (fw21-review-repros.py and friends) ------------
+
+
+@test
+def b1_unwritable_boot_state_enters_safe_mode_in_ram():
+    """Persistent ENOSPC on boot.json plus a failing app: without the fix
+    every boot ran the app again with the counter stuck at 0."""
+
+    class Mod:  # no types.ModuleType in MicroPython
+        pass
+
+    two_slots()
+    bootmgr.mark_healthy("b")
+    calls = []
+    saved = (bootmgr.write_state, bootmgr.reset, bootmgr.watchdog, bootmgr.stop_feeder, sys.modules.get("app"),
+             sys.modules.get("safemode"))
+
+    def enospc(st):
+        raise OSError(28, "No space left on device")
+
+    app = Mod()
+    app.runtime = Mod()
+
+    def run(info):
+        calls.append(("app", info["slot"]))
+        raise RuntimeError("synthetic startup failure")
+
+    app.runtime.run = run
+    safemode = Mod()
+    safemode.run = lambda why, info: calls.append(("safe", why))
+    bootmgr.write_state = enospc
+    bootmgr.reset = lambda: None
+    bootmgr.watchdog = lambda: None
+    bootmgr.stop_feeder = lambda: None
+    sys.modules["app"] = app
+    sys.modules["safemode"] = safemode
+    try:
+        for _ in range(3):
+            bootmgr.launch()
+    finally:
+        bootmgr.write_state, bootmgr.reset, bootmgr.watchdog, bootmgr.stop_feeder = saved[:4]
+        for name, mod in (("app", saved[4]), ("safemode", saved[5])):
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+    assert calls and all(c[0] == "safe" for c in calls), calls
+    assert "cannot record the boot" in calls[0][1]
+
+
+@test
+def b1_reclaim_frees_disposable_space_and_reserve():
+    reset_flash()
+    install_commit(make_bundle(GOOD))
+    bootmgr.mark_healthy("a")
+    bootmgr.makedirs("fx")
+    with open("fx/fx_big.py", "w") as f:
+        f.write("x" * 5000)
+    with open("boot.json.tmp", "w") as f:
+        f.write("partial")
+    bootmgr.makedirs(bootmgr.STAGE)
+    with open(bootmgr.RESERVE, "wb") as f:
+        f.write(bytes(1000))
+    bootmgr.reclaim()
+    for p in ("fx", "boot.json.tmp", bootmgr.STAGE, bootmgr.RESERVE):
+        assert not bootmgr.exists(p), p
+    assert bootmgr.slot_ok("a") and bootmgr.exists("boot.json")
+
+
+@test
+def h2_rename_failure_keeps_the_old_state():
+    reset_flash()
+    st = bootmgr._default_state()
+    st.update(active="a", boots=2)
+    bootmgr.write_state(st)
+    real = bootmgr.os
+
+    class FailingRename:  # built-in os attributes can't be reassigned
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def rename(self, src, dst):
+            raise OSError(28, "injected rename ENOSPC")
+
+    bootmgr.os = FailingRename()
+    try:
+        raises(lambda: bootmgr.write_state(dict(st, boots=3)), "ENOSPC")
+    finally:
+        bootmgr.os = real
+    assert bootmgr.read_state()["boots"] == 2  # still there, unchanged
+    assert not bootmgr.exists("boot.json.tmp")
+
+
+@test
+def h3_rejected_upload_keeps_the_previous_slot():
+    two_slots()
+    bootmgr.mark_healthy("b")
+    for bad in (b"NOTFW!!!" + bytes(92), make_bundle(GOOD, key="other"), make_bundle([("app/runtime.py", b"def (\n")])):
+        try:
+            install(bad, key="k1" if b"NOTFW" not in bad else None, require=None)
+        except bootmgr.InstallError:
+            pass
+        assert bootmgr.slot_ok("a") and bootmgr.slot_ok("b"), bad[:8]
+        assert not bootmgr.exists(bootmgr.STAGE)
+    # A hash failure after files were being written: only staging goes.
+    data = bytearray(make_bundle(GOOD))
+    data[-12] ^= 1
+    raises(lambda: install(bytes(data)), "sha256")
+    assert bootmgr.slot_ok("a") and bootmgr.slot_ok("b") and not bootmgr.exists(bootmgr.STAGE)
+
+
+@test
+def h3_dry_run_during_trial_keeps_the_rollback_target():
+    two_slots()  # b is an unconfirmed trial, a its rollback target
+    inst = install(make_bundle(GOOD, version="probe"))
+    inst.abort()  # the dry-run path
+    assert bootmgr.slot_ok("a") and bootmgr.slot_ok("b")
+    st = bootmgr.read_state()
+    st["boots"] = 1  # the trial boot failed
+    assert bootmgr.decide(st) == ("app", "a")
+
+
+@test
+def h5_older_generation_is_refused_before_anything_is_written():
+    two_slots(g1=100, g2=200)
+    assert bootmgr.mark_healthy("b")
+    assert bootmgr.read_state()["floor"] == 200
+    old = make_bundle(GOOD, key="k1", version="old", mutate=_gen(150))
+    raises(lambda: install(old, key="k1"), "older than the minimum")
+    assert not bootmgr.exists(bootmgr.STAGE) and bootmgr.slot_ok("a") and bootmgr.slot_ok("b")
+    raises(lambda: install(make_bundle(GOOD, key="k1"), key="k1"), "older than the minimum")  # no generation
+    install(make_bundle(GOOD, key="k1", mutate=_gen(200)), key="k1").abort()  # same generation is fine
+    inst = install(old, key="k1", allow_downgrade=True)  # explicit, authenticated downgrade
+    assert inst.manifest["version"] == "old"
+    inst.abort()
+
+
+@test
+def h5_floor_only_rises_on_confirmation():
+    two_slots(g1=100, g2=300)  # 300 installed but never confirmed
+    assert bootmgr.read_state()["floor"] == 100
+    install(make_bundle(GOOD, mutate=_gen(150))).abort()  # still allowed: 300 never proved itself
+
+
+@test
+def m9_config_install_and_fallback():
+    for p in ("config.py", bootmgr.CONFIG_GOOD):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x"}), "HTTP_TOKEN")
+    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "X": [1]}), "must be")
+    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "lower": 1}), "bad setting")
+    keys = bootmgr.install_config({"WIFI_SSID": "net\"'\n", "HTTP_TOKEN": "t" * 10, "MQTT_PORT": 1883})
+    assert keys == ["HTTP_TOKEN", "MQTT_PORT", "WIFI_SSID"]
+    ns = {}
+    with open("config.py") as f:
+        exec(f.read(), ns)
+    assert ns["WIFI_SSID"] == "net\"'\n" and ns["MQTT_PORT"] == 1883
+    # Broken config.py: the snapshot keeps the board reachable.
+    with open("config.py", "w") as f:
+        f.write("WIFI_SSID = 'x'\nthis is not python\n")
+    sys.modules.pop("config", None)
+    bootmgr._config = None
+    values, source, err = bootmgr.load_config()
+    assert source == bootmgr.CONFIG_GOOD and "failed to load" in err and values["HTTP_TOKEN"] == "t" * 10
+    bootmgr._config = None
+    os.remove("config.py")
+
+
+@test
+def signatures_are_domain_separated():
+    body = b"blue\nclass Effect: pass\n"
+    sig = bootmgr.hexlify(bootmgr.hmac_sha256("k1", b"tree-effect\n" + body))
+    assert bootmgr.signature_ok("effect", body, sig, key="k1")
+    assert not bootmgr.signature_ok("config", body, sig, key="k1")
+    assert not bootmgr.signature_ok("effect", body + b"x", sig, key="k1")
+    assert not bootmgr.signature_ok("effect", body, None, key="k1")
+    assert bootmgr.signature_ok("effect", body, None, key="")  # no key configured: token only
+
+
+@test
+def h6_bounded_line_reader():
+    import asyncio
+    from app.streams import BufReader, TooLong
+
+    class Hostile:
+        def __init__(self, data=None):
+            self.sent = 0
+            self.data = data
+
+        async def read(self, n):
+            if self.data is not None:
+                out, self.data = self.data[:n], self.data[n:]
+                return out
+            self.sent += n
+            return b"X" * n
+
+    async def main():
+        h = Hostile()
+        try:
+            await BufReader(h, 4096).readline(1024)
+        except TooLong:
+            pass
+        else:
+            raise AssertionError("unterminated line accepted")
+        assert h.sent <= 1024 + 256, h.sent  # never buffered beyond the limit
+        # Many short lines still hit the total header budget.
+        many = Hostile(b"a: b\r\n" * 2000)
+        br = BufReader(many, 4096)
+        try:
+            for _ in range(2000):
+                await br.readline(1024)
+        except TooLong:
+            pass
+        else:
+            raise AssertionError("header budget not enforced")
+        ok = BufReader(Hostile(b"GET / HTTP/1.0\r\nHost: x\r\n\r\nBODY"), 4096)
+        assert await ok.readline() == b"GET / HTTP/1.0\r\n"
+        assert await ok.readline() == b"Host: x\r\n"
+        assert await ok.readline() == b"\r\n"
+        assert await ok.read(10) == b"BODY"  # read-ahead isn't lost
+
+    asyncio.run(main())
+
+
+@test
+def l11_render_never_sees_the_clock_limit():
+    import asyncio
+    from app.engine import Engine, T_RESTART_MS
+
+    for speed in (0.1, 1.0, 5.0):
+        seen = []
+
+        class State:
+            def get(self, k):
+                return speed if k == "speed" else 255
+
+        class Effect:
+            def render(self, t, frame):
+                seen.append(t)
+
+        class E:
+            t_last = 0
+            t_frac = 0
+            t_ms = T_RESTART_MS - 3
+            state = State()
+            inst = Effect()
+            raw = bytearray(3)
+            frames_ok = 0
+            name = "synthetic"
+            proven = set()
+            render_us = 0
+            slow = 0
+            reload = False
+            probing = False
+            out = None
+
+            async def present(self, *a):
+                pass
+
+            def _tick_fps(self, *a):
+                pass
+
+        e = E()
+        for now in range(25, 2000, 25):
+            if e.reload:
+                break
+            asyncio.run(Engine._frame(e, now))
+        assert e.reload and all(t < T_RESTART_MS for t in seen), (speed, seen[-3:])
 
 
 # -- output stage --------------------------------------------------------------

@@ -35,3 +35,79 @@ def test_micropython_units(tmp_path):
     print(r.stdout[-6000:], r.stderr[-2000:])
     assert r.returncode == 0, r.stdout[-3000:]
     assert " 0 failed" in r.stdout
+
+
+def _run_regressions(firmware, tmp_path):
+    work = tmp_path / ("rr-" + firmware.parent.name)
+    work.mkdir()
+    return subprocess.run([devsim.MICROPYTHON, str(HERE / "mp" / "regress_review1.py"), str(firmware), str(work)],
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_review_round1_reproductions_are_fixed(tmp_path):
+    r = _run_regressions(devsim.ROOT / "firmware", tmp_path)
+    print(r.stdout)
+    assert r.returncode == 0 and "FAIL" not in r.stdout, r.stdout + r.stderr
+
+
+def test_review_round1_reproductions_fail_on_the_reviewed_commit(tmp_path):
+    """The same script against 57c4ce1 (the commit the review covered) must
+    still fail, or it is not testing anything."""
+    old = tmp_path / "old"
+    old.mkdir()
+    a = subprocess.run(["git", "archive", "57c4ce1", "firmware"], cwd=devsim.ROOT, capture_output=True)
+    if a.returncode:
+        import pytest
+
+        pytest.skip("reviewed commit not in this checkout")
+    subprocess.run(["tar", "-x", "-C", str(old)], input=a.stdout, check=True)
+    r = _run_regressions(old / "firmware", tmp_path)
+    print(r.stdout)
+    for finding in ("B1", "H2", "H3 rejected", "H3 dry-run", "H5"):
+        assert "FAIL " + finding in r.stdout, finding
+
+
+def test_m8_mqtt_drop_closes_the_socket(tmp_path):
+    """Review M8 (fw21-review-streams.py): Stream.close() is a no-op in
+    MicroPython, so after _drop() the peer must see EOF without anyone
+    awaiting wait_closed()."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    seen = []
+
+    def peer():
+        c, _ = srv.accept()
+        c.settimeout(5)
+        try:
+            seen.append(c.recv(100))
+        except OSError as e:
+            seen.append(e)
+        c.close()
+
+    t = threading.Thread(target=peer)
+    t.start()
+    script = tmp_path / "drop.py"
+    script.write_text(f"""import sys
+sys.path.insert(0, {str(devsim.ROOT / 'firmware')!r})
+import asyncio
+from app.mqtt import MQTT
+async def main():
+    r, w = await asyncio.open_connection('127.0.0.1', {port})
+    m = MQTT('127.0.0.1', {port}, 'review')
+    m.r = m.w = w
+    m.connected = True
+    m._drop('review close check')
+    assert m.r is None and m.w is None
+    await asyncio.sleep_ms(500)  # no wait_closed(): the peer must already see EOF
+asyncio.run(main())
+""")
+    r = subprocess.run([devsim.MICROPYTHON, str(script)], capture_output=True, text=True, timeout=20)
+    t.join(10)
+    srv.close()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert seen == [b""], seen

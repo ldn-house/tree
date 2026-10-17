@@ -176,7 +176,10 @@ def test_safe_mode_accepts_a_fresh_bundle(make_device, bundles):
     assert len(d.boots) >= 3
     code, body = curl(d.url("/update"), "-X", "POST", "--data-binary", f"@{bundles['v1']}")
     assert code == 401
+    # v1 is older than the confirmed v2: recovery asks for that explicitly.
     code, body = push(d, bundles["v1"])
+    assert code == 400 and "older" in body["error"]
+    code, body = push(d, bundles["v1"], path="/update?allow_downgrade=1")
     assert code == 200 and body["installed"] == "v1"
     running(d, "v1", timeout=60, confirmed=True)
     assert d.boot_state()["safe"] is None

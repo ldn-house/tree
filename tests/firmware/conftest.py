@@ -1,6 +1,6 @@
 """Fixtures for the offline firmware tests (MicroPython unix port).
 
-Run:  uv run --with pytest --with paho-mqtt --with mpy-cross==1.29.0.post2 pytest tests/firmware
+Run:  uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware
 Needs `micropython` (unix port) and, for the MQTT tests, `mosquitto` on PATH
 or at $MOSQUITTO.
 """
@@ -52,8 +52,10 @@ def _patched_app(tmp: Path, name: str, patch) -> Path:
 def bundles(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("bundles")
 
+    gens = {"v1": 1000, "v2": 2000, "v2-signed": 2000, "crash": 3000, "sick": 3000}
+
     def build(name, **kw):
-        return devsim.build_bundle(tmp / name, version=name, **kw)
+        return devsim.build_bundle(tmp / name, version=name, generation=gens[name], **kw)
 
     def crash(d):  # the new firmware dies on import
         p = d / "runtime.py"
