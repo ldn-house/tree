@@ -20,22 +20,52 @@ except ImportError:  # pragma: no cover
 
 from app.log import log
 
-BIT_NS = 1250
 RESET_US = 300  # WS2811 latches after >= 280 us low
 
-# Waveform: 25 PIO cycles per bit at 20 MHz (50 ns each).
-#   0 bit: high T1 = 7 cycles (350 ns), low T2 + T3 = 18 (900 ns)
-#   1 bit: high T1 + T2 = 16 (800 ns),   low T3 = 9 (450 ns)
-# The old firmware's machine.bitstream timing (400/850 ns high for 0/1,
-# known to work on this strip) is the reference. 350 ns for a 0 also sits
-# inside the original WS2811 high-speed window (T0H 250 +/- 150 ns) and the
-# WS2812-style window later WS2811 revisions use (T0H 250-550 ns, T1H
-# 650-950 ns). tests/firmware/test_pio.py simulates this program and checks
-# the pulse widths against those windows.
+# Default waveform, in ns: (T0H, T0L, T1H, T1L). This is MicroPython's own
+# neopixel/machine.bitstream 800 kHz timing, which drove this exact hardware
+# (Pico GP0 -> BSS138 level shifter with 10k pull-ups -> 12 V WS2811
+# bullets). The shifter's high side rises only through its pull-up (RC
+# about 0.5 us with the cable), so short high pulses can vanish: don't go
+# below ~400 ns for T0H. Override with LED_TIMING_NS in config.py.
+DEFAULT_TIMING_NS = (400, 850, 800, 450)
 PIO_FREQ = 20_000_000
+CYCLE_NS = 1_000_000_000 // PIO_FREQ  # 50 ns
+MAX_CYCLES = 16  # 1 + 4-bit delay (one of the 5 delay/side-set bits is side-set)
 
 
-if rp2 is not None:
+class TimingError(ValueError):
+    pass
+
+
+def cycles(timing_ns):
+    """PIO cycle counts (T1, T2, T3) for (T0H, T0L, T1H, T1L).
+
+    The program below holds the line high for T1 then, for a 1 bit, T2
+    more; low for T3, plus T2 for a 0 bit. So T0H = T1, T1H = T1 + T2,
+    T1L = T3 and T0L = T2 + T3, which needs T0H + T0L == T1H + T1L (one
+    bit period). Values are rounded to the 50 ns PIO cycle."""
+    try:
+        t0h, t0l, t1h, t1l = (int(v) for v in timing_ns)
+    except (TypeError, ValueError):
+        raise TimingError("LED_TIMING_NS must be four numbers (T0H, T0L, T1H, T1L)")
+    if t0h + t0l != t1h + t1l:
+        raise TimingError("T0H + T0L must equal T1H + T1L (one bit period)")
+    c1 = (t0h + CYCLE_NS // 2) // CYCLE_NS
+    c2 = (t1h - t0h + CYCLE_NS // 2) // CYCLE_NS
+    c3 = (t1l + CYCLE_NS // 2) // CYCLE_NS
+    for c in (c1, c2, c3):
+        if not 1 <= c <= MAX_CYCLES:
+            raise TimingError("timing out of range for the PIO program (50-800 ns per step, T1H > T0H)")
+    return c1, c2, c3
+
+
+def program(timing_ns=DEFAULT_TIMING_NS):
+    """Assemble the WS2811 PIO program for a timing. asm_pio runs the body
+    with only the PIO names as globals, so the delays come in through the
+    closure (locals of this function)."""
+    c1, c2, c3 = cycles(timing_ns)
+    d1, d2, d3 = c1 - 1, c2 - 1, c3 - 1
 
     @rp2.asm_pio(
         sideset_init=rp2.PIO.OUT_LOW,
@@ -43,31 +73,31 @@ if rp2 is not None:
         autopull=True,
         pull_thresh=8,
     )
-    def _ws2811():
-        # asm_pio runs this body with only the PIO names as globals, so the
-        # cycle counts must be locals here.
-        T1 = 7
-        T2 = 9
-        T3 = 9
+    def ws2811():
         wrap_target()
         label("bitloop")
-        out(x, 1).side(0)[T3 - 1]
-        jmp(not_x, "do_zero").side(1)[T1 - 1]
-        jmp("bitloop").side(1)[T2 - 1]
+        out(x, 1).side(0)[d3]
+        jmp(not_x, "do_zero").side(1)[d1]
+        jmp("bitloop").side(1)[d2]
         label("do_zero")
-        nop().side(0)[T2 - 1]
+        nop().side(0)[d2]
         wrap()
+
+    return ws2811
 
 
 class Driver:
-    def __init__(self, n, pin, sm_id=0):
+    def __init__(self, n, pin, timing_ns=DEFAULT_TIMING_NS, sm_id=0):
         import machine
 
         self.n = n
         self.sm_id = sm_id
-        self.write_us = n * 24 * BIT_NS // 1000  # time on the wire
+        c1, c2, c3 = cycles(timing_ns)
+        self.timing_ns = (c1 * CYCLE_NS, (c2 + c3) * CYCLE_NS, (c1 + c2) * CYCLE_NS, c3 * CYCLE_NS)
+        bit_ns = (c1 + c2 + c3) * CYCLE_NS
+        self.write_us = n * 24 * bit_ns // 1000  # time on the wire
         self.busy_us = self.write_us + RESET_US
-        self.sm = rp2.StateMachine(sm_id, _ws2811, freq=PIO_FREQ, sideset_base=machine.Pin(pin))
+        self.sm = rp2.StateMachine(sm_id, program(timing_ns), freq=PIO_FREQ, sideset_base=machine.Pin(pin))
         self.sm.active(1)
         self.dma = None
         self._t = time.ticks_us() - self.busy_us
@@ -114,10 +144,11 @@ class NullDriver:
     """No LEDs (used when PIO is unavailable)."""
 
     mode = "none"
+    timing_ns = None
 
     def __init__(self, n):
         self.n = n
-        self.write_us = n * 24 * BIT_NS // 1000
+        self.write_us = n * 24 * 1250 // 1000
         self.busy_us = self.write_us + RESET_US
         self.frames = 0
 
@@ -128,11 +159,17 @@ class NullDriver:
         self.frames += 1
 
 
-def create(n, pin):
+def create(n, pin, timing_ns=None):
     if rp2 is None:
         return NullDriver(n)
+    timing = DEFAULT_TIMING_NS if timing_ns is None else timing_ns
     try:
-        return Driver(n, pin)
+        cycles(timing)
+    except TimingError as e:
+        log("driver: bad LED_TIMING_NS %r (%s); using the default %r" % (timing, e, DEFAULT_TIMING_NS))
+        timing = DEFAULT_TIMING_NS
+    try:
+        return Driver(n, pin, timing)
     except Exception as e:
         log("driver: PIO init failed: %r" % (e,))
         return NullDriver(n)

@@ -52,7 +52,8 @@ def _blank():
     n = _cfg("LED_COUNT", 500)
     try:
         pin = machine.Pin(_cfg("LED_PIN", 0), machine.Pin.OUT)
-        machine.bitstream(pin, 0, (400, 850, 800, 450), bytes(3 * n))
+        timing = _cfg("LED_TIMING_NS") or (400, 850, 800, 450)
+        machine.bitstream(pin, 0, tuple(timing), bytes(3 * n))
     except Exception as e:
         bootmgr.log("safe mode: cannot blank LEDs: %r" % (e,))
 

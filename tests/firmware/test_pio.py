@@ -1,10 +1,12 @@
 """The real PIO program in firmware/app/driver.py, assembled the way
 rp2.asm_pio does it (only PIO names as globals) and simulated cycle by
-cycle. Checks WS2811 pulse widths against the datasheet windows."""
+cycle, for the default and configured LED_TIMING_NS."""
 
 import importlib.util
 import sys
 import types
+
+import pytest
 
 import devsim
 
@@ -35,39 +37,47 @@ def load():
     return rp2, driver
 
 
-def bits_from(runs):
-    """[(high_cycles, low_cycles), ...] per bit (the line idles low)."""
+def waveform(rp2, driver, timing, data):
+    """[(high_ns, low_ns, bit)] for each bit of data."""
+    prog = driver.program(timing)
+    assert isinstance(prog, rp2.Program)  # assembled without NameError
+    ns = 1e9 / driver.PIO_FREQ
+    runs = rp2.simulate(prog, data)
+    if runs[0][0] == 0:
+        runs = runs[1:]
+    runs = runs + [(0, 10**6)]
+    want = [int(c) for b in data for c in format(b, "08b")]
     out = []
-    for i in range(0, len(runs) - 1, 2):
-        assert runs[i][0] == 1 and runs[i + 1][0] == 0, runs[:6]
-        out.append((runs[i][1], runs[i + 1][1]))
+    for i, bit in zip(range(0, 2 * len(want), 2), want):
+        assert runs[i][0] == 1 and runs[i + 1][0] == 0
+        out.append((runs[i][1] * ns, runs[i + 1][1] * ns, bit))
     return out
 
 
-def test_ws2811_waveform():
+DATA = bytes([0b10110010, 0x00, 0xFF, 0x5A])
+
+
+def test_default_timing_is_micropython_neopixel():
     rp2, driver = load()
-    prog = driver._ws2811
-    assert isinstance(prog, rp2.Program)  # assembled without NameError
-    ns = 1e9 / driver.PIO_FREQ
-    data = bytes([0b10110010, 0x00, 0xFF, 0x5A])
-    runs = rp2.simulate(prog, data)
-    # The first segment is the initial low before the first bit; drop it.
-    if runs[0][0] == 0:
-        runs = runs[1:]
-    bits = bits_from(runs + [(0, 10**6)])
-    want = [int(c) for b in data for c in format(b, "08b")]
-    assert len(bits) == len(want)
-    for (hi, lo), bit in zip(bits[:-1], want[:-1]):
-        assert (hi + lo) * ns == driver.BIT_NS, (hi, lo)  # 800 kHz exactly
+    assert driver.DEFAULT_TIMING_NS == (400, 850, 800, 450)
+    bits = waveform(rp2, driver, driver.DEFAULT_TIMING_NS, DATA)
+    for hi, lo, bit in bits[:-1]:  # the last low runs into the idle line
         if bit:
-            assert 650 <= hi * ns <= 950 and 450 <= hi * ns, (bit, hi * ns)
-            assert 300 <= lo * ns <= 650
+            assert (hi, lo) == (800, 450)
         else:
-            # Inside both the original WS2811 high-speed window (100-400 ns)
-            # and the WS2812-style one (250-550 ns), with >= 50 ns margin to
-            # the WS2812-style minimum (the old program's 250 ns had none).
-            assert 300 <= hi * ns <= 400, (bit, hi * ns)
-            assert 700 <= lo * ns <= 1000
-    widths = {b: hi * ns for (hi, _), b in zip(bits, want)}
-    print("T0H %.0f ns, T1H %.0f ns" % (widths[0], widths[1]))
-    assert widths[0] == 350 and widths[1] == 800
+            assert (hi, lo) == (400, 850)
+    assert driver.cycles(driver.DEFAULT_TIMING_NS) == (8, 8, 9)
+
+
+def test_configured_timing_is_honoured():
+    rp2, driver = load()
+    timing = (350, 900, 750, 500)
+    for hi, lo, bit in waveform(rp2, driver, timing, DATA)[:-1]:
+        assert (hi, lo) == ((750, 500) if bit else (350, 900))
+
+
+def test_bad_timings_are_rejected():
+    _, driver = load()
+    for bad in ((400, 850, 800, 400), (400, 850, 400, 850), (2000, 0, 2000, 0), "fast", (400, 850)):
+        with pytest.raises(driver.TimingError):
+            driver.cycles(bad)
