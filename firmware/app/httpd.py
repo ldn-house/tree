@@ -1,13 +1,17 @@
 """Minimal asyncio HTTP/1.0 server with token auth.
 
-Every request runs in its own task with timeouts on the request head and on
-each body chunk, so a slow or vanished client never stalls anything else
-(review L1). Responses are JSON built with json.dumps (proper escaping) and
+Every request runs in its own task with a deadline for the whole request
+head, a per-route deadline for the whole request, and timeouts on each body
+chunk, so a slow or vanished client never stalls anything else and can only
+hold a connection slot for a bounded time. The request line and headers are
+read through a bounded buffer: nothing larger than MAX_LINE per line or
+MAX_HEAD in total is ever allocated, before or after authentication. Responses are JSON built with json.dumps (proper escaping) and
 written with drain(). Mutating routes need the shared token from config.py,
 sent as "Authorization: Bearer <token>" or "X-Tree-Token: <token>"; without
 a configured token they are refused (fail closed, review H11).
 """
 
+import gc
 import json
 import time
 
@@ -16,13 +20,19 @@ import asyncio
 import bootmgr
 
 from app.log import log
+from app.streams import BufReader, TooLong, close_now
 
 HEAD_TIMEOUT = 5
 CHUNK_TIMEOUT = 10
 MAX_LINE = 1024
 MAX_HEADERS = 32
+MAX_HEAD = 4096
 MAX_CONNECTIONS = 4
-MAX_DRAIN = 512 * 1024
+REQUEST_DEADLINE = 30
+# Bodies are drained before an error reply so the client sees the reason
+# rather than a reset. An unauthenticated client gets a small budget.
+DRAIN_AUTHED = (512 * 1024, 10)  # bytes, seconds
+DRAIN_ANON = (128 * 1024, 3)
 
 REASONS = {
     200: "OK",
@@ -37,6 +47,7 @@ REASONS = {
     409: "Conflict",
     411: "Length Required",
     413: "Payload Too Large",
+    431: "Request Header Fields Too Large",
     500: "Internal Server Error",
     503: "Service Unavailable",
 }
@@ -104,6 +115,7 @@ class Request:
         self.cors = path.startswith("/calibrate")
         self.responded = False
         self.left = None
+        self.authed = False
 
     def qint(self, name, default, lo=None, hi=None):
         v = self.query.get(name)
@@ -133,16 +145,27 @@ class Request:
         return chunk
 
     async def body(self, limit):
+        """The whole body, in one buffer allocated once at its exact size
+        (after a collection): growing a bytearray needs up to twice the
+        memory in contiguous blocks, which a fragmented board heap may not
+        have for a 48 KB calibration sequence."""
         if self.length is None:
             raise HTTPError(411, "Content-Length required")
         if self.length > limit:
             raise HTTPError(413, "body larger than %d bytes" % limit)
-        buf = bytearray()
+        gc.collect()
+        try:
+            buf = bytearray(self.length)
+        except MemoryError:
+            raise HTTPError(413, "not enough memory for a %d-byte body" % self.length)
+        mv = memoryview(buf)
+        pos = 0
         while True:
             chunk = await self.read_chunk(1024)
             if chunk is None:
-                return bytes(buf)
-            buf.extend(chunk)
+                return buf
+            mv[pos : pos + len(chunk)] = chunk
+            pos += len(chunk)
 
     async def json(self, limit=4096):
         try:
@@ -182,9 +205,10 @@ class Server:
         self.srv = None
         self.hb = time.ticks_ms()
 
-    def route(self, method, path, handler, auth=False):
-        """path ending in "/*" matches any suffix."""
-        self.routes.append((method, path, handler, auth))
+    def route(self, method, path, handler, auth=False, deadline=REQUEST_DEADLINE):
+        """path ending in "/*" matches any suffix. deadline: seconds for the
+        whole request (uploads need longer)."""
+        self.routes.append((method, path, handler, auth, deadline))
 
     def authorized(self, headers):
         if not self.token:
@@ -197,12 +221,12 @@ class Server:
 
     def _match(self, method, path):
         allowed = False
-        for m, p, h, auth in self.routes:
+        for m, p, h, auth, deadline in self.routes:
             if p == path or (p.endswith("/*") and path.startswith(p[:-1]) and len(path) > len(p) - 1):
                 if m == method or (m == "GET|POST" and method in ("GET", "POST")):
-                    return h, auth
+                    return h, auth, deadline
                 allowed = True
-        return None, allowed
+        return None, allowed, 0
 
     async def start(self):
         self.srv = await asyncio.start_server(self._conn, "0.0.0.0", self.port, backlog=4)
@@ -212,21 +236,24 @@ class Server:
         return self.srv is not None and not self.srv.task.done()
 
     async def _head(self, r):
-        line = await r.readline()
+        """r: a BufReader. Raises HTTPError(431) as soon as a line or the
+        head as a whole would exceed its budget."""
+        try:
+            return await self._head_lines(r)
+        except TooLong:
+            raise HTTPError(431, "request line or headers too large")
+
+    async def _head_lines(self, r):
+        line = await r.readline(MAX_LINE)
         if not line:
             return None
-        if len(line) > MAX_LINE:
-            raise HTTPError(400, "request line too long")
         parts = line.decode().strip().split(" ")
         if len(parts) < 2:
             raise HTTPError(400, "bad request line")
         method, target = parts[0].upper(), parts[1]
         headers = {}
         for _ in range(MAX_HEADERS + 1):
-            h = await r.readline()
-            if len(h) > MAX_LINE:
-                raise HTTPError(400, "header too long")
-            h = h.decode().strip()
+            h = (await r.readline(MAX_LINE)).decode().strip()
             if not h:
                 break
             k, _, v = h.partition(":")
@@ -250,22 +277,24 @@ class Server:
             return
         self.active += 1
         try:
-            head = await asyncio.wait_for(self._head(r), HEAD_TIMEOUT)
+            br = BufReader(r, MAX_HEAD)
+            head = await asyncio.wait_for(self._head(br), HEAD_TIMEOUT)
             if head is None:
                 return
             method, path, query, headers = head
-            req = Request(method, path, query, headers, r, w)
+            req = Request(method, path, query, headers, br, w)
             if method == "OPTIONS":
                 await req.send(204 if req.cors else 405, b"")
                 return
-            handler, auth = self._match(method, path)
+            handler, auth, deadline = self._match(method, path)
             if handler is None:
                 raise HTTPError(405 if auth else 404, "method not allowed" if auth else "not found")
             if auth and not self.authorized(headers):
                 if not self.token:
                     raise HTTPError(403, "no HTTP_TOKEN configured in config.py; mutating endpoints are disabled")
                 raise HTTPError(401, "missing or bad token")
-            res = await handler(req)
+            req.authed = auth
+            res = await asyncio.wait_for(handler(req), deadline)
             if res is not None and not req.responded:
                 code, obj = res
                 await req.send(code, json.dumps(obj))
@@ -282,16 +311,24 @@ class Server:
 
     async def _drain(self, req):
         """Read and drop an unread request body before answering, so the
-        client gets the error instead of a reset while it is still sending."""
+        client gets the error instead of a reset while it is still sending.
+        Bounded in bytes and in total time, tighter for unauthenticated
+        clients, so draining can never pin a connection slot."""
+        budget, seconds = DRAIN_AUTHED if req.authed else DRAIN_ANON
         left = req.length if req.left is None else req.left
-        if not left or left > MAX_DRAIN:
+        if not left or left > budget:
             return
-        try:
-            while left > 0:
-                chunk = await asyncio.wait_for(req.reader.read(min(2048, left)), 2)
+
+        async def drain():
+            n = left
+            while n > 0:
+                chunk = await req.reader.read(min(2048, n))
                 if not chunk:
                     return
-                left -= len(chunk)
+                n -= len(chunk)
+
+        try:
+            await asyncio.wait_for(drain(), seconds)
         except Exception:
             pass
 
@@ -311,8 +348,4 @@ class Server:
             pass
 
     async def _close(self, w):
-        try:
-            w.close()
-            await asyncio.wait_for(w.wait_closed(), 2)
-        except Exception:
-            pass
+        close_now(w)

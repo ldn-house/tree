@@ -18,6 +18,7 @@ import asyncio
 
 from app import dns
 from app.log import log
+from app.streams import close_now
 
 CONNECT_TIMEOUT = 5
 WRITE_TIMEOUT = 5
@@ -150,13 +151,11 @@ class MQTT:
             log("mqtt: " + why)
         self.last_error = why
         self.connected = False
-        w = self.w
+        # Close the socket now: Stream.close() alone doesn't (see streams).
+        stream = self.w or self.r
         self.w = None
-        if w is not None:
-            try:
-                w.close()
-            except Exception:
-                pass
+        self.r = None
+        close_now(stream)
 
     # -- session --
 
