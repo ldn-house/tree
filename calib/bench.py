@@ -205,6 +205,7 @@ def summarise_video(r: dict) -> str:
     d3 = r["3d"]
     s3 = (f"3D median {d3['median_cm']:.2f}cm p90 {d3['p90_cm']:.2f} >10cm {d3['over_10cm']} swaps {d3['id_swaps']}"
           if "median_cm" in d3 else f"3D failed: {d3.get('error')}")
+    rec = sum(x["recall_visible"] * x["visible"] for x in v) / max(tot("visible"), 1)
     return (f"{r['dataset']}: visible {tot('visible')} correct {tot('correct')} "
-            f"recall {tot('correct') / max(tot('visible'), 1):.3f} wrong-ID {tot('wrong_id')} "
+            f"recall {rec:.3f} wrong-ID {tot('wrong_id')} "
             f"median2D {np.nanmean([x['median_err_px'] for x in v]):.2f}px | {s3}")
