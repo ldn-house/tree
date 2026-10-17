@@ -179,6 +179,31 @@ def cmd_bench_video(args):
         Path(args.out).write_text(json.dumps(rows, indent=1, default=float))
 
 
+def cmd_quality(args):
+    import json
+    import numpy as np
+    from calib.layout import LEGACY_ANISOTROPY, get_layout, load_coords, quality
+
+    rows = {}
+    for path in args.coords:
+        p = load_coords(path)
+        if args.legacy:
+            p[:, [0, 2]] *= LEGACY_ANISOTROPY
+        if args.height_m:
+            p = (p - np.nanmin(p[:, 1]) * np.array([0, 1, 0])) * (args.height_m / np.ptp(p[np.isfinite(p[:, 1]), 1]))
+        rows[path] = quality(p, pitch=args.pitch)
+    if args.reference:
+        for name in ("legacy-cleaned", "cone-spiral"):
+            lay = get_layout(name)
+            rows[f"synthetic truth: {name}"] = quality(lay.points, pitch=lay.pitch)
+    keys = list(next(iter(rows.values())).keys())
+    print("metric | " + " | ".join(rows))
+    for k in keys:
+        print(k + " | " + " | ".join(f"{r[k]:.3f}" if isinstance(r[k], float) else str(r[k]) for r in rows.values()))
+    if args.out:
+        Path(args.out).write_text(json.dumps(rows, indent=1))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -270,6 +295,15 @@ def main():
     p.add_argument("data", nargs="+")
     p.add_argument("--out")
     p.set_defaults(func=cmd_bench_video)
+
+    p = sub.add_parser("quality", help="self-consistency metrics for coordinate files (no truth needed)")
+    p.add_argument("coords", nargs="+")
+    p.add_argument("--legacy", action="store_true", help="undo the legacy 1080/608 x/z stretch first")
+    p.add_argument("--height-m", type=float, default=None, help="rescale to this LED height (metres)")
+    p.add_argument("--pitch", type=float, default=None, help="wire pitch in the same units")
+    p.add_argument("--reference", action="store_true", help="also report the synthetic truth layouts")
+    p.add_argument("--out")
+    p.set_defaults(func=cmd_quality)
 
     args = parser.parse_args()
     args.func(args)

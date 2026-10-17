@@ -110,11 +110,18 @@ def predict(sol: Solution, views: list[ViewObs]) -> list[np.ndarray]:
 
 def align_and_solve(frames: list[FrameDets], n: int = 500, start_lag: int = 1, first: int = 120,
                     grow: int = 80, final_rounds: int = 3, verbose: bool = False,
-                    wire_prior: bool = True) -> tuple[Solution, list[np.ndarray], list[str]]:
-    """Alternate Viterbi index alignment and bundle adjustment along the wire."""
+                    wire_prior: bool = True, init_mapping: list[np.ndarray] | None = None
+                    ) -> tuple[Solution, list[np.ndarray], list[str]]:
+    """Alternate Viterbi index alignment and bundle adjustment along the wire.
+
+    With init_mapping (e.g. from initial_mapping), start from it over the
+    whole string; otherwise start from f - start_lag and grow along the wire.
+    """
     log = []
     F = len(frames[0].uv)
-    mapping = [np.arange(F) - start_lag for _ in frames]
+    mapping = init_mapping if init_mapping is not None else [np.arange(F) - start_lag for _ in frames]
+    if init_mapping is not None:
+        first = n
     start_state = 1 - start_lag
     sol = None
     K = first
@@ -142,3 +149,64 @@ def align_and_solve(frames: list[FrameDets], n: int = 500, start_lag: int = 1, f
     sol = Solver(views).solve(wire_prior=wire_prior, init=sol)
     log.append(f"final: median reproj {sol.cost_px:.2f}px")
     return sol, mapping, log
+
+
+def dtw_heights(y_k: np.ndarray, y_r: np.ndarray, cap_px: float = 40.0, iters: int = 4,
+                band: int = 40) -> np.ndarray:
+    """Monotone frame correspondence k -> r from per-frame image heights alone.
+
+    Heights of the same LED in two views are close to an affine function of
+    each other. Steps: (1, 1) normal, (1, 0) repeat in k, (1, 2) skip in r,
+    each with a small penalty. NaN heights cost a constant. Returns, for each
+    frame of k, the matched frame of r.
+    """
+    F = len(y_k)
+    a, b = 1.0, 0.0
+    match = np.arange(F)
+    for _ in range(iters):
+        pred = a * y_r + b
+        cost = np.abs(y_k[:, None] - pred[None, :])
+        cost = np.where(np.isfinite(cost), np.minimum(cost, cap_px) / cap_px, 0.35)
+        ii, jj = np.indices(cost.shape)
+        cost[np.abs(ii - jj) > band] = 1e3
+        INF = 1e18
+        D = np.full((F, F), INF)
+        back = np.zeros((F, F), np.int8)
+        D[0, :band] = cost[0, :band]
+        for i in range(1, F):
+            c1 = np.concatenate([[INF], D[i - 1, :-1]]) + 0.0    # (1, 1)
+            c0 = D[i - 1] + 0.3                                   # (1, 0)
+            c2 = np.concatenate([[INF, INF], D[i - 1, :-2]]) + 0.4  # (1, 2)
+            stack = np.stack([c0, c1, c2])
+            arg = np.argmin(stack, 0)
+            D[i] = stack[arg, np.arange(F)] + cost[i]
+            back[i] = arg
+        j = int(np.argmin(D[-1]))
+        match = np.zeros(F, int)
+        for i in range(F - 1, -1, -1):
+            match[i] = j
+            j -= int(back[i, j])
+        ok = np.isfinite(y_k) & np.isfinite(y_r[match])
+        res = y_k[ok] - (a * y_r[match][ok] + b)
+        keep = np.abs(res) < 2.5 * 1.4826 * np.median(np.abs(res)) + 1
+        A = np.vstack([y_r[match][ok][keep], np.ones(keep.sum())]).T
+        a, b = np.linalg.lstsq(A, y_k[ok][keep], rcond=None)[0]
+    return match
+
+
+def initial_mapping(frames: list[FrameDets], ref: int = 0, start_lag: int = 1,
+                    min_conf: float = 0.5) -> list[np.ndarray]:
+    """Frame -> LED for every view, relative to the reference view's f - start_lag."""
+    def heights(fd):
+        y = fd.uv[:, 1].copy()
+        y[~(fd.conf >= min_conf)] = np.nan
+        return y
+    y_r = heights(frames[ref])
+    F = len(y_r)
+    out = []
+    for k, fd in enumerate(frames):
+        if k == ref:
+            out.append(np.arange(F) - start_lag)
+        else:
+            out.append(dtw_heights(heights(fd), y_r) - start_lag)
+    return out
