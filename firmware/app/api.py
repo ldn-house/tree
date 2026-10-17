@@ -9,11 +9,15 @@ app.calib. "auth" routes need the HTTP_TOKEN (see app.httpd).
     GET  /effects                   effects, params, overlays, failures
     POST /state               auth  {"power", "brightness", "effect", "speed",
                                      "auto_s", "params": {effect: {param: v}}}
-    PUT  /effects/<name>      auth  hot-push one effect module (no reboot)
+    PUT  /effects/<name>      auth  hot-push one effect module (no reboot); with
+                                    UPDATE_KEY set it must be signed (X-Signature)
     DELETE /effects/<name>    auth  remove a hot-pushed effect
     PUT  /files/coords.txt    auth  coordinates in the contract frame
     PUT  /files/coords_compact.txt  auth  legacy triangulate.py output
-    POST /update              auth  firmware bundle (?dry_run=1 to only verify)
+    PUT  /config              auth  replace config.py from JSON values; signed
+                                    (X-Signature) when UPDATE_KEY is set; reboots
+    POST /update              auth  firmware bundle (?dry_run=1 to only verify,
+                                    ?allow_downgrade=1 to accept an older generation)
     GET  /update/status             progress of the current/last update
     POST /update/github       auth  self-update (?channel=main|stable)
     GET  /update/github/check auth  latest version on a channel
@@ -32,6 +36,7 @@ from app.httpd import HTTPError
 from app.log import lines, log
 
 MAX_EFFECT = 32768
+MAX_CONFIG = 4096
 MAX_COORDS = 65536
 
 
@@ -103,6 +108,11 @@ def register(rt, srv):
             raise HTTPError(400, "effect names are lowercase letters, digits and _")
         data = await req.body(MAX_EFFECT)
         _sha_check(req, data)
+        # Effect code runs with full access to the flash (there is no sandbox
+        # in MicroPython), so with a signing key the token alone is not
+        # enough: check the signature before any of it is executed (H4).
+        if not bootmgr.signature_ok("effect", name.encode() + b"\n" + data, req.headers.get("x-signature")):
+            raise HTTPError(403, "effects must be signed with UPDATE_KEY (X-Signature header)")
         is_mpy = req.query.get("format") == "mpy" or (len(data) > 4 and data[0] == 0x4D and data[1] < 32)
         ext = ".mpy" if is_mpy else ".py"
         try:
@@ -175,8 +185,10 @@ def register(rt, srv):
         if req.length is None:
             raise HTTPError(411, "Content-Length required")
         dry = req.query.get("dry_run") in ("1", "true", "yes")
+        downgrade = req.query.get("allow_downgrade") in ("1", "true", "yes")
         try:
-            m = await rt.updates.install_stream(req.read_chunk, req.length, "http", dry_run=dry)
+            m = await rt.updates.install_stream(req.read_chunk, req.length, "http", dry_run=dry,
+                                                allow_downgrade=downgrade)
         except HTTPError:
             raise
         except bootmgr.InstallError as e:
@@ -186,6 +198,19 @@ def register(rt, srv):
         rt.request_reboot("installed update over HTTP", 800)
         return 200, {"installed": m.get("version"), "slot": bootmgr.read_state()["active"],
                      "rebooting": True, "trial_s": rt.cfg.TRIAL_HEALTHY_S}
+
+    async def h_config(req):
+        body = await req.body(MAX_CONFIG)
+        if not bootmgr.signature_ok("config", body, req.headers.get("x-signature")):
+            raise HTTPError(403, "config uploads must be signed with UPDATE_KEY (X-Signature header)")
+        try:
+            import json
+
+            keys = bootmgr.install_config(json.loads(body))
+        except (ValueError, SyntaxError) as e:
+            raise HTTPError(400, str(e))
+        rt.request_reboot("config.py replaced over HTTP")
+        return 200, {"written": keys, "rebooting": True}
 
     async def h_update_status(req):
         return 200, rt.updates.status()
@@ -227,17 +252,19 @@ def register(rt, srv):
     srv.route("GET", "/gc", h_gc)
     srv.route("GET", "/effects", h_effects)
     srv.route("POST", "/state", h_state, auth=True)
-    srv.route("PUT", "/effects/*", h_effect_put, auth=True)
-    srv.route("POST", "/effects/*", h_effect_put, auth=True)
+    srv.route("PUT", "/effects/*", h_effect_put, auth=True, deadline=60)
+    srv.route("POST", "/effects/*", h_effect_put, auth=True, deadline=60)
+    srv.route("PUT", "/config", h_config, auth=True)
+    srv.route("POST", "/config", h_config, auth=True)
     srv.route("DELETE", "/effects/*", h_effect_delete, auth=True)
     for p in ("/files/coords.txt", "/files/coords_compact.txt"):
-        srv.route("PUT", p, h_coords, auth=True)
-        srv.route("POST", p, h_coords, auth=True)
-    srv.route("POST", "/update", h_update, auth=True)
+        srv.route("PUT", p, h_coords, auth=True, deadline=60)
+        srv.route("POST", p, h_coords, auth=True, deadline=60)
+    srv.route("POST", "/update", h_update, auth=True, deadline=300)
     srv.route("GET", "/update/status", h_update_status)
     srv.route("GET", "/update/github/status", h_update_status)
     srv.route("POST", "/update/github", h_github, auth=True)
-    srv.route("GET", "/update/github/check", h_github_check, auth=True)
+    srv.route("GET", "/update/github/check", h_github_check, auth=True, deadline=60)
     srv.route("POST", "/update/confirm", h_confirm, auth=True)
     srv.route("POST", "/update/rollback", h_rollback, auth=True)
     srv.route("POST", "/reboot", h_reboot, auth=True)

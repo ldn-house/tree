@@ -1,18 +1,18 @@
-"""Settings from the user's /config.py (USB-installed, never written over
-the network), with defaults for anything missing. A missing or broken
-config.py must not stop the firmware: the LEDs still run, just offline."""
+"""Settings from the user's /config.py, with defaults for anything missing.
 
-try:
-    import config as _c
+Loaded through bootmgr.load_config(): if config.py is missing, broken or
+lacks the required keys, the last config that did load (config.good.json)
+is used instead, so the board stays on the network and can be repaired over
+Wi-Fi (PUT /config). A broken config never stops the firmware.
+"""
 
-    ERROR = None
-except BaseException as e:  # SyntaxError, ImportError, anything
-    _c = None
-    ERROR = repr(e)
+import bootmgr
+
+_values, SOURCE, ERROR = bootmgr.load_config()
 
 
 def get(name, default=None):
-    return getattr(_c, name, default) if _c is not None else default
+    return _values.get(name, default)
 
 
 WIFI_SSID = get("WIFI_SSID")

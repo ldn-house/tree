@@ -24,12 +24,19 @@ import bootmgr
 
 from app import dns
 from app.log import log
+from app.streams import BufReader, TooLong, close_now
 
 CHANNELS = ("main", "stable")
 ASSET = "tree-firmware.bin"
 MANIFEST = "manifest.json"
 TIMEOUT = 15
 MAX_REDIRECTS = 5
+MAX_LINE = 2048
+MAX_HEAD = 8192
+MAX_HEADERS = 40
+HEAD_DEADLINE = 30  # connect, TLS, redirects and headers, all together
+CHECK_DEADLINE = 40  # a whole update check
+DOWNLOAD_DEADLINE = 900
 
 
 def release_url(cfg, channel, asset):
@@ -48,55 +55,74 @@ def _split(url):
     return tls, host, int(port) if port else (443 if tls else 80), "/" + path
 
 
-async def http_get(url):
-    """GET url following redirects. Returns (stream, content_length)."""
-    for _ in range(MAX_REDIRECTS + 1):
-        tls, host, port, path = _split(url)
-        ip = await dns.resolve(host)
-        ctx = None
-        if tls:
-            import ssl
+async def _get_once(url):
+    """One GET without following redirects. Returns (code, headers, reader)
+    where reader is a BufReader positioned at the body. Status and header
+    lines are bounded (H6): a hostile or broken server can't make this
+    allocate more than MAX_HEAD."""
+    tls, host, port, path = _split(url)
+    ip = await dns.resolve(host)
+    if tls:
+        import ssl
 
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.verify_mode = ssl.CERT_NONE
-        if ctx is None:
-            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), TIMEOUT)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.verify_mode = ssl.CERT_NONE
+        r, w = await asyncio.wait_for(asyncio.open_connection(ip, port, ssl=ctx, server_hostname=host), TIMEOUT)
+    else:
+        r, w = await asyncio.wait_for(asyncio.open_connection(ip, port), TIMEOUT)
+    br = BufReader(r, MAX_HEAD)
+    try:
+        req = "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: tree-firmware\r\nAccept: */*\r\nConnection: close\r\n\r\n" % (path, host)
+        w.write(req.encode())
+        await asyncio.wait_for(w.drain(), TIMEOUT)
+        status = await asyncio.wait_for(br.readline(MAX_LINE), TIMEOUT)
+        parts = status.split(None, 2)
+        code = int(parts[1]) if len(parts) > 1 else 0
+        headers = {}
+        for _ in range(MAX_HEADERS + 1):
+            line = (await asyncio.wait_for(br.readline(MAX_LINE), TIMEOUT)).strip()
+            if not line:
+                break
+            k, _, v = line.decode().partition(":")
+            headers[k.strip().lower()] = v.strip()
         else:
-            r, w = await asyncio.wait_for(asyncio.open_connection(ip, port, ssl=ctx, server_hostname=host), TIMEOUT)
-        try:
-            req = "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: tree-firmware\r\nAccept: */*\r\nConnection: close\r\n\r\n" % (path, host)
-            w.write(req.encode())
-            await asyncio.wait_for(w.drain(), TIMEOUT)
-            status = await asyncio.wait_for(r.readline(), TIMEOUT)
-            parts = status.split(None, 2)
-            code = int(parts[1]) if len(parts) > 1 else 0
-            headers = {}
-            while True:
-                line = await asyncio.wait_for(r.readline(), TIMEOUT)
-                line = line.strip()
-                if not line:
-                    break
-                k, _, v = line.decode().partition(":")
-                headers[k.strip().lower()] = v.strip()
-        except BaseException:
-            w.close()
-            raise
+            raise OSError("too many response headers")
+    except TooLong:
+        close_now(r)
+        raise OSError("response headers too large")
+    except BaseException:
+        close_now(r)
+        raise
+    return code, headers, br, (tls, host, port)
+
+
+async def _http_get(url):
+    for _ in range(MAX_REDIRECTS + 1):
+        code, headers, br, (tls, host, port) = await _get_once(url)
         if code in (301, 302, 303, 307, 308) and "location" in headers:
-            w.close()
+            br.close()
             loc = headers["location"]
             if loc.startswith("/"):
                 loc = "%s://%s%s" % ("https" if tls else "http", host if port in (80, 443) else "%s:%d" % (host, port), loc)
             url = loc
             continue
-        if code != 200:
-            w.close()
-            raise OSError("HTTP %d for %s" % (code, url))
-        if "chunked" in headers.get("transfer-encoding", ""):
-            w.close()
-            raise OSError("chunked responses are not supported")
+        if code != 200 or "chunked" in headers.get("transfer-encoding", ""):
+            br.close()
+            raise OSError("HTTP %d for %s" % (code, url) if code != 200 else "chunked responses are not supported")
         length = headers.get("content-length")
-        return r, int(length) if length is not None else None
+        try:
+            length = int(length) if length is not None else None
+        except ValueError:
+            br.close()
+            raise OSError("bad Content-Length")
+        return br, length
     raise OSError("too many redirects")
+
+
+async def http_get(url, deadline=HEAD_DEADLINE):
+    """GET url following redirects, with one deadline for everything up to
+    the body. Returns (BufReader, content_length); call .close() on it."""
+    return await asyncio.wait_for(_http_get(url), deadline)
 
 
 class Updates:
@@ -111,6 +137,7 @@ class Updates:
         self.latest = None
         self.latest_checked = None
         self.check_error = None
+        self.latest_generation = None
         self._check_now = False
         self.busy = False
         self.hb = time.ticks_ms()
@@ -152,13 +179,19 @@ class Updates:
         if self.rt.ha:
             self.rt.ha.mark("update")
 
-    async def install_stream(self, read_chunk, length, source, require_signature=None, dry_run=False):
+    async def install_stream(self, read_chunk, length, source, require_signature=None, dry_run=False,
+                             allow_downgrade=False):
         """Feed a bundle from read_chunk() (async, returns bytes or None at
-        the end) into the inactive slot. Returns the manifest. Raises
-        bootmgr.InstallError (or the reader's error) on any problem; the
-        slot is wiped and nothing is switched."""
+        the end) into staging, verify it and (unless dry_run) commit it to the
+        inactive slot. Returns the manifest. Raises bootmgr.InstallError (or
+        the reader's error) on any problem; then only the staging this call
+        created is removed and both slots are untouched."""
         if self.busy:
             raise bootmgr.InstallError("another update is in progress")
+        if not dry_run:
+            why = bootmgr.install_refused()
+            if why:
+                raise bootmgr.InstallError(why)
         self.busy = True
         self.source = source
         self.total = length
@@ -167,7 +200,7 @@ class Updates:
         inst = None
         try:
             inst = bootmgr.Installer(
-                length, self.rt.cfg.UPDATE_KEY, require_signature=require_signature, allow_during_trial=dry_run
+                length, self.rt.cfg.UPDATE_KEY, require_signature=require_signature, allow_downgrade=allow_downgrade
             )
             while True:
                 self.hb = time.ticks_ms()
@@ -184,10 +217,10 @@ class Updates:
                 inst.abort()
                 self._set("verified")
                 return inst.manifest
-            bootmgr.commit(inst.slot)
+            slot = bootmgr.commit()
             self.installed = inst.manifest.get("version")
             self._set("installed")
-            log("update: installed %s from %s into slot %s" % (self.installed, source, inst.slot))
+            log("update: installed %s from %s into slot %s" % (self.installed, source, slot))
             return inst.manifest
         except BaseException as e:
             if inst is not None:
@@ -216,15 +249,21 @@ class Updates:
             r.close()
 
     async def check(self, channel=None):
+        """Look up the latest version on a channel. Always finishes within
+        CHECK_DEADLINE; a slow or dead server is just a check error."""
         channel = channel or self.rt.cfg.UPDATE_CHANNEL
         try:
-            m = await self.fetch_manifest(channel)
+            m = await asyncio.wait_for(self.fetch_manifest(channel), CHECK_DEADLINE)
             self.latest = m.get("version")
+            self.latest_generation = bootmgr.generation(m)
             self.check_error = None
+        except asyncio.TimeoutError:
+            self.check_error = "timed out after %d s" % CHECK_DEADLINE
+            log("update: check timed out")
         except Exception as e:
             self.check_error = repr(e)
             log("update: check failed: %r" % (e,))
-        self.latest_checked = time.ticks_ms()
+        self.latest_checked = self.rt.uptime_s()
         if self.rt.ha:
             self.rt.ha.mark("update")
         return {"channel": channel, "installed": self.rt.version, "latest": self.latest, "error": self.check_error,
@@ -247,16 +286,26 @@ class Updates:
         return None
 
     async def _github(self, channel):
+        try:
+            await asyncio.wait_for(self._github_install(channel), DOWNLOAD_DEADLINE)
+        except asyncio.TimeoutError:
+            self._set("error", "download took longer than %d s" % DOWNLOAD_DEADLINE)
+            return
+        except Exception:
+            return  # install_stream recorded the error
+        self.rt.request_reboot("installed update from GitHub")
+
+    async def _github_install(self, channel):
         self._set("downloading")
         try:
             r, length = await http_get(release_url(self.rt.cfg, channel, ASSET))
         except Exception as e:
             self._set("error", "download failed: %r" % (e,))
-            return
+            raise
         if length is None:
             r.close()
             self._set("error", "server did not send Content-Length")
-            return
+            raise OSError("no Content-Length")
         state = {"left": length}
 
         async def read_chunk():
@@ -269,29 +318,36 @@ class Updates:
             return chunk
 
         try:
+            # Never allow_downgrade here: the transport is unauthenticated, so
+            # the signed generation is the only protection against replay.
             await self.install_stream(read_chunk, length, "github:" + channel, require_signature=True)
-        except Exception:
-            return
         finally:
             r.close()
-        self.rt.request_reboot("installed update from GitHub")
 
     async def run(self):
-        """Periodic update check (for the HA update entity)."""
+        """Periodic update check (for the HA update entity). The check runs
+        as its own task: this loop keeps heartbeating meanwhile, and the
+        check is bounded by CHECK_DEADLINE, so a slow release server can never
+        look like a stalled task to the supervisor (H7)."""
         hours = self.rt.cfg.UPDATE_CHECK_HOURS
-        first = True
+        first_s = self.rt.cfg.get("UPDATE_CHECK_FIRST_S", 60)
+        task = None
         while True:
             self.hb = time.ticks_ms()
             await asyncio.sleep_ms(1000)
+            if task is not None:
+                if task.done():
+                    task = None
+                continue
             if not self.rt.wifi.up or self.busy or self.rt.calib.playing():
                 continue
             due = self._check_now
+            up = self.rt.uptime_s()
             if hours and not due:
                 if self.latest_checked is None:
-                    due = first and time.ticks_diff(time.ticks_ms(), self.rt.started) > 60000
+                    due = up >= first_s
                 else:
-                    due = time.ticks_diff(time.ticks_ms(), self.latest_checked) > hours * 3600000
+                    due = up - self.latest_checked >= hours * 3600
             if due:
                 self._check_now = False
-                first = False
-                await self.check()
+                task = asyncio.create_task(self.check())

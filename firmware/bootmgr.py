@@ -1,17 +1,24 @@
 """Boot manager and firmware installer: the recovery layer.
 
-Installed over USB only (flash.py --usb). Nothing reachable over the network
-can write this file, boot.py, main.py, safemode.py or config.py, so a bad
-update can always be undone without USB.
+Installed over USB (flash.py). No update, upload or API path writes this
+file, boot.py, main.py or safemode.py, and config.py only changes through
+the validated, signed config endpoint. That protects recovery against bad
+or truncated updates. It does NOT protect it against code you choose to run:
+firmware bundles and hot-pushed effects execute with full filesystem access,
+so only install code signed with your UPDATE_KEY (see docs in CLAUDE.md,
+"Trust model").
 
 Flash layout:
 
     /boot.py /main.py /bootmgr.py /safemode.py   recovery layer (this)
-    /config.py                                   user settings (USB only)
-    /boot.json                                   slot + boot counter
+    /config.py                                   user settings
+    /config.good.json                            last config.py that loaded
+    /boot.json                                   slot, boot counter, floor
     /fw/a/  /fw/b/                               firmware slots
         manifest.json                            written last: slot is complete
         app/... effects/... data/...
+    /fw/new/                                     staging for an upload
+    /fw/reserve.bin                              space kept back for recovery
     /fx/                                         hot-pushed effect overlays
     /state.json /coords.txt                      runtime data
 
@@ -27,8 +34,12 @@ Boot flow (launch(), called from main.py on every real boot):
    mark_healthy() once it has been up and responsive for a while, which
    resets the counter and confirms a trial slot.
 
-Updates arrive as a single bundle (see Installer) and are written into the
-inactive slot. Switching is one atomic rename of boot.json.
+Updates arrive as a single bundle (see Installer) and are written into
+/fw/new, never into a slot. Only a fully verified bundle replaces the
+inactive slot (commit()), and switching is one atomic rename of boot.json.
+Bundles carry a signed, increasing "generation"; once a generation has been
+confirmed healthy, older bundles are refused unless a downgrade is asked for
+explicitly (anti-replay).
 """
 
 import gc
@@ -70,6 +81,12 @@ ALLOWED_TOP = ("app", "effects", "lib", "data")
 ALLOWED_EXT = (".py", ".mpy", ".json", ".txt", ".tcal")
 REQUIRED = (("app/runtime.py", "app/runtime.mpy"),)
 FREE_MARGIN = 32768
+STAGE = FW + "/new"
+RESERVE = FW + "/reserve.bin"
+RESERVE_BYTES = 256 * 1024
+CONFIG_GOOD = "config.good.json"
+CONFIG_REQUIRED = ("WIFI_SSID", "HTTP_TOKEN")
+CONFIG_TYPES = (str, int, float, bool, type(None))
 
 _wdt = None
 _feeder = None
@@ -130,19 +147,71 @@ def rmtree(path):
 
 def write_atomic(path, data):
     """Write data to path so readers see the old or the new file, never a
-    mix: LittleFS (and POSIX) rename replaces the target atomically."""
+    mix: LittleFS rename replaces the target atomically. Any failure leaves
+    the old file untouched and raises; nothing here ever deletes it."""
     tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
     try:
+        with open(tmp, "wb") as f:
+            f.write(data)
         os.rename(tmp, path)
-    except OSError:
-        # Filesystems that refuse to rename over a file (FAT).
+    except BaseException:
         try:
-            os.remove(path)
+            os.remove(tmp)
         except OSError:
             pass
-        os.rename(tmp, path)
+        raise
+
+
+def free_bytes():
+    try:
+        st = os.statvfs("/" if exists("/") else ".")
+        return st[0] * st[3]
+    except (AttributeError, OSError):
+        return None
+
+
+def reclaim():
+    """Free disposable space: staging, the recovery reserve, hot-pushed
+    effects, rotated logs and stray temporary files. Returns bytes freed
+    (None if unknown)."""
+    before = free_bytes()
+    for p in (STAGE, RESERVE, FX_DIR, LOG + ".1", "fx_probe.txt"):
+        try:
+            rmtree(p)
+        except OSError:
+            pass
+    for d in ("", FW):
+        try:
+            for f in os.listdir(d or "."):
+                if f.endswith(".tmp"):
+                    rmtree((d + "/" if d else "") + f)
+        except OSError:
+            pass
+    after = free_bytes()
+    log("reclaimed space (free %s -> %s)" % (before, after))
+    return None if before is None or after is None else after - before
+
+
+def ensure_reserve():
+    """Keep RESERVE_BYTES set aside so recovery can always install a bundle
+    and write state even if something fills the flash. Best effort."""
+    if exists(RESERVE):
+        return
+    free = free_bytes()
+    if free is None or free < 3 * RESERVE_BYTES:
+        return
+    try:
+        makedirs(FW)
+        block = bytes(4096)
+        with open(RESERVE, "wb") as f:
+            for _ in range(RESERVE_BYTES // 4096):
+                f.write(block)
+    except OSError as e:
+        log("cannot create reserve: %r" % (e,))
+        try:
+            os.remove(RESERVE)
+        except OSError:
+            pass
 
 
 def eq(a, b):
@@ -192,13 +261,112 @@ def slot_manifest(slot):
         return None
 
 
-def config_value(name, default=None):
+_config = None
+
+
+def _config_ok(values):
+    for k in CONFIG_REQUIRED:
+        v = values.get(k)
+        if not isinstance(v, str) or not v:
+            return "%s is missing" % k
+    if len(values["HTTP_TOKEN"]) < 8:
+        return "HTTP_TOKEN is shorter than 8 characters"
+    return None
+
+
+def load_config():
+    """Settings from config.py. If it is missing, broken or lacks the
+    required keys, fall back to the last config that did load
+    (config.good.json), so the board stays reachable and can be fixed over
+    Wi-Fi. Returns (values, source, error)."""
+    global _config
+    if _config is not None:
+        return _config
+    values = {}
+    error = None
     try:
         import config
 
-        return getattr(config, name, default)
+        for k in dir(config):
+            v = getattr(config, k)
+            if k.isupper() and isinstance(v, CONFIG_TYPES + (list, tuple)):
+                values[k] = v
+        error = _config_ok(values)
+    except BaseException as e:
+        error = "config.py failed to load: %r" % (e,)
+    if error is None:
+        try:
+            with open(CONFIG_GOOD) as f:
+                good = json.load(f)
+        except Exception:
+            good = None
+        if good != values:
+            try:
+                write_atomic(CONFIG_GOOD, json.dumps(values).encode())
+            except Exception as e:
+                log("cannot save config snapshot: %r" % (e,))
+        _config = (values, "config.py", None)
+        return _config
+    log(error)
+    try:
+        with open(CONFIG_GOOD) as f:
+            good = json.load(f)
+        if isinstance(good, dict) and _config_ok(good) is None:
+            log("using the last good config (config.good.json)")
+            _config = (good, CONFIG_GOOD, error)
+            return _config
     except Exception:
-        return default
+        pass
+    _config = (values, "defaults", error)
+    return _config
+
+
+def config_value(name, default=None):
+    return load_config()[0].get(name, default)
+
+
+def config_source():
+    return load_config()[1], load_config()[2]
+
+
+def install_config(values):
+    """Write a new config.py from plain values (no code is executed or
+    accepted: every value must be a str, number, bool or None). Takes effect
+    after a reboot. Raises ValueError."""
+    if not isinstance(values, dict):
+        raise ValueError("expected an object")
+    lines = ["# Written by the device from a validated /config upload.\n"]
+    clean = {}
+    for k, v in values.items():
+        if not isinstance(k, str) or not k or not all(c.isupper() or c.isdigit() or c == "_" for c in k):
+            raise ValueError("bad setting name %r" % (k,))
+        if not isinstance(v, CONFIG_TYPES):
+            raise ValueError("%s must be a string, number, bool or null" % k)
+        clean[k] = v
+        lines.append("%s = %r\n" % (k, v))
+    err = _config_ok(clean)
+    if err:
+        raise ValueError(err)
+    src = "".join(lines)
+    compile(src, "config.py", "exec")
+    write_atomic("config.py", src.encode())
+    write_atomic(CONFIG_GOOD, json.dumps(clean).encode())
+    return sorted(clean)
+
+
+def signature_ok(kind, body, sig_hex, key=None):
+    """Check an HMAC-SHA256 over b"tree-<kind>\n" + body (domain-separated
+    from bundle manifests) made with UPDATE_KEY. True if no key is set."""
+    key = key if key is not None else config_value("UPDATE_KEY")
+    if not key:
+        return True
+    if not sig_hex:
+        return False
+    try:
+        sig = binascii.unhexlify(sig_hex.strip())
+    except ValueError:
+        return False
+    return eq(sig, hmac_sha256(key, b"tree-" + kind.encode() + b"\n" + body))
 
 
 # --- watchdog ----------------------------------------------------------------
@@ -260,6 +428,7 @@ def _default_state():
         "safe": None,
         "event": None,
         "events": [],
+        "floor": 0,  # lowest bundle generation accepted (anti-replay)
     }
 
 
@@ -282,6 +451,8 @@ def read_state():
         st["previous"] = None
     if not isinstance(st["events"], list):
         st["events"] = []
+    if not isinstance(st["floor"], int) or st["floor"] < 0:
+        st["floor"] = 0
     return st
 
 
@@ -368,16 +539,47 @@ def mark_healthy(slot):
     st["trial"] = False
     if confirmed:
         _event(st, "confirmed %s" % _ver(st["active"]))
+    gen = generation(slot_manifest(slot))
+    if gen > st["floor"]:
+        st["floor"] = gen
     write_state(st)
+    ensure_reserve()
     return confirmed
 
 
-def commit(slot):
-    """Make a fully installed slot active on the next boot, as a trial."""
-    if not slot_ok(slot):
-        raise InstallError("slot %s is not complete" % slot)
+def generation(manifest):
+    g = manifest.get("generation") if isinstance(manifest, dict) else None
+    return g if isinstance(g, int) and not isinstance(g, bool) and g > 0 else 0
+
+
+def install_refused():
+    """Why a (non-dry-run) install can't proceed now, or None."""
     st = read_state()
-    if st["active"] != slot:
+    if st["trial"] and st["safe"] is None:
+        return "the running update is not confirmed yet"
+    return None
+
+
+def commit(allow_during_trial=False):
+    """Move the verified staging tree into the inactive slot and boot it
+    next, as a trial. This is the only place a slot is ever replaced, and it
+    is refused while the running firmware is itself an unconfirmed trial
+    (its rollback target is the slot that would be overwritten). Returns the
+    slot."""
+    if not exists(STAGE + "/manifest.json"):
+        raise InstallError("nothing staged")
+    st = read_state()
+    if st["trial"] and st["safe"] is None and not allow_during_trial:
+        raise InstallError("the running update is not confirmed yet")
+    slot = other(st["active"]) if st["active"] else "a"
+    if st["previous"] == slot:
+        # Detach the slot about to be replaced first, so a power cut part way
+        # through never leaves boot.json pointing at a half-swapped slot.
+        st["previous"] = None
+        write_state(st)
+    rmtree(slot_dir(slot))
+    os.rename(STAGE, slot_dir(slot))
+    if st["active"] != slot and st["active"] is not None:
         st["previous"] = st["active"]
     st["active"] = slot
     st["trial"] = True
@@ -392,6 +594,7 @@ def commit(slot):
         rmtree(FX_DIR)
     except OSError:
         pass
+    return slot
 
 
 def rollback():
@@ -455,7 +658,11 @@ def launch():
     try:
         write_state(st)
     except Exception as e:
+        # Without a persisted counter, rollback and the three-strike rule
+        # can't work, and a failing app would retry forever. Go straight to
+        # recovery, decided in RAM; safe mode reclaims space to install.
         log("cannot write boot state: %r" % (e,))
+        kind, what = "safe", "cannot record the boot (%r)" % (e,)
     info = {
         "slot": what if kind == "app" else None,
         "trial": st["trial"],
@@ -561,23 +768,32 @@ class Installer:
                 "files": [{"path": "app/runtime.mpy", "size": n, "sha256": hex}, ...]}
 
     Use: inst = Installer(content_length, key); inst.feed(chunk)...;
-    for _ in inst.finish(): ...; commit(inst.slot). Any problem raises
-    InstallError and the caller should call abort(). Nothing outside the
-    inactive slot is touched until commit().
+    for _ in inst.finish(): ...; commit(). Any problem raises InstallError and
+    the caller should call abort(). Files only ever go to the staging tree
+    (/fw/new), which abort() removes only if this installer created it: a
+    rejected or dry-run upload never touches either slot.
+
+    manifest "generation" (signed with the rest of the manifest) must be at
+    least the persisted floor, so a captured older bundle can't be replayed,
+    unless allow_downgrade (an explicit, authenticated request).
     """
 
-    def __init__(self, length, key=None, require_signature=None, allow_during_trial=False):
+    def __init__(self, length, key=None, require_signature=None, allow_downgrade=False, reclaim_slot=False):
         st = read_state()
-        if st["safe"] is None and st["trial"] and not allow_during_trial:
-            raise InstallError("the running update is not confirmed yet")
         if not isinstance(length, int) or length <= len(MAGIC) + 8:
             raise InstallError("missing or too small Content-Length")
         self.length = length
         self.key = key
         # Default: with a key configured, every bundle must be signed.
         self.require_signature = bool(key) if require_signature is None else require_signature
-        self.slot = other(st["active"]) if st["active"] else "a"
-        self.dir = slot_dir(self.slot)
+        self.floor = st["floor"]
+        self.allow_downgrade = allow_downgrade
+        # Safe mode only: if the flash is too full, the inactive slot (which
+        # failed to boot or is about to be replaced) may be sacrificed.
+        self.reclaim_slot = reclaim_slot
+        self.inactive = other(st["active"]) if st["active"] else "a"
+        self.dir = STAGE
+        self.created = False
         self.got = 0
         self.phase = _P_HEAD
         self.need = len(MAGIC) + 4
@@ -710,18 +926,37 @@ class Installer:
         expect = len(MAGIC) + 4 + len(self.mbytes) + 4 + len(sig) + self.total
         if expect != self.length:
             raise InstallError("Content-Length does not match the manifest")
+        # Only now is the manifest authenticated (when a key is set), so only
+        # now is its generation worth acting on. Still before any write.
+        gen = generation(self.manifest)
+        if gen < self.floor and not self.allow_downgrade:
+            raise InstallError(
+                "bundle generation %d is older than the minimum %d already confirmed (a replay or downgrade);"
+                " ask for an explicit downgrade to install it" % (gen, self.floor)
+            )
 
     def _start_files(self):
-        rmtree(self.dir)
+        # Staging is disposable by definition: a leftover tree from an
+        # interrupted upload is cleared. Slots are never touched here.
+        rmtree(STAGE)
         gc.collect()
-        try:
-            st = os.statvfs("/" if exists("/") else ".")
-            free = st[0] * st[3]
-            if free < self.total + FREE_MARGIN:
-                raise InstallError("not enough flash: need %d, free %d" % (self.total + FREE_MARGIN, free))
-        except (AttributeError, OSError):
-            pass
+        need = self.total + FREE_MARGIN
+        free = free_bytes()
+        if free is not None and free < need:
+            reclaim()
+            free = free_bytes()
+            if free is not None and free < need and self.reclaim_slot:
+                log("safe mode: freeing inactive slot %s for the upload" % self.inactive)
+                st = read_state()
+                if st["previous"] == self.inactive:
+                    st["previous"] = None
+                    write_state(st)
+                rmtree(slot_dir(self.inactive))
+                free = free_bytes()
+            if free is not None and free < need:
+                raise InstallError("not enough flash: need %d, free %d" % (need, free))
         makedirs(self.dir)
+        self.created = True
         self.phase = _P_FILES
         self._next_file()
 
@@ -778,10 +1013,12 @@ class Installer:
                 self.f = None
         except Exception:
             pass
-        try:
-            rmtree(self.dir)
-        except Exception:
-            pass
+        if self.created:
+            try:
+                rmtree(self.dir)
+            except Exception:
+                pass
+            self.created = False
 
 
 def install_file(path, commit_after=True):
@@ -789,7 +1026,7 @@ def install_file(path, commit_after=True):
     with USB access owns the board anyway, so an unsigned bundle is accepted
     here; a signature that is present must still be valid."""
     size = os.stat(path)[6]
-    inst = Installer(size, config_value("UPDATE_KEY"), require_signature=False, allow_during_trial=True)
+    inst = Installer(size, config_value("UPDATE_KEY"), require_signature=False, allow_downgrade=True)
     try:
         with open(path, "rb") as f:
             while True:
@@ -804,5 +1041,5 @@ def install_file(path, commit_after=True):
         inst.abort()
         raise
     if commit_after:
-        commit(inst.slot)
+        inst.slot = commit(allow_during_trial=True)
     return inst
