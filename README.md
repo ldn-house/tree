@@ -21,8 +21,11 @@ RGB LED strip controller for a 6ft Christmas tree with 500 WS2811 LEDs, inspired
 # Push updates via WiFi OTA (no USB needed)
 ./flash.py --ota --host 192.168.2.149
 
-# Preview animations in browser
+# Preview effects in the browser (3D viewer with hot reload)
 ./serve.py
+
+# Render an effect headlessly (GIF, contact sheet, metrics)
+./render.py rainbow_cycle
 ```
 
 uv automatically handles dependencies.
