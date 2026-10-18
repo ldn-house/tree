@@ -57,30 +57,42 @@ _REASON = DEVSIM_WATCHDOG_BASE + 0x08
 
 
 class _Mem32:
-    def _load(self):
-        try:
-            import json
+    """REASON from the environment; scratch registers kept in memory and
+    written through to DEVSIM_SCRATCH (one "addr value" line each), so they
+    survive the simulated watchdog kill. Writes are cheap enough for the
+    per-frame breadcrumbs (app.trace) not to distort heap measurements."""
 
+    def __init__(self):
+        self.regs = None
+
+    def _load(self):
+        regs = {}
+        try:
             with open(os.getenv("DEVSIM_SCRATCH")) as f:
-                return json.load(f)
+                for line in f:
+                    a, v = line.split()
+                    regs[int(a)] = int(v)
         except (OSError, ValueError, TypeError):
-            return {}
+            pass
+        self.regs = regs
 
     def __getitem__(self, addr):
         if addr == _REASON:
             return int(os.getenv("DEVSIM_WDT_REASON") or 0)
-        return self._load().get(str(addr), 0)
+        if self.regs is None:
+            self._load()
+        return self.regs.get(addr, 0)
 
     def __setitem__(self, addr, value):
+        if self.regs is None:
+            self._load()
+        self.regs[addr] = value & 0xFFFFFFFF
         path = os.getenv("DEVSIM_SCRATCH")
         if not path:
             return
-        import json
-
-        d = self._load()
-        d[str(addr)] = value & 0xFFFFFFFF
         with open(path, "w") as f:
-            json.dump(d, f)
+            for a in self.regs:
+                f.write("%d %d\n" % (a, self.regs[a]))
 
 
 mem32 = _Mem32()
@@ -122,6 +134,8 @@ class Pin:
 class Timer:
     PERIODIC = 1
     ONE_SHOT = 0
+
+    DEVSIM_NO_IRQ = True  # app.trace: callbacks never run here
 
     def __init__(self, *a, **kw):
         # No soft-timer IRQs on the unix port. The harness only judges the

@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover
 
 import bootmgr
 
-from app import seqfile
+from app import seqfile, trace
 from app.httpd import HTTPError
 from app.log import log
 
@@ -348,6 +348,7 @@ class Calib:
             now = time.ticks_ms()
             self.hb = now
             if self.state != "idle":
+                trace.at(trace.CALIB)
                 # The TTL never cuts finite playback (spec 2.2); it applies
                 # to infinite loops and idle locks. No absolute "end of
                 # playback" deadline is computed: loops * loop_ms can exceed

@@ -20,16 +20,26 @@ import asyncio
 
 import bootmgr
 
-from app import calib, cfg, coords, driver, engine, fx, ha, hw, httpd, mqtt, net, outstage, recovery, state, supervisor, updates
+from app import calib, cfg, coords, driver, engine, fx, ha, hw, httpd, mqtt, net, outstage, recovery, state, supervisor, trace, updates
 from app.log import log
 
+# Collect after every GC_THRESHOLD bytes allocated rather than only when the
+# heap runs out, so free memory never sinks more than about this far below
+# what is live (the raw low-water mark then means something), and the HA
+# discovery burst at each MQTT connect doesn't fill the heap with garbage.
+GC_THRESHOLD = 32 * 1024
 RESTART_LIMIT = 5
 RESTART_WINDOW_MS = 60000
 
 
 class Runtime:
     def __init__(self, info):
+        try:
+            gc.threshold(GC_THRESHOLD)
+        except (AttributeError, ValueError):
+            pass
         info["reset_cause"] = recovery.reset_cause(info.get("reset_cause"))
+        crumb = trace.take()
         self.info = info
         self.cfg = cfg
         self.n = cfg.LED_COUNT
@@ -46,6 +56,12 @@ class Runtime:
         self.reboot_reason = None
         self.restarts = {}
         self.reset_reason = supervisor.take_reason()
+        # A watchdog expiry the supervisor didn't decide on: the event loop
+        # was blocked. Say where (app.trace).
+        self.hang = crumb if info["reset_cause"] == "watchdog" and not self.reset_reason else None
+        if self.hang:
+            self.reset_reason = trace.describe(self.hang)
+            log("boot: watchdog expired: " + self.reset_reason)
         log("tree %s (slot %s, reset %s%s)" % (self.version, self.slot, info.get("reset_cause"),
                                                 ": " + self.reset_reason if self.reset_reason else ""))
         if recovery.OUTDATED:
@@ -188,6 +204,7 @@ class Runtime:
                 "events": self.info.get("events"),
                 "reset_cause": self.info.get("reset_cause"),
                 "reset_reason": self.reset_reason,
+                "hang": self.hang,
             },
             "state": st.snapshot(),
             "effect": self.engine.status(),
@@ -214,7 +231,9 @@ class Runtime:
             "update": self.updates.status(),
             "supervisor": {"healthy": self.sup.healthy, "problems": self.sup.problems,
                            "heap_live": self.sup.heap_live, "heap_live_min": self.sup.heap_live_min,
-                           "heap_low_uncollected": self.sup.heap_low_uncollected},
+                           "heap_low_uncollected": self.sup.heap_low_uncollected, "heap_sites": hw.heap_sites,
+                           "gc_threshold": GC_THRESHOLD, "stall_max_ms": self.sup.stall_max_ms,
+                           "stall_in": self.sup.stall_in},
             "config_error": cfg.ERROR,
             "config_source": cfg.SOURCE,
             "config_trial": bool(self.info.get("cfg_trial")),
@@ -271,6 +290,7 @@ class Runtime:
             tasks.append(("ha", self.ha.run))
         for name, fn in tasks:
             asyncio.create_task(self._guard(name, fn))
+        trace.start()
         while True:
             try:
                 await self.http.start()

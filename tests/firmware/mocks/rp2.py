@@ -163,9 +163,14 @@ class DMA:
         return kw
 
     def config(self, read=None, write=None, count=0, ctrl=None, trigger=False):
+        # Copy into a reused buffer: allocating here (bytes(read[:count]) was
+        # ~3 KB per frame) made the simulated heap churn far worse than the
+        # board's, where DMA allocates nothing.
         global frames, last
         frames += 1
-        last = bytes(read[:count])
+        if last is None or len(last) != count:
+            last = bytearray(count)
+        memoryview(last)[:] = memoryview(read)[:count]
         self._until = time.ticks_add(time.ticks_us(), count * 10)  # 8 bits x 1.25 us
 
     def active(self, v=None):

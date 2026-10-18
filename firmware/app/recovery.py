@@ -78,7 +78,11 @@ def scratch_get():
 
 
 def deliberate():
-    """Forget the hang markers before an intentional reset (bootmgr.deliberate)."""
+    """Forget the hang markers before an intentional reset (bootmgr.deliberate),
+    and app.trace's breadcrumb in scratch 1."""
+    base = _watchdog_base()
+    if base is not None:
+        machine.mem32[base + _WD_SCRATCH0 + 4] = 0
     if hasattr(bootmgr, "deliberate"):
         return bootmgr.deliberate()
     scratch_set(None)

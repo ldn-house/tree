@@ -21,7 +21,7 @@ import asyncio
 
 import bootmgr
 
-from app import hw, recovery
+from app import hw, recovery, trace
 from app.log import log
 
 REASON_FILE = "reset_reason.txt"
@@ -30,6 +30,7 @@ PERIOD_MS = 500
 STARTUP_GRACE_MS = 5000
 PERSIST_MS = 2000  # a problem must last this long before feeding stops
 GC_EVERY_MS = 10000
+STALL_LOG_MS = 1500  # a turn of the event loop longer than this is logged
 RESERVE_EVERY_S = 600
 
 
@@ -71,6 +72,8 @@ class Supervisor:
         self.heap_live = None
         self.heap_live_min = None
         self.heap_low_uncollected = None
+        self.stall_max_ms = 0  # longest turn of the event loop
+        self.stall_in = None  # ... and the phase last marked before it
         self._gc_at = 0
         self.config_done = False
         # First reserve check 30 s after boot, then every RESERVE_EVERY_S.
@@ -127,6 +130,7 @@ class Supervisor:
     async def _reserve(self):
         for _ in bootmgr.reserve_steps():
             await asyncio.sleep_ms(5)
+            trace.at(trace.RESERVE)
 
     def _maintain(self, uptime_s):
         rt = self.rt
@@ -166,13 +170,23 @@ class Supervisor:
         while True:
             rt = self.rt
             now = time.ticks_ms()
-            rt.uptime_ms += time.ticks_diff(now, last)
+            gap = time.ticks_diff(now, last)
+            rt.uptime_ms += gap
             last = now
+            if gap > PERIOD_MS + STALL_LOG_MS:
+                where = trace.NAMES[trace.phase]
+                log("supervisor: event loop stalled %d ms (last marked: %s)" % (gap - PERIOD_MS, where))
+                if gap - PERIOD_MS > self.stall_max_ms:
+                    self.stall_max_ms = gap - PERIOD_MS
+                    self.stall_in = where
+            trace.alive(now)
+            trace.at(trace.SUPERVISOR)
             free = hw.mem_free()
             if self.heap_low_uncollected is None or free < self.heap_low_uncollected:
                 self.heap_low_uncollected = free
             if rt.uptime_ms - self._gc_at >= GC_EVERY_MS and not rt.calib.playing():
                 self._gc_at = rt.uptime_ms
+                trace.at(trace.GC)
                 gc.collect()
                 free = self.heap_live = hw.mem_free()
                 if self.heap_live_min is None or free < self.heap_live_min:

@@ -236,3 +236,27 @@ def test_running_effect_publishes_are_rate_limited(mdev, bus):
     assert len(pubs) <= 4, pubs  # ~1/s over ~3.5 s, not one per change
     assert all(b - a >= 0.9 for a, b in zip(times, times[1:])), times
     assert pubs[-1][1] == b"chase"  # the final state still lands
+
+
+def test_busy_publisher_keeps_its_session(mdev, bus):
+    """Found on the tree: PINGREQ only went out when nothing had been sent
+    for keepalive/2, so a tree publishing all the time never pinged, the
+    broker never answered, and the session was dropped as dead every
+    1.5 x keepalive (29 reconnects in under half an hour). Publish at least
+    once a second for 4 x keepalive (5 s): one session, no offline flap."""
+    d = mdev
+    st = status(d)["mqtt"]
+    assert st["connected"] and st["connects"] == 1, st
+    t0 = time.time()
+    level = 0
+    while time.time() - t0 < 20:
+        level = 60 if level != 60 else 90
+        d.post("/state", {"brightness": level})  # -> a light state publish
+        time.sleep(0.5)
+    st = status(d)["mqtt"]
+    assert st["connected"] and st["connects"] == 1 and st["last_error"] is None, st
+    assert st["pings"] >= 3, st  # every keepalive / 2, whatever else was sent
+    assert st["tx"] > 30, st
+    states = [p for _t, p in bus.since(t0, P + "/state")]
+    assert len(states) >= 15, len(states)  # it really was publishing all along
+    assert [p for _t, p in bus.since(t0, AVAIL)] == [], "availability flapped"

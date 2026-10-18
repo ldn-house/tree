@@ -7,6 +7,10 @@ manages Wi-Fi, which here belongs to app.net. What matters for reliability:
   (review H2);
 - every read error, EOF or protocol error ends the session, and so does
   silence for 1.5 x keepalive, so a dead broker is always noticed (H1);
+- PINGREQ goes out every keepalive / 2 whatever else is being sent: the
+  broker only ever *sends* when asked (or for our subscriptions), so pinging
+  only when idle starved last_rx on a tree that publishes all the time and
+  the session was dropped every 45 s;
 - reconnects back off from 1 s to 60 s, never blocking the event loop;
 - the last will marks the device offline when the session dies;
 - one task reads; writes go through a lock so packets never interleave.
@@ -16,7 +20,7 @@ import time
 
 import asyncio
 
-from app import dns
+from app import dns, hw, trace
 from app.log import log
 from app.streams import close_now
 
@@ -65,6 +69,8 @@ class MQTT:
         self.lock = asyncio.Lock()
         self.last_rx = 0
         self.last_tx = 0
+        self.last_ping = 0
+        self.pings = 0
         self.pid = 0
         self.connects = 0
         self.failures = 0
@@ -137,10 +143,13 @@ class MQTT:
         that matters is re-published on the next connect."""
         if not self.connected:
             return False
+        trace.at(trace.MQTT)
         if isinstance(payload, str):
             payload = payload.encode()
+        pkt = _packet(0x30 | (1 if retain else 0), _str(topic) + payload)
+        hw.heap_mark("mqtt publish")
         try:
-            await self._send(_packet(0x30 | (1 if retain else 0), _str(topic) + payload))
+            await self._send(pkt)
             return True
         except Exception as e:
             self._drop("publish failed: %r" % (e,))
@@ -160,6 +169,7 @@ class MQTT:
     # -- session --
 
     async def _connect(self):
+        trace.at(trace.MQTT)
         ip = await dns.resolve(self.host)
         self.r, self.w = await _timeout(asyncio.open_connection(ip, self.port), CONNECT_TIMEOUT)
         self.w.write(self._connect_packet())
@@ -170,7 +180,7 @@ class MQTT:
         if body[1] != 0:
             raise OSError("broker refused connection (code %d)" % body[1])
         self.connected = True
-        self.last_tx = time.ticks_ms()
+        self.last_tx = self.last_ping = time.ticks_ms()
         if self.subs:
             payload = bytearray(self._next_pid().to_bytes(2, "big"))
             for t in self.subs:
@@ -181,6 +191,7 @@ class MQTT:
         try:
             while True:
                 kind, body = await self._read_packet()
+                trace.at(trace.MQTT)
                 t = kind & 0xF0
                 if t == 0x30 and body is not None:
                     self._on_publish(kind, body)
@@ -222,6 +233,7 @@ class MQTT:
                 await self.on_connect()
             ka = self.keepalive * 1000
             while self.connected:
+                trace.at(trace.MQTT)
                 self.hb = time.ticks_ms()
                 if not wifi.up:
                     self._drop("wifi down")
@@ -230,7 +242,9 @@ class MQTT:
                 if time.ticks_diff(now, self.last_rx) > ka * 3 // 2:
                     self._drop("no traffic for %d s, assuming dead" % (ka * 3 // 2000))
                     break
-                if time.ticks_diff(now, self.last_tx) > ka // 2:
+                if time.ticks_diff(now, self.last_ping) >= ka // 2:
+                    self.last_ping = now
+                    self.pings += 1
                     try:
                         await self._send(b"\xc0\x00")
                     except Exception as e:
@@ -288,4 +302,5 @@ class MQTT:
             "last_error": self.last_error,
             "rx": self.rx,
             "tx": self.tx,
+            "pings": self.pings,
         }

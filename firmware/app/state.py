@@ -11,6 +11,7 @@ import time
 
 import bootmgr
 
+from app import trace
 from app.log import log
 
 FILE = "state.json"
@@ -151,6 +152,7 @@ class State:
     def save_now(self):
         if self._dirty_at is None:
             return
+        trace.at(trace.STATE_SAVE)
         try:
             bootmgr.write_atomic(FILE, json.dumps(self.d).encode())
             self.saves += 1

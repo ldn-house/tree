@@ -11,6 +11,7 @@ import time
 
 import asyncio
 
+from app import trace
 from app.log import log
 
 try:
@@ -165,6 +166,7 @@ class Wifi:
         while True:
             now = time.ticks_ms()
             self.hb = now
+            trace.at(trace.WIFI)
             wait = self.step(now)
             # Sleep in short slices so the heartbeat stays fresh.
             while wait > 0:

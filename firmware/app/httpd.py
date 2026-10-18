@@ -19,6 +19,7 @@ import asyncio
 
 import bootmgr
 
+from app import hw, trace
 from app.log import log
 from app.streams import BufReader, TooLong, close_now
 
@@ -294,7 +295,9 @@ class Server:
                     raise HTTPError(403, "no HTTP_TOKEN configured in config.py; mutating endpoints are disabled")
                 raise HTTPError(401, "missing or bad token")
             req.authed = auth
+            trace.at(trace.HTTP)
             res = await asyncio.wait_for(handler(req), deadline)
+            hw.heap_mark("http request")
             if res is not None and not req.responded:
                 code, obj = res
                 await req.send(code, json.dumps(obj))

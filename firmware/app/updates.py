@@ -22,7 +22,7 @@ import asyncio
 
 import bootmgr
 
-from app import dns
+from app import dns, trace
 from app.log import log
 from app.streams import BufReader, TooLong, close_now
 
@@ -341,6 +341,7 @@ class Updates:
                 continue
             if not self.rt.wifi.up or self.busy or self.rt.calib.playing():
                 continue
+            trace.at(trace.UPDATE)
             due = self._check_now
             up = self.rt.uptime_s()
             if hours and not due:

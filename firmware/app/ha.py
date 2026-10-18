@@ -22,11 +22,13 @@ topics are ignored, so a stale retained "OFF" (or anything else) never
 overrides what the tree restored from flash at boot.
 """
 
+import gc
 import json
 import time
 
 import asyncio
 
+from app import hw, trace
 from app.log import log
 
 DIAG_EVERY_MS = 30000
@@ -328,8 +330,10 @@ class HA:
         dev = self._device()
         origin = {"name": "tree firmware", "sw_version": self.rt.version, "support_url": "https://github.com/ldn-house/tree"}
         params = []
+        n = 0
         for comp, obj, cfg in self._entities():
             self.hb = time.ticks_ms()
+            n += 1
             if obj is not None:
                 cfg["unique_id"] = "xmas_tree_" + obj
             cfg["availability_topic"] = self.t_avail
@@ -343,6 +347,8 @@ class HA:
             if obj not in params:
                 await self.mqtt.publish(self._config_topic("number", obj), b"", retain=True)
         self.rt.state.set_ha_params(params)
+        gc.collect()
+        log("ha: discovery published (%d entities, %d bytes free after collect)" % (n, hw.mem_free()))
 
     # -- outgoing state --
 
@@ -414,6 +420,7 @@ class HA:
             await asyncio.sleep_ms(200)
             if not self.mqtt.connected or not self.ready:
                 continue
+            trace.at(trace.HA)
             calib = self.rt.calib
             if self.rediscover_at is not None and time.ticks_diff(now, self.rediscover_at) >= 0:
                 self.rediscover_at = None

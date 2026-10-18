@@ -85,6 +85,42 @@ def test_genuine_late_hang_is_quarantined_via_scratch(device):
     assert d.boots[0] == "watchdog reset"
     st = d.wait_http(30)
     assert st["boot"]["reset_cause"] == "watchdog"
+    assert st["boot"]["hang"]["phase"] == "effect render", st["boot"]
     assert "latehang" in st["effect"]["quarantined"], st["effect"]
     assert "watchdog fired" in st["effect"]["failed"]["latehang"]
     assert st["state"]["effect"] == "latehang" and st["effect"]["running"] != "latehang"
+
+
+SLOW_START = b"""
+NAME = "slowstart"
+DURATION_MS = 60000
+class Effect:
+    def __init__(self, ctx):
+        while True:
+            pass
+    def render(self, t, frame):
+        pass
+"""
+
+
+def test_watchdog_hang_reports_where_the_loop_was(device):
+    """The tree reset with reset_cause "watchdog" and no reason: the loop was
+    blocked, and nothing in RAM survived to say where. app.trace keeps the
+    phase in watchdog scratch 1, which does."""
+    d = device
+    code, _ = d.request("PUT", "/effects/slowstart", body=SLOW_START)
+    assert code == 200
+    d.post("/state", {"effect": "slowstart"})  # the engine task constructs it, and hangs
+    wait_for(lambda: len(d.boots) >= 1, 40, what="watchdog reset")
+    assert d.boots[0] == "watchdog reset"
+    st = d.wait_http(30)
+    assert st["boot"]["reset_cause"] == "watchdog"
+    assert st["boot"]["hang"]["phase"] == "effect start", st["boot"]
+    assert st["boot"]["reset_reason"].startswith("hung in effect start")
+    assert "slowstart" in st["effect"]["quarantined"]
+    assert any("watchdog expired: hung in effect start" in line for line in d.get("/log")[1]["lines"])
+    # A deliberate reset clears it.
+    d.post("/reboot")
+    wait_for(lambda: len(d.boots) >= 2, 20, what="reboot")
+    st = d.wait_http(30)
+    assert st["boot"]["reset_cause"] == "reboot" and st["boot"]["hang"] is None

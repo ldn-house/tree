@@ -970,6 +970,50 @@ def calib_validation():
     assert calib.Sequence(bright, n, 49725).over_budget == [0]
 
 
+
+@test
+def trace_breadcrumb_round_trip():
+    import time
+
+    from app import trace
+
+    trace.clear()
+    assert trace.take() is None
+    trace.armed = 0x80  # as on the board, where the soft timer runs
+    trace.at(trace.MQTT)
+    trace.tick = time.ticks_add(time.ticks_ms(), -5500)  # the loop stopped turning 5.5 s ago
+    trace._check()
+    h = trace.take()
+    assert h == {"phase": "mqtt", "stalled_s": 5, "timer": True}, h
+    assert trace.describe(h) == "hung in mqtt (Python ran 5 s without yielding)"
+    assert trace.take() is None  # taken once
+    trace.alive(time.ticks_ms())  # the loop turned again: no stall
+    trace.at(trace.HTTP)
+    assert trace.take() == {"phase": "http request", "stalled_s": 0, "timer": True}
+    assert trace.describe({"phase": "http request", "stalled_s": 0, "timer": True}) == \
+        "hung in http request (blocked in native code)"
+    assert trace.describe({"phase": "gc", "stalled_s": 0, "timer": False}) == "hung in gc"
+    trace._check()  # not stalled: nothing recorded
+    assert trace.stall == 0
+    trace.armed = 0
+    trace.clear()
+
+
+@test
+def heap_marks_keep_the_lowest_per_site():
+    from app import hw
+
+    hw.heap_sites.clear()
+    a = hw.heap_mark("x")
+    junk = bytearray(20000)
+    b = hw.heap_mark("x")
+    assert hw.heap_sites["x"] == min(a, b) and b < a
+    del junk
+    hw.heap_mark("x")
+    assert hw.heap_sites["x"] == b
+    hw.heap_sites.clear()
+
+
 gc.collect()
 print("%d passed, %d failed" % (passed[0], len(failures)))
 if failures:

@@ -49,7 +49,12 @@ def test_board_sized_heap_with_real_effects_and_tls(tmp_path):
            "--heap", HEAP, "--root", str(tmp_path / "dev"), "--out", str(out)]
     if tcal:
         cmd += ["--calib", str(tcal)]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    mosquitto = os.environ.get("MOSQUITTO") or shutil.which("mosquitto") or "/opt/homebrew/opt/mosquitto/sbin/mosquitto"
+    if os.path.exists(mosquitto):
+        cmd += ["--mosquitto", mosquitto]
+    elif os.environ.get("CI"):
+        pytest.fail("mosquitto is needed for the MQTT part of the campaign")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
     print(r.stdout[-4000:], r.stderr[-2000:])
     res = json.loads(out.read_text())
     assert res["ok"], res

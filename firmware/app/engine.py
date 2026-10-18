@@ -23,7 +23,7 @@ import time
 
 import asyncio
 
-from app import fallback, hw
+from app import fallback, hw, trace
 from app.log import log
 
 PROBE = "fx_probe.txt"
@@ -244,6 +244,7 @@ class Engine:
 
     def _start(self, name):
         self._unload()
+        trace.at(trace.EFFECT_START)
         try:
             if name == FALLBACK:
                 mod = fallback
@@ -271,7 +272,10 @@ class Engine:
         self.t_last = time.ticks_ms()
         self.frames_ok = 0
         self.slow = 0
-        log("engine: running %s" % name)
+        # Drop the constructor's garbage (per-LED tables are built from
+        # floats) now, and log what is really free with this effect loaded.
+        gc.collect()
+        log("engine: running %s (%d bytes free after collect)" % (name, hw.heap_mark("effect start")))
         return True
 
     def _fail(self, name, e):
@@ -294,6 +298,7 @@ class Engine:
     async def present(self, raw, out, brightness):
         """Run raw through the output stage and send it (double-buffered)."""
         buf = self.bufs[self.bi]
+        trace.at(trace.OUTPUT)
         out.process(raw, buf, brightness)
         while self.driver.busy():
             await asyncio.sleep_ms(1)
@@ -364,6 +369,7 @@ class Engine:
         self.t_ms = t
         self.t_frac = frac % 1000
         t0 = time.ticks_us()
+        trace.at(trace.RENDER)
         try:
             self.inst.render(self.t_ms, self.raw)
         except Exception as e:

@@ -40,6 +40,24 @@ def mem_free():
     return gc.mem_free()
 
 
+# Lowest free heap seen right after each kind of allocation-heavy step
+# (effect start, MQTT publish, HTTP request), for GET / -> supervisor.heap_sites.
+LOW_HEAP_WARN = 64 * 1024
+heap_sites = {}
+
+
+def heap_mark(site):
+    free = gc.mem_free()
+    low = heap_sites.get(site)
+    if low is None or free < low:
+        heap_sites[site] = free
+        if free < LOW_HEAP_WARN:
+            from app.log import log
+
+            log("heap: only %d bytes free after %s" % (free, site))
+    return free
+
+
 def platform():
     return _mach or sys.platform
 

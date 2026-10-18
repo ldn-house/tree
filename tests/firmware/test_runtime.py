@@ -164,6 +164,10 @@ def test_hanging_effect_is_quarantined_after_watchdog(device):
     assert st["state"]["effect"] == "hang" and st["effect"]["running"] != "hang"
     # The loop was blocked, so nothing could record a reason; the cause is enough.
     assert st["boot"]["reset_cause"] == "watchdog"  # REASON TIMER: a genuine expiry
+    # Where the loop was blocked, from the breadcrumb in watchdog scratch 1
+    # (no soft-timer IRQs on the unix port, so no stall seconds here).
+    assert st["boot"]["hang"] == {"phase": "effect render", "stalled_s": 0, "timer": False}, st["boot"]
+    assert st["boot"]["reset_reason"] == "hung in effect render"
     # Healthy (boot counter reset) after 30 s, with no further resets.
     wait_for(lambda: status(d)["supervisor"]["healthy"], 45, what="healthy")
     assert len(d.boots) == 1  # no reboot loop
@@ -292,3 +296,52 @@ def test_led_timing_and_power_budget_config(make_device, bundles):
     st = d2.wait_http(30)
     assert st["led_timing_ns"] == [400, 850, 800, 450] and st["driver"] == "pio+dma"
     assert "LED_TIMING_NS" in st["config_error"]  # the schema rejects it; nothing uses it
+
+
+COORDS_PROBE = b"""
+NAME = "coordprobe"
+DURATION_MS = 60000
+NEEDS_COORDS = True
+import effects  # outlives this module, which is re-imported on every reload
+FIRST = effects.__dict__.setdefault("_probe_first", [])
+
+class Effect:
+    def __init__(self, ctx):
+        self.c = ctx.coords
+        if not FIRST:
+            FIRST.append(ctx.coords)
+    def render(self, t, frame):
+        for i in range(len(frame)):
+            frame[i] = 0
+        frame[0] = int(self.c[0][1] * 100)      # LED 0 red: y of LED 0, current list
+        frame[3] = int(FIRST[0][0][1] * 100)    # LED 1 red: y of LED 0, first list seen
+"""
+
+
+def test_new_coordinates_are_a_new_list(device):
+    """effects/_util caches per-LED tables per coordinates list (#16), so the
+    runtime must hand effects a new list when coordinates change, never edit
+    the old one in place: an effect still holding the old list must see it
+    unchanged."""
+    import base64
+
+    d = device
+    n = 500
+
+    def put(y0):
+        body = ("0.1,%.2f,0.1\n" % y0 + "0.1,0.5,0.1\n" * (n - 1)).encode()
+        code, res = d.request("PUT", "/files/coords.txt", body=body)
+        assert code == 200 and res["known"] == n, res
+
+    def wire():
+        f = base64.b64decode(d.get("/frame")[1]["frame"])
+        return f[0], f[3]
+
+    put(0.2)
+    code, _ = d.request("PUT", "/effects/coordprobe", body=COORDS_PROBE)
+    assert code == 200
+    d.post("/state", {"effect": "coordprobe", "brightness": 255})
+    wait_for(lambda: wire() == (20, 20), 10, what="first coordinates")
+    put(0.8)  # reloads the effect with the new coordinates
+    wait_for(lambda: wire()[0] == 80, 10, what="new coordinates")
+    assert wire() == (80, 20)  # the first list was left as it was
