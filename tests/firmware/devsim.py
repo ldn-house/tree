@@ -102,7 +102,7 @@ class Device:
         (self.root / "config.py").write_text("\n".join(lines) + "\n")
 
     def install_recovery(self, src: Path | None = None):
-        """Copy the recovery layer from firmware/ (or src, e.g. git_tree())."""
+        """Copy the recovery layer from firmware/ (or src, e.g. history_tree())."""
         for f in RECOVERY:
             p = (src or ROOT / "firmware") / f
             if p.exists():  # older recovery layers have fewer files
@@ -276,11 +276,17 @@ def wait_for(pred, timeout=30, interval=0.2, what="condition"):
     raise TimeoutError(f"timed out waiting for {what}")
 
 
-def git_tree(commit: str, dest: Path) -> Path:
-    """firmware/ as of a commit (needs full history, as CI fetches)."""
-    dest.mkdir(parents=True, exist_ok=True)
-    archive = subprocess.run(["git", "-C", str(ROOT), "archive", commit, "firmware"], check=True, capture_output=True)
-    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, check=True)
+HISTORY = HERE / "fixtures" / "history"
+
+
+def history_tree(commit: str, dest: Path) -> Path:
+    """firmware/ as of an earlier commit, from the vendored snapshot in
+    fixtures/history/ (those commits aren't reachable from main: see its
+    README), copied to dest so tests can't change the fixture."""
+    src = HISTORY / commit / "firmware"
+    if not (src / "bootmgr.py").exists():
+        raise FileNotFoundError(f"no vendored firmware for {commit}: expected {src} (see {HISTORY / 'README.md'})")
+    shutil.copytree(src, dest / "firmware")
     return dest / "firmware"
 
 
