@@ -2,7 +2,7 @@
 app.calib. "auth" routes need the HTTP_TOKEN (see app.httpd).
 
     GET  /, /status                 status and diagnostics
-    GET  /health                    {"ok": bool, "problems": [...]}
+    GET  /health                    {"ok": bool, "problems": [...], "warnings": [...]}
     GET  /log                       recent log lines
     GET  /frame                     last frame sent to the strip (base64, wire order)
     GET  /mqtt                      cached MQTT client state
@@ -31,7 +31,7 @@ import sys
 
 import bootmgr
 
-from app import coords, fx as fxmod
+from app import coords, fx as fxmod, recovery
 from app.httpd import HTTPError
 from app.log import lines, log
 
@@ -54,7 +54,8 @@ def register(rt, srv):
         return 200, rt.status()
 
     async def h_health(req):
-        return 200, {"ok": not rt.sup.problems, "healthy": rt.sup.healthy, "problems": rt.sup.problems}
+        return 200, {"ok": not rt.sup.problems, "healthy": rt.sup.healthy, "problems": rt.sup.problems,
+                     "warnings": [recovery.MESSAGE] if recovery.OUTDATED else []}
 
     async def h_log(req):
         return 200, {"lines": lines()}

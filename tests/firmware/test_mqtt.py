@@ -54,7 +54,7 @@ def test_discovery_payloads(mdev, bus):
     want = {
         "light.light", "number.speed", "number.auto_cycle", "number.param_solid_level", "number.param_chase_speed",
         "sensor.rssi", "sensor.heap", "sensor.uptime", "sensor.fps", "sensor.cap_pct", "sensor.reset",
-        "sensor.boot", "sensor.ip", "sensor.error", "sensor.effect_running", "binary_sensor.power_capped",
+        "sensor.boot", "sensor.recovery", "sensor.ip", "sensor.error", "sensor.effect_running", "binary_sensor.power_capped",
         "binary_sensor.calibrating", "button.reboot", "button.calibrate_play", "button.calibrate_stop",
         "update.firmware",
     }
@@ -70,8 +70,9 @@ def test_discovery_payloads(mdev, bus):
     s = bus.wait(P + "/settings")
     assert json.loads(s)["params"]["chase"]["speed"] == 1.0
     diag = json.loads(bus.wait(P + "/diag"))
-    for k in ("rssi", "heap", "uptime", "fps", "capped", "cap_pct", "reset", "boot", "ip", "error", "effect"):
+    for k in ("rssi", "heap", "uptime", "fps", "capped", "cap_pct", "reset", "boot", "ip", "error", "effect", "recovery"):
         assert k in diag, k
+    assert diag["recovery"] == "ok (API 3)"
     assert json.loads(bus.wait(P + "/update"))["installed_version"] == "v1"
     assert json.loads(bus.wait(P + "/calibrate/state"))["state"] == "idle"
 

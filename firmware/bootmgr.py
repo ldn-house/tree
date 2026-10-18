@@ -64,7 +64,7 @@ try:
 except ImportError:  # pragma: no cover
     import ubinascii as binascii
 
-API = 2  # 2: cfgcheck.py is part of the recovery layer
+API = 3  # 2: cfgcheck.py is part of the recovery layer; 3: scratch, deliberate(), REASON
 WDT_MS = 8000
 MAX_FAILED_BOOTS = 3
 

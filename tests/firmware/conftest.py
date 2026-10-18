@@ -81,9 +81,9 @@ def bundles(tmp_path_factory):
 def make_device(tmp_path):
     devices = []
 
-    def make(bundle=None, start=True, **config):
+    def make(bundle=None, start=True, recovery=None, **config):
         d = devsim.Device(tmp_path / f"dev{len(devices)}", **config)
-        d.install_recovery()
+        d.install_recovery(recovery)
         if bundle is not None:
             d.usb_install(bundle)
         devices.append(d)

@@ -21,7 +21,7 @@ import asyncio
 
 import bootmgr
 
-from app import hw
+from app import hw, recovery
 from app.log import log
 
 REASON_FILE = "reset_reason.txt"
@@ -63,10 +63,14 @@ class Supervisor:
         self.feeds = 0
         self.problems = []
         self.gave_up = False
-        self.heap_min = None  # lowest gc.mem_free() seen, sampled each loop
-        # Lowest free heap right after a collection: the real headroom
-        # (heap_min mostly measures garbage not collected yet).
+        # Free heap right after a collection (every GC_EVERY_MS): the real
+        # headroom. The raw gc.mem_free() is a sawtooth (rendering leaves a few
+        # KB of garbage per frame; MicroPython collects when the heap runs
+        # out), so its low-water mark only says how close to empty the heap
+        # got before an automatic collection, not that memory is short.
+        self.heap_live = None
         self.heap_live_min = None
+        self.heap_low_uncollected = None
         self._gc_at = 0
         self.config_done = False
         # First reserve check 30 s after boot, then every RESERVE_EVERY_S.
@@ -165,12 +169,12 @@ class Supervisor:
             rt.uptime_ms += time.ticks_diff(now, last)
             last = now
             free = hw.mem_free()
-            if self.heap_min is None or free < self.heap_min:
-                self.heap_min = free
+            if self.heap_low_uncollected is None or free < self.heap_low_uncollected:
+                self.heap_low_uncollected = free
             if rt.uptime_ms - self._gc_at >= GC_EVERY_MS and not rt.calib.playing():
                 self._gc_at = rt.uptime_ms
                 gc.collect()
-                free = hw.mem_free()
+                free = self.heap_live = hw.mem_free()
                 if self.heap_live_min is None or free < self.heap_live_min:
                     self.heap_live_min = free
             problems = self._problems() if rt.uptime_ms > STARTUP_GRACE_MS else []
@@ -203,7 +207,7 @@ class Supervisor:
         write_reason("requested: " + rt.reboot_reason)
         rt.state.save_now()
         rt.engine.clear_probe()
-        bootmgr.deliberate()
+        recovery.deliberate()
         if rt.mqtt is not None and rt.mqtt.connected and rt.ha is not None:
             try:
                 await asyncio.wait_for(rt.mqtt.publish(rt.ha.t_avail, "offline", retain=True), 1)

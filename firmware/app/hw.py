@@ -17,17 +17,16 @@ _mach = getattr(sys.implementation, "_machine", "")
 
 
 def scratch_set(value):
-    """Watchdog scratch 0 (see bootmgr: one implementation, in the recovery
-    layer, which also reads it back after a reset)."""
-    import bootmgr
+    """Watchdog scratch 0 (bootmgr's, or app.recovery's on an older recovery layer)."""
+    from app import recovery
 
-    bootmgr.scratch_set(value)
+    recovery.scratch_set(value)
 
 
 def scratch_get():
-    import bootmgr
+    from app import recovery
 
-    return bootmgr.scratch_get()
+    return recovery.scratch_get()
 
 
 def unique_id():
@@ -47,6 +46,6 @@ def platform():
 
 def reset():
     """Deliberate reset (clears the hang markers first)."""
-    import bootmgr
+    from app import recovery
 
-    bootmgr.reset()
+    recovery.reset()

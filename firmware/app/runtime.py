@@ -20,7 +20,7 @@ import asyncio
 
 import bootmgr
 
-from app import calib, cfg, coords, driver, engine, fx, ha, hw, httpd, mqtt, net, outstage, state, supervisor, updates
+from app import calib, cfg, coords, driver, engine, fx, ha, hw, httpd, mqtt, net, outstage, recovery, state, supervisor, updates
 from app.log import log
 
 RESTART_LIMIT = 5
@@ -29,6 +29,7 @@ RESTART_WINDOW_MS = 60000
 
 class Runtime:
     def __init__(self, info):
+        info["reset_cause"] = recovery.reset_cause(info.get("reset_cause"))
         self.info = info
         self.cfg = cfg
         self.n = cfg.LED_COUNT
@@ -47,6 +48,8 @@ class Runtime:
         self.reset_reason = supervisor.take_reason()
         log("tree %s (slot %s, reset %s%s)" % (self.version, self.slot, info.get("reset_cause"),
                                                 ": " + self.reset_reason if self.reset_reason else ""))
+        if recovery.OUTDATED:
+            log("recovery: API %d lacks %s: %s" % (recovery.API, ", ".join(recovery.MISSING), recovery.MESSAGE))
         if cfg.ERROR:
             log("config: %s; using %s" % (cfg.ERROR, cfg.SOURCE))
 
@@ -148,7 +151,7 @@ class Runtime:
         es = self.engine.status()
         return {
             "rssi": self.wifi.rssi(),
-            "heap": hw.mem_free(),
+            "heap": self.sup.heap_live if self.sup.heap_live is not None else hw.mem_free(),
             "uptime": self.uptime_s(),
             "fps": es["fps"],
             "capped": es["power_capped"],
@@ -160,6 +163,7 @@ class Runtime:
             "error": self.last_error(),
             "effect": es["running"] or "off",
             "calib": self.calib.state,
+            "recovery": "outdated (USB install recommended)" if recovery.OUTDATED else "ok (API %d)" % recovery.API,
         }
 
     def status(self):
@@ -200,6 +204,7 @@ class Runtime:
                 "capped": bool(self.out.capped) and not self.engine.dark,
                 "volts": 12,
             },
+            "recovery": recovery.status(),
             "reserve": {"bytes": bootmgr.reserve_size(), "complete": bootmgr.reserve_size() == bootmgr.RESERVE_BYTES},
             "floor": bootmgr.read_state()["floor"],
             "wifi": self.wifi.status(),
@@ -207,8 +212,9 @@ class Runtime:
             "http": {"requests": self.http.requests, "rejected": self.http.rejected, "auth": bool(cfg.HTTP_TOKEN)},
             "calibration": self.calib.state,
             "update": self.updates.status(),
-            "supervisor": {"healthy": self.sup.healthy, "problems": self.sup.problems, "heap_min": self.sup.heap_min,
-                           "heap_live_min": self.sup.heap_live_min},
+            "supervisor": {"healthy": self.sup.healthy, "problems": self.sup.problems,
+                           "heap_live": self.sup.heap_live, "heap_live_min": self.sup.heap_live_min,
+                           "heap_low_uncollected": self.sup.heap_low_uncollected},
             "config_error": cfg.ERROR,
             "config_source": cfg.SOURCE,
             "config_trial": bool(self.info.get("cfg_trial")),
@@ -282,6 +288,9 @@ def run(info):
     rt = Runtime(info)
     try:
         asyncio.run(rt.main())
+    except KeyboardInterrupt:  # someone took over at the REPL (mpremote)
+        recovery.deliberate()  # API 2's main.py doesn't
+        raise
     finally:
         try:
             rt.state.save_now()

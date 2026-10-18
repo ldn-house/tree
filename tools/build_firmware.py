@@ -16,8 +16,11 @@ Contents of a slot:
     data/coords_compact.txt   legacy coordinates, if present
     data/calib_default.tcal   standard calibration sequence, if present
 
-The recovery layer (firmware/boot.py, main.py, bootmgr.py, safemode.py) is
-not in the bundle: it is only ever installed over USB.
+The recovery layer (firmware/boot.py, main.py, bootmgr.py, safemode.py,
+cfgcheck.py) is not in the bundle: it is only ever installed over USB. The
+manifest's "bootmgr" is the oldest recovery API the app runs on
+(RECOVERY_API in firmware/app/__init__.py); an older recovery layer refuses
+the bundle before staging anything.
 
 The signing key comes from --key or $FIRMWARE_SIGNING_KEY. The device must
 have the same string as UPDATE_KEY in config.py.
@@ -64,8 +67,13 @@ def version_info():
             "generation": int(now.timestamp())}
 
 
-def bootmgr_api():
-    m = re.search(r"^API = (\d+)\b", (ROOT / "firmware" / "bootmgr.py").read_text(), re.M)
+def recovery_api(app_dir: Path):
+    """The oldest recovery-layer API the app runs on (RECOVERY_API in
+    app/__init__.py), not the newest bootmgr: the manifest's "bootmgr" is
+    what the device's recovery layer must provide, and it refuses more."""
+    m = re.search(r"^RECOVERY_API = (\d+)\b", (app_dir / "__init__.py").read_text(), re.M)
+    if not m:
+        sys.exit(f"{app_dir}/__init__.py does not declare RECOVERY_API")
     return int(m.group(1))
 
 
@@ -130,11 +138,11 @@ def collect(effects_dir: Path | None, source: bool, work: Path, app_dir: Path):
     return files
 
 
-def bundle(files, info, key: str | None):
+def bundle(files, info, key: str | None, api: int):
     manifest = {
         "format": 1,
         **info,
-        "bootmgr": bootmgr_api(),
+        "bootmgr": api,
         "files": [{"path": p, "size": len(d), "sha256": hashlib.sha256(d).hexdigest()} for p, d in files],
     }
     mbytes = json.dumps(manifest, separators=(",", ":")).encode()
@@ -156,6 +164,7 @@ def main():
     ap.add_argument("--version", help="override the version string")
     ap.add_argument("--generation", type=int, help="override the generation (anti-replay order)")
     ap.add_argument("--app", default=str(ROOT / "firmware" / "app"), help=argparse.SUPPRESS)  # tests: patched app
+    ap.add_argument("--recovery-api", type=int, help=argparse.SUPPRESS)  # tests: override RECOVERY_API
     args = ap.parse_args()
 
     info = version_info()
@@ -165,14 +174,15 @@ def main():
         info["generation"] = args.generation
     with tempfile.TemporaryDirectory() as tmp:
         files = collect(Path(args.effects), args.source, Path(tmp), Path(args.app))
-    data, mbytes, manifest = bundle(files, info, args.key)
+    api = args.recovery_api if args.recovery_api is not None else recovery_api(Path(args.app))
+    data, mbytes, manifest = bundle(files, info, args.key, api)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "tree-firmware.bin").write_bytes(data)
     (out / "manifest.json").write_bytes(mbytes)
     total = sum(f["size"] for f in manifest["files"])
     print(f"{out / 'tree-firmware.bin'}: version {info['version']}, {len(files)} files, "
-          f"{total} bytes, {'signed' if args.key else 'unsigned'}")
+          f"{total} bytes, {'signed' if args.key else 'unsigned'}, needs recovery API {api}")
 
 
 if __name__ == "__main__":

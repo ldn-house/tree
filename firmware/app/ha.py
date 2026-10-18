@@ -262,6 +262,7 @@ class HA:
             ("led_amps", "LED current (estimated, 12 V)", {"device_class": "current", "unit_of_measurement": "A", "state_class": "measurement", "suggested_display_precision": 2}),
             ("reset", "Last reset cause", {"icon": "mdi:restart-alert"}),
             ("boot", "Boot status", {"icon": "mdi:shield-check"}),
+            ("recovery", "Recovery layer", {"icon": "mdi:lifebuoy"}),
             ("ip", "IP address", {"icon": "mdi:ip-network"}),
             ("error", "Last effect error", {"icon": "mdi:alert-circle-outline"}),
         )

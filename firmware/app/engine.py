@@ -13,7 +13,7 @@ take the runtime down:
   frames each boot). Either way it is quarantined for the next boot instead
   of causing a reboot loop, but only after a genuine watchdog expiry
   (bootmgr.reset_cause() == "watchdog"); every deliberate reset clears both
-  records first (bootmgr.deliberate()).
+  records first (app.recovery.deliberate()).
 """
 
 import gc
@@ -102,7 +102,9 @@ class Engine:
         # Only a genuine expiry ("watchdog": REASON TIMER) can mean a hang.
         # Deliberate resets ("reboot": REASON FORCE) also read WDT_RESET on
         # the rp2, and their markers are cleared beforehand anyway.
-        if reset_cause == "watchdog":
+        # "wdt" means the recovery layer and the app both couldn't tell:
+        # markers are cleared before every deliberate reset, so trust them.
+        if reset_cause in ("watchdog", "wdt"):
             try:
                 with open(PROBE) as f:
                     name = f.read().strip()

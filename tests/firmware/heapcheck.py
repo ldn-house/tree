@@ -71,7 +71,7 @@ srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 url = "https://127.0.0.1:%d/{channel}/{asset}" % srv.server_address[1]
 
-result = {"heap": args.heap, "steps": {}, "effects_seen": [], "errors": {}, "heap_min": None, "heap_live_min": None}
+result = {"heap": args.heap, "steps": {}, "effects_seen": [], "errors": {}, "heap_low_uncollected": None, "heap_live_min": None}
 d = devsim.Device(Path(args.root), UPDATE_KEY=args.key_string, UPDATE_URL=url, TRIAL_HEALTHY_S=5,
                   TRIAL_DEADLINE_S=120)
 d.install_recovery()
@@ -91,7 +91,7 @@ def track(seconds):
             s = st()
             seen.add(s["effect"]["running"])
             result["errors"].update(s["effect"]["failed"])
-            for k in ("heap_min", "heap_live_min"):
+            for k in ("heap_low_uncollected", "heap_live_min"):
                 m = s["supervisor"][k]
                 if m is not None and (result[k] is None or m < result[k]):
                     result[k] = m

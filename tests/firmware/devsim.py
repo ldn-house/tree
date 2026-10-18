@@ -101,9 +101,12 @@ class Device:
         lines = [f"{k} = {v!r}" for k, v in self.config.items() if v is not None]
         (self.root / "config.py").write_text("\n".join(lines) + "\n")
 
-    def install_recovery(self):
+    def install_recovery(self, src: Path | None = None):
+        """Copy the recovery layer from firmware/ (or src, e.g. git_tree())."""
         for f in RECOVERY:
-            shutil.copy(ROOT / "firmware" / f, self.root / f)
+            p = (src or ROOT / "firmware") / f
+            if p.exists():  # older recovery layers have fewer files
+                shutil.copy(p, self.root / f)
         self.write_config()
 
     def usb_install(self, bundle: Path):
@@ -273,8 +276,17 @@ def wait_for(pred, timeout=30, interval=0.2, what="condition"):
     raise TimeoutError(f"timed out waiting for {what}")
 
 
+def git_tree(commit: str, dest: Path) -> Path:
+    """firmware/ as of a commit (needs full history, as CI fetches)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.run(["git", "-C", str(ROOT), "archive", commit, "firmware"], check=True, capture_output=True)
+    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, check=True)
+    return dest / "firmware"
+
+
 def build_bundle(out: Path, effects: Path | None = None, key: str | None = None, version: str | None = None,
-                 source=False, app: Path | None = None, generation: int | None = None):
+                 source=False, app: Path | None = None, generation: int | None = None,
+                 recovery_api: int | None = None):
     import sys
 
     cmd = [sys.executable, str(ROOT / "tools" / "build_firmware.py"), "--out", str(out)]
@@ -290,5 +302,7 @@ def build_bundle(out: Path, effects: Path | None = None, key: str | None = None,
         cmd += ["--app", str(app)]
     if generation is not None:
         cmd += ["--generation", str(generation)]
+    if recovery_api is not None:
+        cmd += ["--recovery-api", str(recovery_api)]
     subprocess.run(cmd, check=True, capture_output=True)
     return out / "tree-firmware.bin"
