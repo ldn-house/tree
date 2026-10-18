@@ -6,6 +6,7 @@
 #     "scipy",
 #     "opencv-python",
 #     "matplotlib",
+#     "pillow",
 # ]
 # ///
 """
@@ -226,6 +227,11 @@ def cmd_quality(args):
         Path(args.out).write_text(json.dumps(rows, indent=1))
 
 
+def cmd_explainer(args):
+    from calib.explainer import build_video
+    build_video(Path(args.clips), Path(args.out), Path(args.work))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -330,6 +336,13 @@ def main():
     p.add_argument("--reference", action="store_true", help="also report the synthetic truth layouts")
     p.add_argument("--out")
     p.set_defaults(func=cmd_quality)
+
+    p = sub.add_parser("explainer", help="render the flatmate explainer video from synthetic clips")
+    p.add_argument("--clips", default=".scratch/vid/full_h100_b47812",
+                   help="simulate-video output at full resolution (decoded and solved first)")
+    p.add_argument("--out", default="docs/img/calibration")
+    p.add_argument("--work", default=".scratch/explainer")
+    p.set_defaults(func=cmd_explainer)
 
     args = parser.parse_args()
     args.func(args)
