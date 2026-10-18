@@ -229,7 +229,8 @@ def cmd_quality(args):
 
 def cmd_explainer(args):
     from calib.explainer import build_video
-    build_video(Path(args.clips), Path(args.out), Path(args.work))
+    only = [float(x) for x in args.keyframes.split(",")] if args.keyframes else None
+    print(build_video(Path(args.clips), Path(args.out), Path(args.work), only=only))
 
 
 def main():
@@ -342,6 +343,7 @@ def main():
                    help="simulate-video output at full resolution (decoded and solved first)")
     p.add_argument("--out", default="docs/img/calibration")
     p.add_argument("--work", default=".scratch/explainer")
+    p.add_argument("--keyframes", help="comma-separated times: render only these stills to --work/keyframes")
     p.set_defaults(func=cmd_explainer)
 
     args = parser.parse_args()

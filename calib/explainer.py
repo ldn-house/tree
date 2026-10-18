@@ -1,390 +1,751 @@
 """The flatmate explainer video (docs/calibrate-the-tree.md).
 
-Everything shown is synthetic: the simulator's tree, a simulated phone clip
-decoded by calib.video, and coordinates solved from four such clips. Frames
-are drawn with Pillow and encoded with ffmpeg.
+One continuous camera journey around a tree of light: orbit it, push in on one
+blinking light, rise overhead to show where to stand, fly into the front
+phone's view to show the decoding, pull back as the views cross in 3D, then
+play effects on the solved coordinates.
+
+The tree is the synthetic ground-truth layout. The IDs labelled in the phone
+view are the ones calib.video decoded from a simulated clip, and the effects
+run on the coordinates calib.solve produced from four such clips. Lights are
+rendered as additive light with depth of field, multi-scale bloom and a filmic
+tone curve.
 
     ./calibrate.py explainer --clips .scratch/vid/full_h100_b47812 --out docs/img/calibration
 """
 
+import colorsys
 import json
 import subprocess
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, fields
 from pathlib import Path
 
-import matplotlib
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from .detect import load_detections
-from .layout import get_layout, load_coords
-from .render import Sensor, SimParams, make_view, radiance
-from .sequence import SequenceParams, build
-from .synth import make_rig
-
 W, H, FPS = 1920, 1080, 30
-BG = (14, 18, 24)
-FG = (240, 240, 235)
-ACCENT = (255, 196, 92)
-DIM = (150, 160, 170)
-FONT_DIR = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+DURATION = 70.0
+
+# Palette (sRGB)
+SPRUCE_CORE = (14, 40, 36)
+SPRUCE_EDGE = (5, 15, 14)
+CANDLE = (255, 194, 122)
+CAL_WHITE = (232, 238, 255)
+FROST = (156, 201, 232)
+PAPER = (246, 235, 221)
+MOSS = (92, 132, 110)
+
+GILL = Path("/System/Library/Fonts/Supplemental/GillSans.ttc")
+_FONTS = {}
 
 
-def font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")), size)
+def font(size: int, weight: str = "semibold") -> ImageFont.FreeTypeFont:
+    key = (size, weight)
+    if key not in _FONTS:
+        if GILL.exists():
+            _FONTS[key] = ImageFont.truetype(str(GILL), size, index={"regular": 0, "semibold": 4, "light": 7}[weight])
+        else:  # portable fallback
+            import matplotlib
+            ttf = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+            name = "DejaVuSans-Bold.ttf" if weight == "semibold" else "DejaVuSans.ttf"
+            _FONTS[key] = ImageFont.truetype(str(ttf / name), int(size * 0.9))
+    return _FONTS[key]
 
 
-def wrap(draw: ImageDraw.ImageDraw, text: str, f, width: int) -> list[str]:
-    lines = []
-    for para in text.split("\n"):
-        words, cur = para.split(), ""
-        for w in words:
-            t = (cur + " " + w).strip()
-            if draw.textlength(t, font=f) <= width:
-                cur = t
-            else:
-                lines.append(cur)
-                cur = w
-        lines.append(cur)
-    return lines
+def lin(c):
+    c = np.asarray(c, np.float32) / 255
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4).astype(np.float32)
 
 
-def caption(img: Image.Image, title: str, body: str = "", x: int = 760, y: int = 300, width: int = 1060,
-            alpha: float = 1.0):
-    d = ImageDraw.Draw(img)
-    col = lambda c: tuple(int(BG[i] + (c[i] - BG[i]) * alpha) for i in range(3))
-    ft, fb = font(66), font(44, bold=False)
-    for line in wrap(d, title, ft, width):
-        d.text((x, y), line, font=ft, fill=col(ACCENT))
-        y += 84
-    y += 26
-    for line in wrap(d, body, fb, width):
-        d.text((x, y), line, font=fb, fill=col(FG))
-        y += 60
-    return y
+def to_srgb8(x):
+    x = np.clip(x, 0, 1)
+    s = np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1 / 2.4) - 0.055)
+    return (s * 255 + 0.5).astype(np.uint8)
 
 
-def canvas() -> Image.Image:
-    return Image.new("RGB", (W, H), BG)
+# ---------------------------------------------------------------- easing
+
+def clamp01(x):
+    return float(min(1.0, max(0.0, x)))
 
 
-def fade(i: int, n: int, edge: int = 12) -> float:
-    return float(min(1.0, (i + 1) / edge, (n - i) / edge))
+def smooth(x):
+    x = clamp01(x)
+    return x * x * x * (x * (6 * x - 15) + 10)
 
 
-class TreeRenderer:
-    """The simulator's tree from one phone viewpoint, as a 607 x 1080 picture."""
-
-    def __init__(self, seed: int = 1):
-        self.layout = get_layout("legacy-cleaned")
-        cam = make_rig("phone", self.layout, 4, seed=seed, scale=0.5625)[0]
-        self.p = SimParams(seed=seed, ae="locked", locked_gain=0.55, fixtures=0, ambient=0.01)
-        self.view = make_view(self.layout, cam, self.p, np.random.default_rng(seed))
-        self.sensor = Sensor(self.p, np.random.default_rng(seed + 1))
-        self.cam = cam
-
-    def frame(self, rgb: np.ndarray) -> Image.Image:
-        img = self.sensor.expose(radiance(self.view, rgb.astype(np.float32), self.p, self.p.ambient))
-        return Image.fromarray(img)
+def span(t, a, b):
+    """0 before a, 1 after b, smooth in between."""
+    return smooth((t - a) / max(b - a, 1e-6))
 
 
-def paste_tree(img: Image.Image, tree: Image.Image, x: int = 70):
-    img.paste(tree, (x, (H - tree.height) // 2))
+def window(t, a, b, fade=0.5):
+    return min(span(t, a, a + fade), 1 - span(t, b - fade, b))
 
 
-def bit_strip(img: Image.Image, bits: list[int], x: int, y: int, label: str, size: int = 44):
-    d = ImageDraw.Draw(img)
-    d.text((x, y - 66), label, font=font(40), fill=FG)
-    for k, b in enumerate(bits):
-        x0 = x + k * (size + 10)
-        d.rounded_rectangle([x0, y, x0 + size, y + size], radius=8,
-                            fill=ACCENT if b else (40, 46, 56), outline=(90, 96, 110), width=2)
+# ---------------------------------------------------------------- camera
+
+@dataclass
+class Shot:
+    yaw: float          # degrees; 0 puts the camera on +x (the front)
+    elev: float         # degrees above horizontal
+    dist: float         # metres from the target
+    ty: float           # target height
+    fov: float          # vertical field of view, degrees
+    shift: float = 0.12  # lens shift as a fraction of width (tree right of centre)
+    tx: float = 0.0
+    tz: float = 0.0
+
+    def mix(self, o: "Shot", a: float) -> "Shot":
+        return Shot(*(getattr(self, f.name) + (getattr(o, f.name) - getattr(self, f.name)) * a
+                      for f in fields(self)))
+
+    def pose(self):
+        y, e = np.radians(self.yaw), np.radians(self.elev)
+        target = np.array([self.tx, self.ty, self.tz])
+        pos = target + self.dist * np.array([np.cos(e) * np.cos(y), np.sin(e), np.cos(e) * np.sin(y)])
+        return pos, target
 
 
-def person(d: ImageDraw.ImageDraw, x: float, y: float, facing: float, recording: bool):
-    d.ellipse([x - 22, y - 22, x + 22, y + 22], fill=(120, 170, 255))
-    px, py = x + 38 * np.cos(facing), y + 38 * np.sin(facing)
-    d.rectangle([px - 9, py - 9, px + 9, py + 9], fill=(230, 230, 230))
-    if recording:
-        d.ellipse([x + 26, y - 46, x + 46, y - 26], fill=(235, 60, 60))
+class Cam:
+    def __init__(self, s: Shot):
+        self.pos, target = s.pose()
+        fwd = target - self.pos
+        fwd /= np.linalg.norm(fwd)
+        right = np.cross(fwd, [0, 1, 0])
+        right /= np.linalg.norm(right)
+        down = np.cross(fwd, right)
+        self.R = np.stack([right, down, fwd])
+        self.f = (H / 2) / np.tan(np.radians(s.fov) / 2)
+        self.cx, self.cy = W * (0.5 + s.shift), H / 2
+        self.focus = s.dist
+
+    def project(self, P):
+        pc = (np.atleast_2d(P) - self.pos) @ self.R.T
+        z = pc[:, 2]
+        ok = z > 0.05
+        zz = np.where(ok, z, 1)
+        return self.f * pc[:, 0] / zz + self.cx, self.f * pc[:, 1] / zz + self.cy, np.where(ok, z, np.nan)
 
 
-def scene_rest(tree: TreeRenderer, n: int):
-    rng = np.random.default_rng(3)
-    phase = rng.uniform(0, 2 * np.pi, tree.layout.n)
-    for i in range(n):
-        tw = 0.7 + 0.3 * np.sin(phase + i / FPS * 3.0)
-        rgb = np.outer(tw, [255, 150, 60]) * 0.6
-        img = canvas()
-        paste_tree(img, tree.frame(rgb))
-        caption(img, "How the tree learns where its lights are",
-                "500 lights on one long wire. To draw shapes in 3D, the tree needs to know where each one is.",
-                alpha=fade(i, n))
-        yield img
+# Camera keyframes: (time, shot, easing). "lin" segments keep a steady orbit.
+PHONE_SPOT = Shot(yaw=0, elev=11.3, dist=2.04, ty=0.85, fov=60, shift=0.10)
+KEYS = [
+    (0.0, Shot(-28, 7, 3.7, 0.86, 38), "lin"),
+    (14.0, Shot(18, 7, 3.5, 0.86, 38), "smooth"),
+    (16.6, Shot(22, 7, 3.4, 0.86, 38), "smooth"),
+    (23.2, None, "smooth"),  # push-in: filled in from the chosen light
+    (25.0, None, "smooth"),
+    (27.6, Shot(36, 12, 4.4, 0.75, 40), "smooth"),
+    (31.0, Shot(40, 74, 7.2, 0.35, 40, 0.10), "lin"),
+    (37.2, Shot(52, 74, 7.2, 0.35, 40, 0.10), "smooth"),
+    (40.4, PHONE_SPOT, "smooth"),
+    (46.0, PHONE_SPOT, "smooth"),
+    (49.5, Shot(-34, 24, 5.2, 0.8, 40), "lin"),
+    (55.5, Shot(-70, 14, 4.0, 0.86, 38), "lin"),
+    (64.5, Shot(-112, 8, 3.6, 0.86, 38), "lin"),
+    (70.0, Shot(-126, 8, 3.7, 0.86, 38), "lin"),
+]
 
 
-def scene_code(tree: TreeRenderer, plan, led: int, n_dark: int, slow: float):
-    rgb = plan.rgb()
-    starts = plan.starts_ms()
-    sync = plan.index("sync")
-    code = [f for f in range(plan.n_frames) if plan.roles[f] == "code"]
-    # Dark wait (shortened), the sync flashes at real speed, then the code slowed down.
-    for i in range(n_dark):
-        img = canvas()
-        paste_tree(img, tree.frame(np.zeros_like(rgb[0])))
-        caption(img, "1. Press “Play calibration sequence”",
-                "The tree goes dark for a few seconds, then starts blinking.", alpha=fade(i, n_dark + 1000))
-        yield img
-    t_sync = starts[sync[0]]
-    t_end = starts[sync[-1]] + plan.duration_ms[sync[-1]]
-    for t in np.arange(t_sync, t_end, 1000 / FPS):
-        f = int(np.searchsorted(starts, t, side="right") - 1)
-        img = canvas()
-        paste_tree(img, tree.frame(rgb[f]))
-        caption(img, "1. Press “Play calibration sequence”",
-                "A burst of flashes marks the start…")
-        yield img
-    t0, t1 = starts[code[0]], starts[code[-1]] + plan.duration_ms[code[-1]]
-    uv = tree.view.uv[led]
-    for t in np.arange(t0, t1, 1000 / FPS / slow):
-        f = int(np.searchsorted(starts, t, side="right") - 1)
-        img = canvas()
-        paste_tree(img, tree.frame(rgb[f]))
-        d = ImageDraw.Draw(img)
-        cx, cy = 70 + uv[0], (H - tree.cam.height) // 2 + uv[1]
-        d.ellipse([cx - 30, cy - 30, cx + 30, cy + 30], outline=ACCENT, width=5)
-        caption(img, "Every light blinks its own number",
-                f"Slowed down {slow:g}×. Each light flashes a code: on or off, then the opposite, "
-                "with extra checks so a misread light is rejected.", y=230)
-        shown = [int(rgb[g][led].max() > 0) for g in code if starts[g] <= t]
-        bit_strip(img, shown[-16:], 760, 800, f"Light {led} so far:")
-        yield img
+def shot_at(t, keys):
+    for (t0, s0, ease), (t1, s1, _) in zip(keys[:-1], keys[1:]):
+        if t <= t1:
+            a = (t - t0) / max(t1 - t0, 1e-6)
+            a = clamp01(a) if ease == "lin" else smooth(a)
+            return s0.mix(s1, a)
+    return keys[-1][1]
 
 
-def scene_filming(n: int, spots: int = 5):
-    cx, cy, R = 370, 540, 260
-    for i in range(n):
-        img = canvas()
-        d = ImageDraw.Draw(img)
-        # Tree from above: a soft green disc with a star.
-        for r, c in ((140, (24, 70, 40)), (100, (30, 95, 52)), (62, (40, 120, 64))):
-            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=c)
-        d.text((cx - 18, cy - 30), "★", font=font(48), fill=ACCENT)
-        t = i / n * spots
-        k = min(int(t), spots - 1)
-        frac = t - k
-        angles = [np.pi / 2 + 2 * np.pi * j / spots for j in range(spots)]
-        for j, a in enumerate(angles):
-            sx, sy = cx + R * np.cos(a), cy + R * np.sin(a)
-            done = j < k or (j == k and frac > 0.75)
-            d.ellipse([sx - 34, sy - 34, sx + 34, sy + 34], outline=(90, 96, 110), width=3,
-                      fill=(30, 60, 40) if done else None)
-            d.text((sx - 11, sy - 21), str(j + 1), font=font(34), fill=FG if not done else (150, 230, 160))
-        fx, fy = cx + R * np.cos(angles[0]), cy + R * np.sin(angles[0])
-        d.text((fx + 48, fy - 18), "front", font=font(30, bold=False), fill=DIM)
-        # Walk for the first 25% of each step, then stand on the spot and record.
-        a_prev = angles[k - 1] if k > 0 else angles[0]
-        a_now = angles[k]
-        if frac < 0.25 and k > 0:
-            a = a_prev + (a_now - a_prev) * (frac / 0.25)
-            rec = False
+# ---------------------------------------------------------------- light rendering
+
+def _blur(img, sigma):
+    if sigma < 5:
+        return cv2.GaussianBlur(img, (0, 0), sigma)
+    f = int(min(8, sigma // 2.5))
+    small = cv2.resize(img, (W // f, H // f), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), sigma / f)
+    return cv2.resize(small, (W, H), interpolation=cv2.INTER_LINEAR)
+
+
+def _splat(u, v, val):
+    img = np.zeros((H, W, 3), np.float32)
+    ok = np.isfinite(u) & np.isfinite(v) & (u >= 1) & (u < W - 2) & (v >= 1) & (v < H - 2)
+    if not ok.any():
+        return img
+    u, v, val = u[ok], v[ok], val[ok]
+    x0, y0 = np.floor(u).astype(int), np.floor(v).astype(int)
+    fx, fy = (u - x0)[:, None], (v - y0)[:, None]
+    for dx, dy, w in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)), (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+        np.add.at(img, (y0 + dy, x0 + dx), val * w)
+    return img
+
+
+def render_lights(cam: Cam, P, C, gain=3.0):
+    """Additive point lights with a cheap depth of field (four focus layers).
+
+    In focus, a light's peak equals its value; out of focus, the same energy
+    spreads into a bokeh disc, so defocused lights get dimmer and larger.
+    """
+    u, v, z = cam.project(P)
+    ok = np.isfinite(z) & (C.max(1) > 1e-4)
+    size = np.where(ok, cam.f / 900 / np.maximum(z, 0.3), 1.0)
+    val = C * (gain * np.clip(size, 0.3, 3.0) ** 0.8)[:, None]
+    coc = np.where(ok, np.abs(z - cam.focus) / np.maximum(z, 0.3), 0)
+    img = np.zeros((H, W, 3), np.float32)
+    core = 1.1
+    for lo, hi, sigma in ((0, 0.05, core), (0.05, 0.14, 2.4), (0.14, 0.32, 5.0), (0.32, 99, 9.0)):
+        m = ok & (coc >= lo) & (coc < hi)
+        if m.any():
+            s = sigma * float(np.clip(np.median(size[m]), 0.8, 3.0))
+            # Normalise to the in-focus peak: energy is conserved as the disc grows.
+            boost = (s / core) ** 0.6  # keep bokeh discs visible, not physically dimmed away
+            img += _blur(_splat(u[m], v[m], val[m]), s) * (2 * np.pi * core * core) * boost
+    return img
+
+
+def render_glow(cam: Cam, P, C, sigma=40.0):
+    """A soft diffuse glow (light on the floor), not individual points."""
+    u, v, z = cam.project(P)
+    return _blur(_splat(u, v, C.astype(np.float32)), sigma)
+
+
+def bloom(img):
+    return img + 0.6 * _blur(img, 6) + 0.4 * _blur(img, 20) + 0.25 * _blur(img, 60)
+
+
+def tonemap(x):
+    return 1 - np.exp(-x)
+
+
+def background():
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    r = np.hypot((xx - W * 0.62) / W, (yy - H * 0.6) / H) * 1.5
+    t = np.clip(r, 0, 1)[..., None] ** 1.2
+    bg = lin(SPRUCE_CORE) * (1 - t) + lin(SPRUCE_EDGE) * t
+    return (bg + np.random.default_rng(0).normal(0, 0.0005, (H, W, 1))).astype(np.float32)
+
+
+def lines_layer(cam: Cam, segs, colour, alpha):
+    """Thin additive lines (rays) between 3D point pairs."""
+    img = np.zeros((H, W, 3), np.float32)
+    if alpha <= 0.01 or not len(segs):
+        return img
+    a, b = np.array([s[0] for s in segs]), np.array([s[1] for s in segs])
+    ua, va, za = cam.project(a)
+    ub, vb, zb = cam.project(b)
+    col = tuple(float(c) * alpha for c in colour)
+    for x0, y0, x1, y1, z0, z1 in zip(ua, va, ub, vb, za, zb):
+        if np.isfinite(z0) and np.isfinite(z1):
+            cv2.line(img, (int(x0 * 4), int(y0 * 4)), (int(x1 * 4), int(y1 * 4)), col, 1, cv2.LINE_AA, shift=2)
+    return img
+
+
+# ---------------------------------------------------------------- UI
+
+def text(d: ImageDraw.ImageDraw, xy, s, f, fill, alpha):
+    if alpha > 0.01:
+        d.text(xy, s, font=f, fill=tuple(fill) + (int(255 * alpha),))
+
+
+def wrap(s, f, width):
+    d = ImageDraw.Draw(Image.new("L", (1, 1)))
+    lines, cur = [], ""
+    for w in s.split():
+        t = (cur + " " + w).strip()
+        if d.textlength(t, font=f) <= width:
+            cur = t
         else:
-            a, rec = a_now, True
-        px, py = cx + R * np.cos(a), cy + R * np.sin(a)
-        person(d, px, py, a + np.pi, rec)
-        if rec:
-            secs = 12 * (frac - 0.25) / 0.75
-            tx, ty = px, py + 62  # under the person
-            label = f"REC {secs:4.1f} s"
-            tw = d.textlength(label, font=font(30))
-            tx = min(max(tx - tw / 2, 20), 700 - tw)  # keep it inside the left panel
-            d.text((tx, ty - 18), label, font=font(30), fill=(235, 90, 90))
-        caption(img, "2. Film it from 4–6 spots",
-                "About 2 metres away, front first, the whole tree in the frame. "
-                "Hold still for about 12 seconds at each spot, then move to the next.",
-                alpha=fade(i, n))
-        yield img
+            lines.append(cur)
+            cur = w
+    return lines + [cur]
 
 
-def scene_decode(clip: Path, det_path: Path, n: int, labels: int = 14):
-    import cv2
-    cap = cv2.VideoCapture(str(clip))
-    for _ in range(int(cap.get(cv2.CAP_PROP_FRAME_COUNT) * 0.55)):
-        cap.read()
-    ok, fr = cap.read()
-    cap.release()
-    base = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).resize((607, 1080), Image.LANCZOS)
-    base = Image.eval(base, lambda v: int(v * 0.55))
-    sc = 1080 / fr.shape[0]
-    det = load_detections(det_path, min_conf=0.5)
-    pts = [(i, det["uv"][i] * sc) for i in range(len(det["uv"])) if np.isfinite(det["uv"][i]).all()]
-    rng = np.random.default_rng(2)
-    # Labels spread out: pick from a coarse grid so they don't overlap.
-    chosen, used = [], set()
-    for i, p in sorted(pts, key=lambda q: rng.random()):
-        cell = (int(p[0] // 120), int(p[1] // 110))
-        if cell not in used:
-            used.add(cell)
-            chosen.append((i, p))
-        if len(chosen) >= labels:
-            break
-    hue = lambda i: tuple(int(c * 255) for c in matplotlib.colormaps["turbo"](0.1 + 0.8 * i / 500)[:3])
-    for f in range(n):
-        img = canvas()
-        tile = base.copy()
-        d = ImageDraw.Draw(tile)
-        shown = int(len(pts) * min(1.0, f / (n * 0.35)))
-        for i, p in pts[:shown]:
-            d.ellipse([p[0] - 6, p[1] - 6, p[0] + 6, p[1] + 6], fill=hue(i))
-        for k, (i, p) in enumerate(chosen):
-            if f > n * 0.35 + k * 4:
-                d.rounded_rectangle([p[0] + 10, p[1] - 22, p[0] + 92, p[1] + 14], radius=7, fill=(0, 0, 0))
-                d.text((p[0] + 16, p[1] - 22), str(i), font=font(30), fill=FG)
-                d.ellipse([p[0] - 10, p[1] - 10, p[0] + 10, p[1] + 10], outline=FG, width=3)
-        paste_tree(img, tile)
-        caption(img, "3. The computer reads the blinking",
-                f"In each clip it works out which light is where on the screen: "
-                f"{len(pts)} lights found in this one.", alpha=fade(f, n))
-        yield img
+def caption(layer, s, alpha, x=120, bottom=950, size=64, width=760):
+    if alpha <= 0.01:
+        return
+    d = ImageDraw.Draw(layer)
+    f = font(size)
+    lh = int(size * 1.16)
+    lines = wrap(s, f, width)
+    y = bottom - lh * len(lines)
+    for line in lines:
+        text(d, (x, y), line, f, PAPER, alpha)
+        y += lh
 
 
-def _rot(points, yaw, pitch=0.25):
-    cy_, sy_ = np.cos(yaw), np.sin(yaw)
-    x = points[:, 0] * cy_ + points[:, 2] * sy_
-    z = -points[:, 0] * sy_ + points[:, 2] * cy_
-    y = points[:, 1]
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    return x, y * cp - z * sp, y * sp + z * cp
+_SCRIM = None
 
 
-def scene_cloud(coords: np.ndarray, cams: np.ndarray, n: int):
-    ok = np.isfinite(coords).all(1)
-    p = coords.copy()
-    p[:, 1] -= 0.5
-    idx = np.arange(len(p))
-    cm = matplotlib.colormaps["turbo"]
-    for f in range(n):
-        yaw = 2 * np.pi * f / n * 0.9
-        img = canvas()
-        layer = Image.new("RGB", (720, 1000), BG)
-        d = ImageDraw.Draw(layer)
-        x, y, z = _rot(p[ok], yaw)
-        order = np.argsort(z)
-        s = 600
-        for j in order:
-            u, v = 360 + x[j] * s, 500 - y[j] * s
-            c = tuple(int(255 * q) for q in cm(0.1 + 0.8 * idx[ok][j] / len(p))[:3])
-            r = 5 + 2 * (z[j] + 0.5)
-            d.ellipse([u - r, v - r, u + r, v + r], fill=c)
-        # Phone spots from the solve, drawn as white markers around the tree.
-        cpos = cams.copy()
-        cpos[:, 1] -= 0.5
-        cx, cyy, cz = _rot(cpos / np.maximum(np.linalg.norm(cpos[:, [0, 2]], axis=1, keepdims=True), 1e-6) * 0.55,
-                           yaw)
-        for u0, v0 in zip(360 + cx * s, 500 - cyy * s):
-            # A small phone: light body, dark screen, at each filming spot.
-            d.rounded_rectangle([u0 - 13, v0 - 22, u0 + 13, v0 + 22], radius=6, fill=(120, 170, 255))
-            d.rounded_rectangle([u0 - 9, v0 - 16, u0 + 9, v0 + 14], radius=3, fill=(20, 30, 50))
-        glow = layer.filter(ImageFilter.GaussianBlur(6))
-        layer = Image.blend(layer, glow, 0.35)
-        img.paste(layer, (0, 40))
-        caption(img, "4. The views combine into 3D",
-                "One clip only gives a direction to each light. Clips from several spots cross at each "
-                "light and pin it down in space.", alpha=fade(f, n))
-        yield img
+def scrim(layer, strength):
+    global _SCRIM
+    if strength <= 0.01:
+        return
+    if _SCRIM is None:
+        m = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(m).ellipse([-620, 520, 1180, 1560], fill=200)
+        _SCRIM = m.filter(ImageFilter.GaussianBlur(140))
+    dark = Image.new("RGBA", (W, H), SPRUCE_EDGE + (0,))
+    dark.putalpha(_SCRIM.point(lambda v: int(v * strength)))
+    layer.alpha_composite(dark)
 
 
-def scene_sweep(tree: TreeRenderer, coords: np.ndarray, n: int):
-    y = coords[:, 1]
-    for f in range(n):
-        h = 0.5 - 0.55 * np.cos(2 * np.pi * f / (n / 1.5))
-        on = np.isfinite(y) & (np.abs(y - h) < 0.09)
-        rgb = np.zeros((len(y), 3))
-        rgb[on] = [60, 255, 120]
-        img = canvas()
-        paste_tree(img, tree.frame(rgb * 1.6))
-        caption(img, "Done!",
-                "Effects now know where every light is. Here a flat plane sweeps up and down the tree, "
-                "using the coordinates the computer just worked out.", alpha=fade(f, n))
-        yield img
+STEPS = ["Press", "Film", "Read", "Combine"]
 
 
-def scene_end(n: int):
-    for f in range(n):
-        img = canvas()
-        d = ImageDraw.Draw(img)
-        lines = ["Dark room", "One phone, no zoom", "4–6 spots, front first", "Hold still ~12 s at each"]
-        y = 250
-        d.text((160, 140), "Recap", font=font(72), fill=ACCENT)
-        for k, line in enumerate(lines):
-            d.text((160, y + 110 * k), "•  " + line, font=font(54, bold=False), fill=FG)
-        d.text((160, 800), "Full guide: docs/calibrate-the-tree.md", font=font(40, bold=False), fill=DIM)
-        yield img
+def progress(layer, current, alpha):
+    if alpha <= 0.01:
+        return
+    d = ImageDraw.Draw(layer)
+    f = font(32, "regular")
+    x = 124
+    for i, name in enumerate(STEPS):
+        on = clamp01(1 - abs(current - i) * 1.6)
+        col = tuple(int(MOSS[k] + (CANDLE[k] - MOSS[k]) * on) for k in range(3))
+        r = 6 + 3 * on
+        d.ellipse([x - r, 90 - r, x + r, 90 + r], fill=col + (int(255 * alpha),))
+        text(d, (x + 22, 72), name, f, col, alpha)
+        x += 22 + int(d.textlength(name, font=f)) + 56
 
 
-def build_video(clips: Path, out_dir: Path, work: Path, seconds_per_scene: dict | None = None) -> Path:
+def phone_glyph(d, x, y, h, alpha, ring=None):
+    w = h * 0.52
+    a = int(255 * alpha)
+    d.rounded_rectangle([x - w / 2, y - h / 2, x + w / 2, y + h / 2], radius=h * 0.14, fill=FROST + (a,))
+    d.rounded_rectangle([x - w / 2 + 3, y - h / 2 + 5, x + w / 2 - 3, y + h / 2 - 5], radius=h * 0.09,
+                        fill=(16, 34, 44, a))
+    if ring is not None and ring > 0:
+        rr = h * 0.9
+        d.arc([x - rr, y - rr, x + rr, y + rr], -90, -90 + 360 * ring, fill=CANDLE + (a,), width=6)
+
+
+# ---------------------------------------------------------------- the film
+
+class Film:
+    """Everything that does not change from frame to frame."""
+
+    def __init__(self, data: dict):
+        self.P = np.array(data["truth"], np.float32)            # world metres, y up
+        self.Ps = np.array(data["solved_world"], np.float32)    # solved, aligned to the truth
+        self.ys = np.array(data["solved_y"], np.float32)        # contract y in [0, 1]
+        self.th = np.array(data["solved_theta"], np.float32)
+        self.ids = set(data["decoded_ids"])
+        self.rgb = np.array(data["plan_rgb"], np.float32)       # (F, n, 3) 0-255
+        self.starts = np.array(data["plan_starts"], np.float32)
+        self.dur = np.array(data["plan_dur"], np.float32)
+        self.roles = data["plan_roles"]
+        self.n = len(self.P)
+        rng = np.random.default_rng(7)
+        self.phase = rng.uniform(0, 2 * np.pi, self.n)
+        self.twf = rng.uniform(0.6, 1.4, self.n)
+        self.bg = background()
+        self.warm = lin(CANDLE)
+        self.white = lin(CAL_WHITE)
+        self.code = [i for i, r in enumerate(self.roles) if r == "code"]
+        self.sync = [i for i, r in enumerate(self.roles) if r == "sync"]
+        self.code_level = max(self.rgb[f].max() for f in self.code)
+        # Phones around the tree, front first, 2 m out, at hand height.
+        ang = np.radians(np.arange(5) * 72.0)
+        self.phones = np.stack([2.0 * np.cos(ang), np.full(5, 1.25), 2.0 * np.sin(ang)], 1)
+        # The light we follow: front-ish (seen from the push-in), mid height, near the outside.
+        d = np.array([np.cos(np.radians(30)), 0, np.sin(np.radians(30))])
+        r = self.P[:, [0, 2]] @ d[[0, 2]]
+        cand = np.nonzero((self.P[:, 1] > 0.75) & (self.P[:, 1] < 1.0))[0]
+        self.hero = int(cand[np.argmax(r[cand])])
+        h = self.P[self.hero]
+        self.keys = list(KEYS)
+        self.keys[3] = (23.2, Shot(30, 4, 1.15, float(h[1]), 32, 0.10, float(h[0]), float(h[2])), "smooth")
+        self.keys[4] = (25.0, Shot(30, 4, 1.15, float(h[1]), 32, 0.10, float(h[0]), float(h[2])), "smooth")
+        # Rays and scattering for the "views combine" beat.
+        self.spread = rng.uniform(0.55, 1.6, self.n)
+        self.settle = rng.uniform(0, 1, self.n)
+        self.floor = np.stack([np.sqrt(rng.uniform(0, 1, 260)) * 0.8, np.zeros(260), np.zeros(260)], 1)
+        a = rng.uniform(0, 2 * np.pi, 260)
+        self.floor = np.stack([self.floor[:, 0] * np.cos(a), np.full(260, 0.01), self.floor[:, 0] * np.sin(a)], 1)
+        # Lights decoded in the front clip, spread out for labels.
+        self.label_ids = self._pick_labels()
+
+    # -- timing of the calibration sequence on screen --
+    BLINK_START = 16.7  # blinking starts after the tap and a short dark pause
+    SLOW = 2.0          # the code is shown slowed down while we follow one light
+
+    def _hero_end(self):
+        code0 = self.starts[self.code[0]]
+        code1 = self.starts[self.code[-1]] + self.dur[self.code[-1]]
+        return self.BLINK_START + (code1 - code0) * self.SLOW / 1000
+
+    def seq_frame_at(self, t):
+        """Sequence frame shown at film time t (None before it starts).
+
+        The film shows only the code frames: about half the lights are on in
+        each, so the tree never flashes as a whole. (The real sequence also has
+        whole-tree sync flashes and a dark lead; on screen those would strobe
+        and read as dead air.) The first pass is slowed down while we follow
+        one light; after that the code cycles at real speed.
+        """
+        if t < self.BLINK_START:
+            return None
+        k_slow = int((t - self.BLINK_START) * 1000 / (100 * self.SLOW))
+        if k_slow < len(self.code):
+            return self.code[k_slow]
+        k = int((t - self._hero_end()) * 1000 / 100) % len(self.code)
+        return self.code[k]
+
+    def hero_code_shown(self, t):
+        """Code frames of the followed light shown so far, during the slowed segment."""
+        if t < self.BLINK_START:
+            return []
+        if t >= self._hero_end():
+            return list(self.code)
+        f = self.seq_frame_at(t)
+        return [g for g in self.code if g <= f]
+
+    def _pick_labels(self, k=9):
+        cam = Cam(PHONE_SPOT)
+        u, v, z = cam.project(self.P)
+        rng = np.random.default_rng(3)
+        used, out = set(), []
+        for i in rng.permutation(self.n):
+            if i in self.ids and np.isfinite(z[i]):
+                cell = (int(u[i] // 150), int(v[i] // 120))
+                if cell not in used and abs(u[i] - cam.cx) < 230 and 120 < v[i] < 960:
+                    used.add(cell)
+                    out.append(int(i))
+            if len(out) >= k:
+                break
+        return out
+
+    # -- lights --
+    def lights(self, t):
+        """Positions (n, 3) and linear colours (n, 3) at film time t."""
+        P = self.P
+        tw = 0.78 + 0.22 * np.sin(self.phase + t * 2.2 * self.twf)
+        warm = np.outer(tw, self.warm) * 1.0
+        if t < 7.4:
+            return P, warm
+        if t < 14.2:
+            # A pulse runs up the wire, bottom to top.
+            head = (t - 7.6) / 5.6 * self.n
+            idx = np.arange(self.n)
+            pulse = np.exp(-0.5 * ((idx - head) / 9) ** 2)
+            trail = np.where(idx < head, np.exp(-(head - idx) / 45), 0) * 0.8
+            base = 0.22 + 0.78 * (1 - window(t, 7.4, 14.2, 0.9))
+            c = warm * base + np.outer(pulse * 4.5 + trail, lin((255, 230, 190)))
+            return P, c
+        if t < 15.9:
+            return P, warm
+        f = self.seq_frame_at(t)
+        if f is None:
+            dark = 1 - span(t, 15.9, 16.3)
+            return P, warm * dark
+        on = self.rgb[f].max(1) / self.code_level
+        cal = np.outer(np.clip(on, 0, 1.2), self.white) * 1.15
+        if t < 46.0:
+            return P, cal
+        # Views combine: spread along the front phone's rays, then settle onto the solved positions.
+        ph = self.phones[0]
+        s_out = span(t, 46.0, 47.8)
+        Pspread = ph + (P - ph) * (1 + (self.spread - 1) * s_out)[:, None]
+        conv = np.clip((t - 48.6 - self.settle * 3.2) / 1.4, 0, 1)
+        conv = conv * conv * (3 - 2 * conv)
+        Pt = Pspread + (self.Ps - Pspread) * conv[:, None]
+        c = cal * (1 - conv)[:, None] * 0.8 + warm * conv[:, None] * 1.25
+        if t < 55.5:
+            return Pt, c
+        y, th = self.ys, self.th
+        if t < 60.4:
+            h = 0.5 - 0.58 * np.cos(2 * np.pi * (t - 55.5) / 4.9)
+            band = np.exp(-0.5 * ((y - h) / 0.05) ** 2)
+            mint = lin((120, 255, 196))
+            c = np.outer(band * 4.5, mint) + warm * 0.28
+            return self.Ps, np.nan_to_num(c)
+        if t < 64.6:
+            hue = (th / (2 * np.pi) + y * 1.3 - (t - 60.4) * 0.45) % 1.0
+            rgb = np.array([colorsys.hsv_to_rgb(float(hh), 0.85, 1.0) for hh in np.nan_to_num(hue)], np.float32)
+            mix = span(t, 60.4, 61.0)
+            c = lin(rgb * 255) * 1.1 * mix + warm * 0.05 * (1 - mix)
+            return self.Ps, np.nan_to_num(c)
+        mix = span(t, 64.6, 65.6)
+        hue = (th / (2 * np.pi) + y * 1.3 - (t - 60.4) * 0.45) % 1.0
+        rgb = np.array([colorsys.hsv_to_rgb(float(hh), 0.85, 1.0) for hh in np.nan_to_num(hue)], np.float32)
+        return self.Ps, np.nan_to_num(lin(rgb * 255) * 1.1 * (1 - mix) + warm * mix)
+
+    def rays(self, t, P):
+        segs, alpha = [], 0.0
+        if 46.0 <= t < 54.5:
+            rng = np.random.default_rng(int(t * 2) % 3)
+            phones = [0] if t < 48.6 else range(5)
+            for k in phones:
+                ph = self.phones[k]
+                facing = ((P - ph) * (np.array([0, 0.85, 0]) - ph)).sum(1) > 0
+                near = np.nonzero(facing & ((P[:, [0, 2]] * ph[[0, 2]]).sum(1) > 0))[0]
+                for i in near[:: max(1, len(near) // (18 if t < 48.6 else 9))]:
+                    segs.append((ph, P[i]))
+            alpha = window(t, 46.0, 54.5, 0.8) * (0.42 if t < 48.6 else 0.22)
+        return segs, alpha
+
+    # -- one frame --
+    def frame(self, t) -> np.ndarray:
+        s = shot_at(t, self.keys)
+        cam = Cam(s)
+        P, C = self.lights(t)
+        img = render_lights(cam, P, C.astype(np.float32), gain=1.0)
+        glow = float(np.nanmean(C))
+        img += render_glow(cam, self.floor, np.outer(np.full(len(self.floor), glow * 6.0), self.warm))
+        segs, a = self.rays(t, P)
+        img += lines_layer(cam, segs, lin(FROST) * 1.4, a)
+        img = bloom(img) + self.bg
+        rgb = to_srgb8(tonemap(img))
+        layer = Image.fromarray(rgb).convert("RGBA")
+        self.ui(layer, t, cam)
+        return np.asarray(layer.convert("RGB"))
+
+    # -- UI per beat --
+    def ui(self, layer, t, cam):
+        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(ov)
+        # E: the phone frame around the front view
+        pm = window(t, 39.2, 46.6, 1.0)
+        if pm > 0.01:
+            sh, sw = 960, 540
+            x0, y0 = int(W * 0.6 - sw / 2), int((H - sh) / 2)
+            mask = Image.new("L", (W, H), int(205 * pm))
+            ImageDraw.Draw(mask).rounded_rectangle([x0, y0, x0 + sw, y0 + sh], radius=48, fill=0)
+            dark = Image.new("RGBA", (W, H), SPRUCE_EDGE + (0,))
+            dark.putalpha(mask)
+            layer.alpha_composite(dark)
+            d.rounded_rectangle([x0 - 16, y0 - 16, x0 + sw + 16, y0 + sh + 16], radius=60,
+                                outline=FROST + (int(230 * pm),), width=7)
+            d.rounded_rectangle([x0 + sw / 2 - 70, y0 - 2, x0 + sw / 2 + 70, y0 + 26], radius=14,
+                                fill=SPRUCE_EDGE + (int(255 * pm),))
+            # The computer reads the clip: a scan line, then labels pop onto lights.
+            scan = span(t, 40.8, 42.4)
+            u, v, z = cam.project(self.P)
+            ys = y0 + scan * sh
+            if 40.8 < t < 42.6:
+                d.line([x0, ys, x0 + sw, ys], fill=CANDLE + (int(160 * pm),), width=3)
+            for i in self.ids:
+                if np.isfinite(z[i]) and v[i] < ys and x0 < u[i] < x0 + sw:
+                    d.ellipse([u[i] - 4, v[i] - 4, u[i] + 4, v[i] + 4], fill=CANDLE + (int(150 * pm),))
+            f = font(34)
+            for k, i in enumerate(self.label_ids):
+                a = span(t, 42.6 + 0.28 * k, 42.9 + 0.28 * k) * pm
+                if a > 0.01 and np.isfinite(z[i]):
+                    lbl = str(i)
+                    tw_ = d.textlength(lbl, font=f)
+                    bx, by = u[i] + 12, v[i] - 18
+                    d.ellipse([u[i] - 11, v[i] - 11, u[i] + 11, v[i] + 11], outline=PAPER + (int(255 * a),), width=3)
+                    d.rounded_rectangle([bx, by, bx + tw_ + 18, by + 40], radius=20,
+                                        fill=(10, 24, 22, int(225 * a)), outline=CANDLE + (int(255 * a),), width=2)
+                    text(d, (bx + 9, by + 1), lbl, f, PAPER, a)
+        layer.alpha_composite(ov)
+        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(ov)
+        # C: the Home Assistant button, tapped
+        hb = window(t, 14.4, 17.6, 0.5)
+        if hb > 0.01:
+            x, y, w_, h_ = 120, 560, 640, 128
+            d.rounded_rectangle([x, y, x + w_, y + h_], radius=28, fill=(22, 54, 50, int(240 * hb)),
+                                outline=MOSS + (int(255 * hb),), width=2)
+            tri = [(x + 44, y + 40), (x + 44, y + 88), (x + 86, y + 64)]
+            d.polygon(tri, fill=FROST + (int(255 * hb),))
+            text(d, (x + 116, y + 36), "Play calibration sequence", font(46), PAPER, hb)
+            tap = (t - 15.4) / 0.7
+            if 0 < tap < 1:
+                r = 20 + 120 * tap
+                d.ellipse([x + 64 - r, y + 64 - r, x + 64 + r, y + 64 + r],
+                          outline=FROST + (int(220 * (1 - tap) * hb),), width=4)
+        # C: the followed light's blinks, and the number they spell
+        if 18.0 < t < 25.6:
+            a = window(t, 18.0, 25.6, 0.5)
+            u, v, z = cam.project(self.P[[self.hero]])
+            shown = self.hero_code_shown(t)
+            bx, by = 120, 520
+            text(d, (bx, by - 64), "One light, slowed down", font(36, "regular"), MOSS, a)
+            for k, g in enumerate(self.code):
+                cx = bx + k * 26
+                lit = self.rgb[g][self.hero].max() > 0
+                if g in shown:
+                    if lit:
+                        d.ellipse([cx, by, cx + 18, by + 18], fill=CAL_WHITE + (int(255 * a),))
+                    else:
+                        d.ellipse([cx, by, cx + 18, by + 18], outline=MOSS + (int(255 * a),), width=2)
+            if t > 23.6:
+                aa = span(t, 23.6, 24.1) * a
+                text(d, (bx, by + 40), f"That's light {self.hero}", font(48), CANDLE, aa)
+            # A ring around the light on screen
+            if np.isfinite(z[0]):
+                d.ellipse([u[0] - 34, v[0] - 34, u[0] + 34, v[0] + 34], outline=CANDLE + (int(200 * a),), width=3)
+        # D: phones appear around the tree, one at a time, each recording
+        if 27.4 < t < 39.6:
+            a = window(t, 27.4, 39.6, 0.6)
+            u, v, z = cam.project(self.phones)
+            centre = cam.project(np.array([[0, 0.6, 0]]))
+            for k in range(5):
+                t0 = 28.4 + 1.85 * k
+                if t < t0:
+                    continue
+                pop = span(t, t0, t0 + 0.35)
+                ring = clamp01((t - t0 - 0.3) / 1.4)
+                if not np.isfinite(z[k]):
+                    continue
+                # Field-of-view wedge towards the tree
+                dx, dy = centre[0][0] - u[k], centre[1][0] - v[k]
+                L = np.hypot(dx, dy) + 1e-6
+                nx, ny = -dy / L, dx / L
+                tip = (u[k] + dx * 0.95, v[k] + dy * 0.95)
+                spread_px = 150
+                wedge = [(u[k], v[k]), (tip[0] + nx * spread_px, tip[1] + ny * spread_px),
+                         (tip[0] - nx * spread_px, tip[1] - ny * spread_px)]
+                active = t < t0 + 1.85 or k == 4
+                if active:
+                    d.polygon(wedge, fill=FROST + (int(34 * a * pop * (1 - span(t, t0 + 1.6, t0 + 1.85) * (k < 4))),))
+                phone_glyph(d, u[k], v[k], 60 * (0.6 + 0.4 * pop), a * pop, ring)
+                text(d, (u[k] - 10, v[k] + 44), str(k + 1), font(36), PAPER, a * pop)
+        # F: the phones stay in view while their rays cross
+        if 46.0 < t < 55.0:
+            a = window(t, 46.4, 55.0, 0.6)
+            u, v, z = cam.project(self.phones)
+            for k in range(5):
+                if np.isfinite(z[k]) and (k == 0 or t > 48.4):
+                    phone_glyph(d, u[k], v[k], 52, a * (1 if k == 0 else span(t, 48.4, 48.9)))
+        # Captions and progress
+        for (a0, a1, s) in CAPTIONS:
+            al = window(t, a0, a1, 0.5)
+            if al > 0.01:
+                scrim(layer, al)
+                caption(ov, s, al)
+        progress(ov, step_at(t), window(t, 14.2, 56.0, 0.8))
+        # H: the checklist
+        if t > 64.6:
+            scrim(layer, span(t, 64.6, 65.2))
+            text(d, (120, 520), "Tonight's checklist", font(64), CANDLE, span(t, 64.8, 65.4) * (1 - span(t, 69.4, 70)))
+            for k, line in enumerate(CHECKLIST):
+                a = span(t, 65.4 + 0.45 * k, 65.9 + 0.45 * k) * (1 - span(t, 69.4, 70))
+                text(d, (120, 620 + 74 * k), line, font(50, "regular"), PAPER, a)
+        layer.alpha_composite(ov)
+
+
+CAPTIONS = [
+    (0.8, 7.1, "Our tree has 500 lights on one long wire."),
+    (7.6, 13.8, "To draw shapes with them, it needs to know where each one is."),
+    (14.4, 19.4, "Press Play calibration sequence in Home Assistant."),
+    (19.8, 25.4, "Every light blinks its own number, again and again."),
+    (26.0, 31.4, "Film it from 4–6 spots, about 2 metres away."),
+    (31.8, 37.4, "Hold still for about 12 seconds at each spot."),
+    (39.6, 46.2, "The computer reads the blinking and finds each light in every clip."),
+    (47.0, 55.2, "Views from different spots cross, pinning each light down in 3D."),
+    (56.0, 64.2, "Now effects know where every light is."),
+]
+CHECKLIST = ["A dark room", "One phone, no zoom", "4–6 spots, front first", "Hold still for 12 seconds"]
+
+
+def step_at(t):
+    for t0, t1, k in ((14.2, 25.6, 0), (25.6, 38.6, 1), (38.6, 46.4, 2), (46.4, 99, 3)):
+        if t < t1:
+            return k + clamp01((t - (t1 - 0.6)) / 0.6) if t > t1 - 0.6 else float(k)
+    return 3.0
+
+
+# ---------------------------------------------------------------- build
+
+_FILM = None
+
+
+def _init(data):
+    global _FILM
+    _FILM = Film(data)
+
+
+def _render(t):
+    return _FILM.frame(t).tobytes()
+
+
+def prepare(clips: Path, work: Path) -> dict:
+    from .detect import load_detections, save_detections
+    from .layout import get_layout, load_coords
+    from .metrics import align
+    from .output import write_coords_txt
+    from .sequence import SequenceParams, build
     from .solve import Solver, ViewObs, to_tree_frame
     from .video import decode_video
-    from .detect import save_detections
 
     work.mkdir(parents=True, exist_ok=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
     truth = json.loads((clips / "truth.json").read_text())
     names = [v["camera"]["name"] for v in truth["views"]]
     plan_kw = dict(truth["plan"])
     plan_kw.pop("sequential", None)
     plan = build(SequenceParams(**plan_kw))
-    det_paths = []
+    dets = []
     for nm in names:
         dp = work / f"{nm}_detections.json"
         if not dp.exists():
-            res = decode_video(clips / f"{nm}.mp4", plan)
-            save_detections(res, dp, nm)
-        det_paths.append(dp)
+            save_detections(decode_video(clips / f"{nm}.mp4", plan), dp, nm)
+        dets.append(dp)
     coords_path = work / "coords.txt"
-    cams_path = work / "cams.json"
     if not coords_path.exists():
         views = []
-        for dp in det_paths:
+        for dp in dets:
             d = load_detections(dp)
             views.append(ViewObs(d["view"], d["image_size"][0], d["image_size"][1], d["uv"], d["conf"]))
         sol = Solver(views).solve()
-        norm, info = to_tree_frame(sol.points, sol)
-        from .output import write_coords_txt
-        write_coords_txt(coords_path, norm)
-        cams_path.write_text(json.dumps(info["cameras"]))
-    coords = load_coords(coords_path)
-    cams = np.array(json.loads(cams_path.read_text()))
+        write_coords_txt(coords_path, to_tree_frame(sol.points, sol)[0])
+    norm = load_coords(coords_path)
+    layout = get_layout(truth["layout"])
+    world, _ = align(norm, layout.points)
+    ok = np.isfinite(world).all(1)
+    world[~ok] = layout.points[~ok]
+    th = np.arctan2(norm[:, 2], norm[:, 0])
+    d0 = load_detections(dets[0], min_conf=0.5)
+    return {
+        "truth": layout.points.tolist(),
+        "solved_world": world.tolist(),
+        "solved_y": np.nan_to_num(norm[:, 1]).tolist(),
+        "solved_theta": np.nan_to_num(th).tolist(),
+        "decoded_ids": [int(i) for i in np.nonzero(np.isfinite(d0["uv"]).all(1))[0]],
+        "plan_rgb": plan.rgb().tolist(),
+        "plan_starts": plan.starts_ms().tolist(),
+        "plan_dur": plan.duration_ms.tolist(),
+        "plan_roles": plan.roles,
+    }
 
-    tree = TreeRenderer()
-    vis = np.nonzero(tree.view.visible & (tree.view.trans > 0.4))[0]
-    led = int(vis[len(vis) // 2])
+
+def stills(data: dict, times: list[float], out: Path):
+    out.mkdir(parents=True, exist_ok=True)
+    film = Film(data)
+    for t in times:
+        Image.fromarray(film.frame(t)).save(out / f"t{t:05.1f}.jpg", quality=90)
+
+
+def build_video(clips: Path, out_dir: Path, work: Path, workers: int = 10, only: list[float] | None = None) -> Path:
+    data = prepare(clips, work)
+    if only:
+        stills(data, only, work / "keyframes")
+        return work / "keyframes"
+    out_dir.mkdir(parents=True, exist_ok=True)
     mp4 = out_dir / "calibrate-the-tree.mp4"
     proc = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
-         "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "26", "-pix_fmt", "yuv420p",
-         "-movflags", "+faststart", str(mp4)], stdin=subprocess.PIPE)
-    gif_frames = []
-    scenes = [
-        scene_rest(tree, 7 * FPS),
-        scene_code(tree, plan, led, n_dark=int(2.5 * FPS), slow=3),
-        scene_filming(13 * FPS),
-        scene_decode(clips / f"{names[0]}.mp4", det_paths[0], 11 * FPS),
-        scene_cloud(coords, cams, 12 * FPS),
-        scene_sweep(tree, coords, 11 * FPS),
-        scene_end(5 * FPS),
-    ]
-    k = 0
-    for gen in scenes:
-        for img in gen:
-            proc.stdin.write(img.tobytes())
-            if k % 15 == 0:
-                gif_frames.append(img.resize((432, 243), Image.LANCZOS))
+         "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "21", "-tune", "film",
+         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(mp4)], stdin=subprocess.PIPE)
+    times = np.arange(int(DURATION * FPS)) / FPS
+    (work / "stills").mkdir(exist_ok=True)
+    with ProcessPoolExecutor(workers, initializer=_init, initargs=(data,)) as ex:
+        for k, buf in enumerate(ex.map(_render, times, chunksize=8)):
+            proc.stdin.write(buf)
             if k % FPS == 0:
-                img.save(work / f"still_{k // FPS:03d}.jpg", quality=88)
-            k += 1
+                Image.frombytes("RGB", (W, H), buf).save(work / "stills" / f"s{k // FPS:03d}.jpg", quality=88)
     proc.stdin.close()
     proc.wait()
+    # GIF preview: a few seconds from each beat, 10 fps, 480 px wide.
     gif = out_dir / "calibrate-the-tree.gif"
-    gif_frames[0].save(gif, save_all=True, append_images=gif_frames[1:], duration=500, loop=0, optimize=True)
-    print(f"{mp4}: {k / FPS:.1f} s, {mp4.stat().st_size / 1e6:.1f} MB; {gif}: {gif.stat().st_size / 1e6:.1f} MB")
+    parts = "+".join(f"between(t,{a},{b})" for a, b in ((9, 11), (20, 22.5), (33, 35), (43.5, 45.5), (50.5, 52.5),
+                                                          (61, 63)))
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(mp4), "-vf",
+                    f"select='{parts}',setpts=N/10/TB,fps=10,scale=480:-1:flags=lanczos,split[a][b];"
+                    "[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3",
+                    str(gif)], check=True)
+    print(f"{mp4}: {DURATION:.0f} s, {mp4.stat().st_size / 1e6:.1f} MB; {gif}: {gif.stat().st_size / 1e6:.1f} MB")
     return mp4
