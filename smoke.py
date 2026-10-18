@@ -166,8 +166,13 @@ def main():
     rep = Report()
     names = args.effects or effects.EFFECTS
     on_disk = sorted(p.stem for p in (ROOT / "effects").glob("*.py") if not p.stem.startswith("_"))
-    unregistered = [n for n in on_disk if n not in effects.EFFECTS]
-    rep.check(not unregistered, "effects", f"modules not in EFFECTS: {', '.join(unregistered)}")
+    disabled = list(getattr(effects, "DISABLED", []))
+    unregistered = [n for n in on_disk if n not in effects.EFFECTS and n not in disabled]
+    rep.check(not unregistered, "effects", f"modules in neither EFFECTS nor DISABLED: {', '.join(unregistered)}")
+    both = [n for n in disabled if n in effects.EFFECTS]
+    rep.check(not both, "effects", f"in both EFFECTS and DISABLED: {', '.join(both)}")
+    missing = [n for n in effects.EFFECTS + disabled if n not in on_disk]
+    rep.check(not missing, "effects", f"listed but no module file: {', '.join(missing)}")
     rep.check(len(set(effects.EFFECTS)) == len(effects.EFFECTS), "effects", "duplicate names in EFFECTS")
     coords, src = render.find_coords()
     print(f"coords: {src}")
