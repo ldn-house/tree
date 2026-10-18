@@ -241,9 +241,10 @@ def test_wifi_down_at_boot(make_device, bundles):
     d.set_net("down")
     d.start()
     st = d.wait_http(30)  # (loopback still answers in the simulator)
-    time.sleep(20)
-    st = status(d)
-    assert st["wifi"]["state"] in ("connecting", "backoff") and st["wifi"]["failures"] >= 1
+    # A connect attempt times out after 20 s (net.CONNECT_TIMEOUT_MS): wait
+    # for the first failure rather than racing it.
+    st = wait_for(lambda: (lambda s: s if s["wifi"]["failures"] >= 1 else None)(status(d)), 45, what="a failed attempt")
+    assert st["wifi"]["state"] in ("connecting", "backoff")
     assert st["effect"]["fps"] >= 30 and st["effect"]["running"]  # LEDs run regardless
     assert st["boot"]["trial"]  # not confirmed without the network...
     assert len(d.boots) == 0  # ...and no watchdog resets while Wi-Fi is down (review H2)

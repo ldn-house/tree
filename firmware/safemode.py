@@ -73,9 +73,10 @@ class _Wifi:
         self.last = None
         self.attempts = 0
         # Credentials to try in turn: the current config's, then the last
-        # config confirmed to reach the network, if different.
+        # config confirmed to reach the network, then the config a change
+        # replaced (kept until it is confirmed), if different.
         self.creds = []
-        for c in (bootmgr.load_config()[0], bootmgr.good_config() or {}):
+        for c in [bootmgr.load_config()[0]] + bootmgr.fallback_configs():
             pair = (c.get("WIFI_SSID"), c.get("WIFI_PASSWORD"))
             if pair[0] and pair not in self.creds:
                 self.creds.append(pair)

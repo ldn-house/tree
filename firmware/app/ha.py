@@ -368,21 +368,29 @@ class HA:
         """Discovery configs are retained, so they only need publishing when
         they change (a new firmware or effect set), on the first connect,
         or when Home Assistant asks (its birth message). Re-publishing them
-        on every reconnect made HA re-initialise every entity each time."""
+        on every reconnect made HA re-initialise every entity each time.
+        A pass only counts once every publish in it went out: if the session
+        drops part-way, nothing is recorded and the next connect publishes
+        it all again (review R3-M3). Returns True when a pass completed."""
         digest = self._digest()
         if not force and digest == self.discovered:
             return False
+        self.discovered = None  # until this pass completes
         params = []
         n = 0
         for topic, js, obj in self._configs():
             n += 1
             if obj and obj.startswith("param_"):
                 params.append(obj)
-            await self.mqtt.publish(topic, js, retain=True)
+            if not await self.mqtt.publish(topic, js, retain=True):
+                log("ha: discovery interrupted after %d entities; will retry on reconnect" % (n - 1))
+                return False
         # Remove entities for params that no longer exist.
         for obj in self.rt.state.get("ha_params"):
             if obj not in params:
-                await self.mqtt.publish(self._config_topic("number", obj), b"", retain=True)
+                if not await self.mqtt.publish(self._config_topic("number", obj), b"", retain=True):
+                    log("ha: discovery cleanup interrupted; will retry on reconnect")
+                    return False
         self.rt.state.set_ha_params(params)
         self.discovered = digest
         self.discoveries += 1

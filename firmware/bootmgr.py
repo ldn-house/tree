@@ -355,6 +355,27 @@ def good_config():
     return _read_good()
 
 
+def previous_config():
+    """The config.py a /config change replaced (config.prev.py), checked
+    against the schema, or None. Kept until the change is confirmed."""
+    try:
+        with open(CONFIG_PREV) as f:
+            src = f.read()
+        ns = {}
+        exec(src, ns)
+    except Exception:
+        return None
+    values = {k: v for k, v in ns.items() if k.isupper()}
+    clean, errors = cfgcheck.validate(values)
+    return None if errors else clean
+
+
+def fallback_configs():
+    """Configs whose Wi-Fi credentials are worth trying when the live ones
+    don't work: the last good one, then the one a change replaced."""
+    return [c for c in (_read_good(), previous_config()) if c]
+
+
 def promote_config():
     """Called by the app once the running config is proven: Wi-Fi joined
     with its own credentials, HTTP serving and MQTT connected (when
@@ -371,6 +392,7 @@ def promote_config():
     if st["cfg_trial"]:
         st["cfg_trial"] = False
         st["cfg_boots"] = 0
+        st["cfg_new"] = None
         _event(st, "config change confirmed")
         write_state(st)
         changed = True
@@ -407,19 +429,41 @@ def install_config(values, trial=True):
         lines.append("%s = %r\n" % (k, clean[k]))
     src = "".join(lines)
     compile(src, "config.py", "exec")
+    new = src.encode()
+    # Order matters for power cuts (review R3-H1). 1: keep the old config
+    # (or make sure no stale copy from an earlier change is left to be
+    # "restored"). 2: record the change, and which file it installs, in
+    # boot.json. 3: only then replace config.py. A cut before 3 leaves the
+    # old config live, and launch() sees config.py isn't the recorded one
+    # and drops the change; a cut after 3 is an ordinary trial, reverted
+    # unless it reaches the network. From safe mode (trial=False) there is
+    # no app boot to confirm it; the old config stays as config.prev.py, and
+    # its credentials are a Wi-Fi fallback (fallback_configs()).
     if exists("config.py"):
         with open("config.py", "rb") as f:
             old = f.read()
         write_atomic(CONFIG_PREV, old)
-    write_atomic("config.py", src.encode())
-    # From safe mode (trial=False) there is no app boot to confirm it; the
-    # recovery fallback stays the last config that reached the network, and
-    # safe mode's Wi-Fi falls back to its credentials.
+    elif exists(CONFIG_PREV):
+        os.remove(CONFIG_PREV)
     st["cfg_trial"] = trial
     st["cfg_boots"] = 0
+    st["cfg_new"] = _digest(new) if trial else None
     _event(st, "config change installed" + (" (trial)" if trial else " from safe mode"))
     write_state(st)
+    write_atomic("config.py", new)
     return sorted(clean)
+
+
+def _digest(data):
+    return hexlify(hashlib.sha256(data).digest())[:32]
+
+
+def _file_digest(path):
+    try:
+        with open(path, "rb") as f:
+            return _digest(f.read())
+    except OSError:
+        return None
 
 
 def _revert_config(st, why):
@@ -434,6 +478,7 @@ def _revert_config(st, why):
         log("cannot revert config: %r" % (e,))
     st["cfg_trial"] = False
     st["cfg_boots"] = 0
+    st["cfg_new"] = None
     _event(st, "config change reverted: " + why)
 
 
@@ -514,6 +559,7 @@ def _default_state():
         "floor": 0,  # lowest bundle generation accepted (anti-replay)
         "cfg_trial": False,  # a /config change awaiting confirmation
         "cfg_boots": 0,
+        "cfg_new": None,  # digest of the config.py that change installs
     }
 
 
@@ -532,15 +578,16 @@ def _floor_file():
 
 def read_state():
     st = _default_state()
-    parsed = False
+    stored_floor = None  # only a floor actually present in boot.json counts
     try:
         with open(STATE) as f:
             data = json.load(f)
         if isinstance(data, dict):
-            parsed = True
             for k in st:
                 if k in data:
                     st[k] = data[k]
+            if _valid_floor(data.get("floor")):
+                stored_floor = data["floor"]
     except Exception:
         pass
     if not isinstance(st["boots"], int) or st["boots"] < 0:
@@ -554,11 +601,13 @@ def read_state():
     if not isinstance(st["cfg_boots"], int) or st["cfg_boots"] < 0:
         st["cfg_boots"] = 0
     st["cfg_trial"] = st["cfg_trial"] is True
+    if not isinstance(st["cfg_new"], str):
+        st["cfg_new"] = None
     # Anti-replay floor: the highest of boot.json and its redundant copy. If
     # neither is readable, don't assume "nothing was ever confirmed" (that
     # would accept any old signed bundle): fall back to the newest installed
     # slot's generation. An explicit downgrade still gets past it.
-    floor = st["floor"] if parsed and _valid_floor(st["floor"]) else None
+    floor = stored_floor
     copy = _floor_file()
     if floor is None and copy is None:
         floor = max([generation(slot_manifest(s)) for s in SLOTS] + [0])
@@ -813,9 +862,10 @@ def reset():
     raise SystemExit(0)
 
 
-def reset_cause():
-    """pwron, watchdog (it expired: something hung), reboot (a deliberate
-    machine.reset()), or wdt if the platform can't say which."""
+def machine_reset_cause():
+    """machine.reset_cause() by name: pwron, hard, wdt, deepsleep, soft. This
+    is what launch() passes apps as info["reset_cause"]: apps written for
+    API 2 quarantine a hanging effect on "wdt" (review R3-M2)."""
     if machine is None:
         return "unknown"
     try:
@@ -824,10 +874,15 @@ def reset_cause():
         return "unknown"
     for name in ("PWRON_RESET", "HARD_RESET", "WDT_RESET", "DEEPSLEEP_RESET", "SOFT_RESET"):
         if getattr(machine, name, None) == c:
-            cause = name[:-6].lower()
-            break
-    else:
-        return str(c)
+            return name[:-6].lower()
+    return str(c)
+
+
+def reset_cause():
+    """pwron, watchdog (it expired: something hung), reboot (a deliberate
+    machine.reset()), or wdt if the platform can't say which. Apps get it
+    as info["reset_kind"]."""
+    cause = machine_reset_cause()
     if cause == "wdt":
         reason = watchdog_reason()
         if reason is not None:
@@ -847,10 +902,22 @@ def record_crash(e):
         pass
 
 
-def launch():
-    """main.py: count the boot, choose a slot and run it."""
-    st = read_state()
-    kind, what = decide(st)
+def config_boot(st, kind):
+    """Config-trial bookkeeping for a boot (mutates st; the caller writes it).
+    kind is what decide() chose: "app" or "safe"."""
+    if st["cfg_trial"] and st["cfg_new"] is not None and _file_digest("config.py") != st["cfg_new"]:
+        # The change was recorded but config.py isn't the file it installs:
+        # power was lost before the new file landed, or after a revert put
+        # the old one back. Either way the live config is the old one.
+        st["cfg_trial"] = False
+        st["cfg_boots"] = 0
+        st["cfg_new"] = None
+        try:
+            if exists("config.py") and exists(CONFIG_PREV):
+                os.remove(CONFIG_PREV)
+        except OSError:
+            pass
+        _event(st, "config change not applied (interrupted); keeping the current config")
     if st["cfg_trial"]:
         if st["cfg_boots"] >= 1 or kind == "safe":
             # The config change didn't confirm on its boot (or we're going
@@ -858,6 +925,13 @@ def launch():
             _revert_config(st, "it did not reach the network" if kind == "app" else "entering safe mode")
         else:
             st["cfg_boots"] += 1
+
+
+def launch():
+    """main.py: count the boot, choose a slot and run it."""
+    st = read_state()
+    kind, what = decide(st)
+    config_boot(st, kind)
     st["boots"] += 1
     try:
         write_state(st)
@@ -874,7 +948,8 @@ def launch():
         "event": st["event"],
         "events": st["events"],
         "previous": st["previous"],
-        "reset_cause": reset_cause(),
+        "reset_cause": machine_reset_cause(),  # the API 2 contract
+        "reset_kind": reset_cause(),  # API 3: watchdog / reboot told apart
         "cfg_trial": st["cfg_trial"],
     }
     watchdog()

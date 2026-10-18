@@ -97,11 +97,17 @@ def reset():
     bootmgr.reset()
 
 
-def reset_cause(cause):
-    """Refine the recovery layer's reset cause. API 3 already reports
-    watchdog/reboot; API 2 says "wdt" for both, so read REASON here, and
-    keep "wdt" if the platform can't say."""
-    if cause == "wdt" and not hasattr(bootmgr, "watchdog_reason"):
+def reset_cause(info):
+    """pwron, watchdog, reboot (or wdt if the platform can't say). The
+    recovery layer passes the machine-level cause as info["reset_cause"]
+    ("wdt" for both a hang and a deliberate reset on the rp2) and, from API
+    3, the classification as info["reset_kind"]. Without one, read REASON
+    here."""
+    kind = info.get("reset_kind")
+    if kind:
+        return kind
+    cause = info.get("reset_cause")
+    if cause == "wdt":
         try:
             reason = watchdog_reason()
         except Exception:

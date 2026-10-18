@@ -9,6 +9,7 @@ anything newer (app/recovery.py), and the recovery layer refuses a bundle
 that needs more than it has, before staging anything."""
 
 import json
+import time
 
 import pytest
 
@@ -135,3 +136,28 @@ def test_head_recovery_accepts_api3_and_refuses_api4(make_device, bundles, needs
     # Free heap after a collection is what's reported (not the pre-GC sawtooth).
     sup = wait_for(lambda: (lambda s: s if s["heap_live"] else None)(status(d)["supervisor"]), 15)
     assert sup["heap_live_min"] <= sup["heap_live"] and sup["heap_low_uncollected"] <= sup["heap_live"]
+
+
+def test_old_app_on_new_recovery_still_quarantines_a_hang(make_device, bundles, old):
+    """Review R3-M2, the other direction: an API 2 app (52cda75's) running on
+    this recovery layer, here after a rollback into it. Such apps quarantine
+    a hanging effect only when info["reset_cause"] is "wdt"; the recovery
+    layer used to pass its refined "watchdog" there instead, so the old app
+    restarted the effect and looped until safe mode."""
+    from test_runtime import HANG
+
+    d = make_device(old["bundle"])  # current recovery layer
+    running(d, "old", confirmed=True)
+    code, body = push(d, bundles["crash"])  # a newer app that dies on import
+    assert code == 200, body
+    wait_for(lambda: any("rolled back" in e for e in d.boot_state()["events"]), 90, what="rollback")
+    running(d, "old", timeout=60)
+    boots = len(d.boots)
+    code, _ = d.request("PUT", "/effects/hang?activate=1", body=HANG)
+    assert code == 200
+    wait_for(lambda: len(d.boots) > boots, 40, what="watchdog reset")
+    assert d.boots[boots] == "watchdog reset", d.boots
+    st = d.wait_http(30)
+    assert "hang" in st["effect"]["quarantined"], st["effect"]
+    time.sleep(12)  # longer than the 8 s watchdog: no second reset, no loop
+    assert len(d.boots) == boots + 1, d.boots

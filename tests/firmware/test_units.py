@@ -145,3 +145,35 @@ def test_review_round2_reproductions_fail_on_the_reviewed_commit(tmp_path):
     for finding in ("R2-H1 config with HTTP_PORT null", "R2-H1 unconfirmed", "R2-H2", "R2-H3", "R2-M4 floor after",
                     "R2-M4 floor of", "R2-M5", "R2-M6", "R2-M8", "R2-L7"):
         assert "FAIL " + finding in r.stdout, finding
+
+
+def _run_regressions3(firmware, tmp_path):
+    import os
+
+    work = tmp_path / ("rr3-" + firmware.parent.name)
+    work.mkdir()
+    env = dict(os.environ, DEVSIM_RESET="wdt", DEVSIM_WDT_REASON="1", DEVSIM_SCRATCH=str(work / ".scratch_regs"))
+    return subprocess.run([devsim.MICROPYTHON, str(HERE / "mp" / "regress_review3.py"), str(firmware), str(work)],
+                          capture_output=True, text=True, timeout=120, env=env)
+
+
+def test_review_round3_reproductions_are_fixed(tmp_path):
+    r = _run_regressions3(devsim.ROOT / "firmware", tmp_path)
+    print(r.stdout)
+    assert r.returncode == 0 and "FAIL" not in r.stdout, r.stdout + r.stderr
+
+
+def test_review_round3_reproductions_fail_on_the_reviewed_commit(tmp_path):
+    """The same script against 183d9b8 (the commit round 3 reviewed)."""
+    old = tmp_path / "old"
+    old.mkdir()
+    a = subprocess.run(["git", "archive", "183d9b8", "firmware"], cwd=devsim.ROOT, capture_output=True)
+    if a.returncode:
+        import pytest
+
+        pytest.skip("reviewed commit not in this checkout")
+    subprocess.run(["tar", "-x", "-C", str(old)], input=a.stdout, check=True)
+    r = _run_regressions3(old / "firmware", tmp_path)
+    print(r.stdout)
+    for finding in ("R3-H1", "R3-M2", "R3-M3", "R3-M4"):
+        assert "FAIL " + finding in r.stdout, finding

@@ -38,7 +38,7 @@ class Runtime:
             gc.threshold(GC_THRESHOLD)
         except (AttributeError, ValueError):
             pass
-        info["reset_cause"] = recovery.reset_cause(info.get("reset_cause"))
+        info["reset_cause"] = recovery.reset_cause(info)
         crumb = trace.take()
         self.info = info
         self.cfg = cfg
@@ -90,7 +90,14 @@ class Runtime:
         bootmgr.feed()
         self.engine.boot_quarantine(info.get("reset_cause"))
 
-        good = bootmgr.good_config() or {}
+        # Fallback Wi-Fi: the last good config's credentials, else (API 3)
+        # those of the config a /config change replaced.
+        fallbacks = bootmgr.fallback_configs() if hasattr(bootmgr, "fallback_configs") else [bootmgr.good_config() or {}]
+        good = {}
+        for c in fallbacks:
+            if c.get("WIFI_SSID") and (c.get("WIFI_SSID"), c.get("WIFI_PASSWORD")) != (cfg.WIFI_SSID, cfg.WIFI_PASSWORD):
+                good = c
+                break
         self.wifi = net.Wifi(cfg.WIFI_SSID, cfg.WIFI_PASSWORD, cfg.HOSTNAME,
                              fallback=(good.get("WIFI_SSID"), good.get("WIFI_PASSWORD")))
         self.mqtt = None

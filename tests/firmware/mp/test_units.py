@@ -477,6 +477,48 @@ def _cfg_reset():
     bootmgr._config = None
 
 
+def _boot():
+    """launch()'s state handling for one boot, without running the app."""
+    st = bootmgr.read_state()
+    kind, _ = bootmgr.decide(st)
+    bootmgr.config_boot(st, kind)
+    bootmgr.write_state(st)
+    return st
+
+
+class PowerCut(BaseException):
+    pass
+
+
+def _cut_writes_after(n):
+    """Make the (n+1)th write_atomic lose power before it lands."""
+    real = bootmgr.write_atomic
+    count = [0]
+
+    def write(path, data):
+        if count[0] == n:
+            raise PowerCut(path)
+        count[0] += 1
+        real(path, data)
+
+    bootmgr.write_atomic = write
+    return real
+
+
+OLDCFG = "WIFI_SSID = 'net'\nWIFI_PASSWORD = 'pw'\nHTTP_TOKEN = 'tttttttttt'\n"
+NEWCFG = {"WIFI_SSID": "wrong-net", "WIFI_PASSWORD": "pw", "HTTP_TOKEN": "t" * 10}
+
+
+def _live_ssid():
+    ns = {}
+    try:
+        with open("config.py") as f:
+            exec(f.read(), ns)
+    except OSError:
+        return None
+    return ns.get("WIFI_SSID")
+
+
 GOODCFG = {"WIFI_SSID": "net", "HTTP_TOKEN": "t" * 10, "HTTP_PORT": 8080}
 
 
@@ -523,16 +565,9 @@ def r2h1_config_trial_reverts_unless_confirmed():
     st = bootmgr.read_state()
     kind, _ = bootmgr.decide(st)
     assert kind == "app"
-    # Simulate launch() bookkeeping for two boots without confirmation.
+    # launch()'s bookkeeping for two boots without confirmation.
     for _ in range(2):
-        st = bootmgr.read_state()
-        bootmgr.decide(st)
-        if st["cfg_trial"]:
-            if st["cfg_boots"] >= 1:
-                bootmgr._revert_config(st, "test")
-            else:
-                st["cfg_boots"] += 1
-        bootmgr.write_state(st)
+        _boot()
     assert not bootmgr.read_state()["cfg_trial"]
     assert open("config.py").read() == old  # the previous config is back
     assert "reverted" in bootmgr.read_state()["event"]
@@ -1012,6 +1047,177 @@ def heap_marks_keep_the_lowest_per_site():
     hw.heap_mark("x")
     assert hw.heap_sites["x"] == b
     hw.heap_sites.clear()
+
+
+@test
+def r3h1_config_change_survives_a_power_cut_at_every_write():
+    """Review R3-H1: config.py used to be replaced before boot.json recorded
+    the trial, so a power cut between the two left the new (wrong) Wi-Fi
+    credentials live with no trial to revert them, and with no good
+    snapshot nothing to fall back to. Cut power before each write in turn:
+    every outcome is either the old config, or the new one on a trial that
+    reverts unless it is confirmed, and two unconfirmed boots always end on
+    the old config."""
+    for cut in range(4):  # 3 writes: config.prev.py, boot.json, config.py; 3 = no cut
+        _cfg_reset()
+        reset_flash()
+        install_commit(make_bundle(GOOD))
+        bootmgr.mark_healthy("a")
+        with open("config.py", "w") as f:
+            f.write(OLDCFG)
+        assert not bootmgr.exists(bootmgr.CONFIG_GOOD)  # the case with nothing else to fall back to
+        real = _cut_writes_after(cut)
+        try:
+            bootmgr.install_config(dict(NEWCFG))
+            assert cut == 3, cut
+        except PowerCut:
+            pass
+        finally:
+            bootmgr.write_atomic = real
+        st = bootmgr.read_state()
+        live = _live_ssid()
+        assert live == "net" or (live == "wrong-net" and st["cfg_trial"]), (cut, live, st["cfg_trial"])
+        st = _boot()
+        live = _live_ssid()
+        assert live == "net" or (live == "wrong-net" and st["cfg_trial"]), (cut, live, st)
+        _boot()  # the new config never reached the network
+        assert _live_ssid() == "net", cut
+        assert not bootmgr.read_state()["cfg_trial"], cut
+
+
+@test
+def r3h1_interrupted_revert_keeps_the_restored_config():
+    """A power cut after the revert put config.prev.py back but before
+    boot.json recorded it must not 'revert' again (which, with no
+    config.prev.py left, used to delete config.py)."""
+    _cfg_reset()
+    reset_flash()
+    install_commit(make_bundle(GOOD))
+    bootmgr.mark_healthy("a")
+    with open("config.py", "w") as f:
+        f.write(OLDCFG)
+    bootmgr.install_config(dict(NEWCFG))
+    _boot()  # boot 1: counted
+    st = bootmgr.read_state()
+    kind, _ = bootmgr.decide(st)
+    bootmgr.config_boot(st, kind)  # boot 2 reverts the file... and loses power before write_state
+    assert _live_ssid() == "net" and not bootmgr.exists(bootmgr.CONFIG_PREV)
+    st = _boot()
+    assert _live_ssid() == "net" and not st["cfg_trial"]
+    assert "not applied" in st["event"]
+
+
+@test
+def r3h1_safe_mode_config_keeps_the_previous_credentials():
+    """From safe mode there is no trial; the replaced config's credentials
+    stay a Wi-Fi fallback for safe mode and the app."""
+    _cfg_reset()
+    reset_flash()
+    bootmgr.write_state(bootmgr._default_state())
+    with open("config.py", "w") as f:
+        f.write(OLDCFG)
+    bootmgr.install_config(dict(NEWCFG), trial=False)
+    assert _live_ssid() == "wrong-net" and not bootmgr.read_state()["cfg_trial"]
+    fb = bootmgr.fallback_configs()
+    assert [c["WIFI_SSID"] for c in fb] == ["net"], fb
+    # A good snapshot comes first.
+    with open(bootmgr.CONFIG_GOOD, "w") as f:
+        json.dump({"WIFI_SSID": "good-net", "HTTP_TOKEN": "t" * 10}, f)
+    assert [c["WIFI_SSID"] for c in bootmgr.fallback_configs()] == ["good-net", "net"]
+    _cfg_reset()
+
+
+@test
+def r3m4_missing_floor_field_uses_the_slots():
+    """Review R3-M4: boot.json parsed but without "floor" (and no redundant
+    copy) read as a stored floor of 0, so an old signed bundle replayed."""
+    two_slots(g1=200, g2=200)
+    bootmgr.mark_healthy("b")
+    for state in ({}, {"active": "b", "previous": "a", "boots": 0}):
+        with open("boot.json", "w") as f:
+            json.dump(state, f)
+        try:
+            os.remove(bootmgr.FLOOR_FILE)
+        except OSError:
+            pass
+        st = bootmgr.read_state()
+        assert st["floor"] == 200 and st["floor_source"] == "slots", (state, st["floor"])
+        raises(lambda: install(make_bundle(GOOD, version="old", mutate=_gen(100))), "older")
+    # A stored floor still counts, and a stored 0 is still a real 0 with no copy.
+    with open("boot.json", "w") as f:
+        json.dump({"active": "b", "floor": 0}, f)
+    assert bootmgr.read_state()["floor"] == 0
+
+
+@test
+def r3m3_interrupted_discovery_is_retried():
+    """Review R3-M3: a session dropped part-way through discovery used to be
+    recorded as a complete pass (digest cached), so the reconnect skipped
+    the configs HA never got."""
+    import asyncio
+
+    from app import ha
+
+    class Cfg:
+        MQTT_PREFIX = "xmas_tree"
+        HA_PREFIX = "homeassistant"
+
+    class State:
+        listeners = []
+
+        def __init__(self):
+            self.params = ["param_old_gone"]
+
+        def get(self, k):
+            return list(self.params)
+
+        def set_ha_params(self, ids):
+            self.params = list(ids)
+
+    class Rt:
+        cfg = Cfg()
+        state = State()
+
+    class Bus:
+        def __init__(self, fail_at=None):
+            self.sent = []
+            self.fail_at = fail_at
+
+        async def publish(self, topic, payload, retain=False):
+            if self.fail_at is not None and len(self.sent) == self.fail_at:
+                return False  # the session dropped here
+            self.sent.append(topic)
+            return True
+
+    rt = Rt()
+    bus = Bus(fail_at=2)
+    h = ha.HA(rt, bus)
+    configs = [("homeassistant/sensor/xmas_tree/e%d/config" % i, "{}", "param_e%d" % i) for i in range(4)]
+    h._configs = lambda: iter(configs)
+    assert asyncio.run(h.publish_discovery()) is False  # interrupted on the third config
+    assert len(bus.sent) == 2 and h.discovered is None and h.discoveries == 0
+    assert rt.state.params == ["param_old_gone"]  # cleanup record untouched
+    # Reconnect, with the broker's retained availability replayed (force=False):
+    bus.fail_at = None
+    bus.sent = []
+    assert asyncio.run(h.publish_discovery()) is True
+    assert bus.sent[:4] == [t for t, _j, _o in configs]
+    assert bus.sent[4:] == ["homeassistant/number/xmas_tree/param_old_gone/config"]  # stale param removed
+    assert h.discoveries == 1 and rt.state.params == ["param_e%d" % i for i in range(4)]
+    # Complete and unchanged: nothing more to send.
+    bus.sent = []
+    assert asyncio.run(h.publish_discovery()) is False and bus.sent == []
+    # Interrupted during the cleanup of a removed param: retried too.
+    rt.state.params = ["param_e0", "param_e1", "param_e2", "param_e3", "param_gone2"]
+    configs.pop()
+    bus.fail_at = 3
+    bus.sent = []
+    assert asyncio.run(h.publish_discovery()) is False  # dropped at the removal publish
+    assert rt.state.params[-1] == "param_gone2"
+    bus.fail_at = None
+    bus.sent = []
+    assert asyncio.run(h.publish_discovery()) is True
+    assert "homeassistant/number/xmas_tree/param_gone2/config" in bus.sent
 
 
 gc.collect()
