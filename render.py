@@ -496,14 +496,14 @@ def watch(argv):
         return {p: p.stat().st_mtime for p in (ROOT / "effects").glob("*.py")}
 
     seen = None
-    print("watching effects/ (Ctrl-C to stop)")
+    print("watching effects/ (Ctrl-C to stop)", flush=True)
     try:
         while True:
             now = snapshot()
             if now != seen:
                 if seen is not None:
                     changed = sorted(p.name for p in now if now.get(p) != seen.get(p))
-                    print(f"\nchanged: {', '.join(changed)}")
+                    print(f"\nchanged: {', '.join(changed)}", flush=True)
                 seen = now
                 subprocess.run(cmd)
             time.sleep(0.4)

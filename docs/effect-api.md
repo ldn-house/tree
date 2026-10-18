@@ -123,6 +123,42 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 | `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
 | `./render.py all` | Every effect, plus `renders/overview.png` and `renders/summary.json`. |
 | `micropython tools/mp_check.py` | Allocation check under MicroPython. |
+| `./new_effect.py <name> [--flat]` | Scaffold `effects/<name>.py` from a template, register it in `EFFECTS` and render it once. |
+| `./render.py <effect> --watch` | Re-render on every save in `effects/`. |
+| `./serve.py` | Browser viewer (`viewer/`), hot-reloads changed effect files. |
+| `./push_effect.py <effect...> --host H [--activate]` | Run the local checks, then hot-push those effects to the tree over Wi-Fi (see below). |
 | `./smoke.py [effect...]` | Everything CI checks: metadata, pure imports, renders without exceptions, not all-black, within budget, deterministic, survives params at min/max and no coordinates, mpy-cross compile, MicroPython allocation check. |
 
 The renderer draws front, side and top projections of the real coordinates. Display brightness is gamma-lifted (1/2.2) so that dim output stays visible; the numbers in `metrics.json` are the actual output values.
+
+## Pushing one effect over OTA
+
+`./push_effect.py <effect...> --host H [--activate]` hot-pushes effect modules to a running tree, with no firmware build and no reboot:
+
+1. It runs the smoke checks on each effect and compiles it with mpy-cross. Failures stop the push.
+2. It uploads with `PUT /effects/<name>`, sending `X-Content-SHA256`. With `--activate`, the last effect is pushed with `?activate=1`.
+3. It re-reads `GET /effects` and checks that each effect is listed with `overlay: true` and no `error`.
+
+Other options:
+- `--delete` removes a pushed overlay, reverting to the firmware's copy.
+- `--mpy` pushes mpy-cross bytecode. The `.mpy` version must match the device's MicroPython.
+
+Credentials are read the way `flash.py` reads them:
+- **Token**: from `--token`, `$TREE_TOKEN` or `HTTP_TOKEN` in `config.py`, sent as `Authorization: Bearer`.
+- **Signature**: when `config.py` sets `UPDATE_KEY`, every push carries `X-Signature`, the hex HMAC-SHA256 keyed with `UPDATE_KEY` of `b"tree-effect\n" + name + b"\n" + body`. The name is included, so a signed effect can't be replayed under another name.
+- **Port**: from `HTTP_PORT` or `OTA_PORT` in `config.py`, else 8080.
+
+`--config PATH` reads another `config.py`. `tools/mock_tree.py [--token T] [--update-key K]` mirrors the endpoints for local testing.
+
+The firmware (`firmware/app/api.py`) defines the device side:
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /effects` | `{"effects": [{"name", "duration_ms", "needs_coords", "params": {k: {"default", "min", "max", "value"}}, "overlay", "eligible", "error"}], "running", "fx_error"}` |
+| `PUT` or `POST /effects/<name>` | Auth required (401). If the device has `UPDATE_KEY`, `X-Signature` must verify before any of the code runs (403). The body is module source, or `.mpy` (sniffed, or `?format=mpy`), at most 32 KB. Optional `X-Content-SHA256`; `?activate=1` also selects the effect. The device compile-checks the module, imports it under a staging name, builds `Effect(ctx)` and renders t=0 and t=33. Only then does it replace the overlay (`/fx/fx_<name>.py`) and hot-reload. Replies `200 {"effect", "overlay": true, "activated", "duration_ms", "params", "needs_coords"}`, or `400 {"error"}` and keeps the previous version. |
+| `DELETE /effects/<name>` | Auth required. Removes the overlay. |
+
+Limits:
+- Only effect modules can be pushed. Shared modules (`_util`, `_output`, `_coords`) and `__init__` ship with firmware.
+- A pushed effect with a new name is added without editing `EFFECTS`.
+- Installing new firmware wipes all overlays.
