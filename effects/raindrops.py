@@ -31,6 +31,8 @@ PALETTE = bytes((
 AMBIENT = (0, 0, 1)
 U = 1024  # positions in 1/U tree heights
 D2_SHIFT = 5  # squared distances stored >> D2_SHIFT to fit 16 bits
+BIN_SHIFT = 8  # distance bins of 256 stored units
+BINS = 65536 >> BIN_SHIFT
 
 
 class Effect:
@@ -56,13 +58,30 @@ class Effect:
                 self.lit[m] = i
                 m += 1
         self.m = m
-        # Per ripple: squared distance from its centre to every LED, filled
-        # in when it spawns so each frame only compares numbers.
-        self.d2 = [array("H", bytes(2 * n)) for _ in range(SLOTS)]
+        # Per ripple, filled in when it spawns: the LEDs ordered by squared
+        # distance from its centre (a counting sort into BINS distance
+        # bins), with those distances alongside, so each frame only visits
+        # the LEDs in the distance band its ring currently covers.
+        self.order = [array("H", bytes(2 * n)) for _ in range(SLOTS)]
+        self.dist = [array("H", bytes(2 * n)) for _ in range(SLOTS)]
+        self.bin_start = [array("H", bytes(2 * (BINS + 1))) for _ in range(SLOTS)]
+        self.tmp = array("H", bytes(2 * n))
+        self.cursor = array("H", bytes(2 * (BINS + 1)))
         self.start = array("i", bytes(4 * SLOTS))
         self.color = bytearray(SLOTS)
         self.alive = bytearray(SLOTS)
-        self.acc = array("H", bytes(6 * n))
+        # Each frame starts from this background (ambient on every lit
+        # position) and rings add into it, clamping at 255. Every
+        # contribution is positive, so that equals summing and then clamping.
+        ar, ag, ab = AMBIENT
+        self.bg = bytearray(3 * n)
+        for i in range(n):
+            if lay.known[i]:
+                self.bg[3 * i] = ar
+                self.bg[3 * i + 1] = ag
+                self.bg[3 * i + 2] = ab
+        self.frame = None
+        self.view = None
         self.rate = Param(ctx, "rate", 1.5, 65536 / 1000)  # spawn chance per ms, /65536
         self.radius = Param(ctx, "radius", 0.4, U)
         self.shell = int(SHELL * U)
@@ -78,13 +97,39 @@ class Effect:
         px = self.px
         py = self.py
         pz = self.pz
-        d2 = self.d2[slot]
-        for i in range(self.n):
+        lit = self.lit
+        tmp = self.tmp
+        cursor = self.cursor
+        start = self.bin_start[slot]
+        order = self.order[slot]
+        dist = self.dist[slot]
+        for b in range(BINS + 1):
+            cursor[b] = 0
+        m = self.m
+        for j in range(m):
+            i = lit[j]
             dx = px[i] - cx
             dy = py[i] - cy
             dz = pz[i] - cz
             d = (dx * dx + dy * dy + dz * dz) >> D2_SHIFT
-            d2[i] = d if d < 65535 else 65535
+            if d > 65535:
+                d = 65535
+            tmp[j] = d
+            cursor[d >> BIN_SHIFT] += 1
+        total = 0
+        for b in range(BINS):
+            n_b = cursor[b]
+            start[b] = total
+            cursor[b] = total
+            total += n_b
+        start[BINS] = total
+        for j in range(m):
+            d = tmp[j]
+            b = d >> BIN_SHIFT
+            k = cursor[b]
+            cursor[b] = k + 1
+            order[k] = lit[j]
+            dist[k] = d
         self.start[slot] = t_ms
         self.color[slot] = self.rand(8) % (len(PALETTE) // 3)
         self.alive[slot] = 1
@@ -108,13 +153,14 @@ class Effect:
         if free >= 0 and (busy == 0 or self.rand(16) < self.rate.get() * dt):
             self.spawn(free, t_ms)
 
-        n = self.n
-        acc = self.acc
-        for i in range(3 * n):
-            acc[i] = 0
+        # Ambient everywhere first (a C-level copy).
+        if frame is not self.frame:
+            self.frame = frame
+            self.view = memoryview(frame)
+        self.view[0:len(self.bg)] = self.bg
         rmax = self.radius.get()
         shell = self.shell
-        known = self.known
+        last_bin = BINS - 1
         for s in range(SLOTS):
             if not alive[s]:
                 continue
@@ -135,10 +181,17 @@ class Effect:
             cr = PALETTE[o] * fade >> 8
             cg = PALETTE[o + 1] * fade >> 8
             cb = PALETTE[o + 2] * fade >> 8
-            d2 = self.d2[s]
-            for i in range(n):
-                d = d2[i]
-                if d > lo2 and d < hi2 and known[i]:
+            order = self.order[s]
+            dist = self.dist[s]
+            start = self.bin_start[s]
+            # Only the distance bins the ring's shell overlaps.
+            b0 = (lo2 + 1) >> BIN_SHIFT
+            b1 = (hi2 - 1) >> BIN_SHIFT
+            if b1 > last_bin:
+                b1 = last_bin
+            for k in range(start[b0], start[b1 + 1]):
+                d = dist[k]
+                if d > lo2 and d < hi2:
                     e = d - r2
                     if e < 0:
                         e = -e
@@ -146,21 +199,15 @@ class Effect:
                     if e < shell:
                         q = (shell - e) * 256 // shell
                         b = q * q >> 8
-                        k = 3 * i
-                        acc[k] += cr * b >> 8
-                        acc[k + 1] += cg * b >> 8
-                        acc[k + 2] += cb * b >> 8
-        ar, ag, ab = AMBIENT
-        for i in range(n):
-            k = 3 * i
-            if known[i]:
-                v = acc[k] + ar
-                frame[k] = v if v < 255 else 255
-                v = acc[k + 1] + ag
-                frame[k + 1] = v if v < 255 else 255
-                v = acc[k + 2] + ab
-                frame[k + 2] = v if v < 255 else 255
-            else:
-                frame[k] = 0
-                frame[k + 1] = 0
-                frame[k + 2] = 0
+                        vr = cr * b >> 8
+                        vg = cg * b >> 8
+                        vb = cb * b >> 8
+                        if vr or vg or vb:
+                            j = 3 * order[k]
+                            v = frame[j] + vr
+                            frame[j] = v if v < 255 else 255
+                            v = frame[j + 1] + vg
+                            frame[j + 1] = v if v < 255 else 255
+                            v = frame[j + 2] + vb
+                            frame[j + 2] = v if v < 255 else 255
+

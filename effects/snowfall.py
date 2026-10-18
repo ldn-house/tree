@@ -32,7 +32,8 @@ FLAKE = (190, 215, 255)
 SETTLED = (255, 255, 255)
 AMBIENT = (0, 0, 2)
 U = 1024  # positions in 1/U tree heights
-BANDS = 16  # height bands for the radius profile and the LED index
+BANDS = 16  # height bands for the radius profile
+CELL = 64  # grid cell size for finding LEDs near a flake, 1/U tree heights
 SUB = 16  # flake heights are kept in 1/(U*SUB) for smooth slow motion
 
 
@@ -100,7 +101,40 @@ class Effect:
         for f in range(m):
             self.spawn(f, self.rand(10) * (U + U // 16) // 1024, 0)
             self.target[f] = -1
+        # A grid over (height, x) in CELL-sized cells, LEDs sorted by cell,
+        # so a flake scans one short run of LEDs per grid row near it.
+        xs = [px[i] for i in order]
+        self.xmin = min(xs) if xs else 0
+        cols = ((max(xs) if xs else 0) - self.xmin) // CELL + 1
+        rows = U // CELL + 2
+        cells = sorted(order, key=lambda i: (py[i] // CELL) * cols + (px[i] - self.xmin) // CELL)
+        self.grid = array("H", cells)
+        self.cell_start = array("H", bytes(2 * (rows * cols + 1)))
+        c = 0
+        for k, i in enumerate(cells):
+            cell = (py[i] // CELL) * cols + (px[i] - self.xmin) // CELL
+            while c <= cell:
+                self.cell_start[c] = k
+                c += 1
+        while c <= rows * cols:
+            self.cell_start[c] = len(cells)
+            c += 1
+        self.rows = rows
+        self.cols = cols
+
+        # Each frame starts from this background (ambient on every lit
+        # position) and only the LEDs near flakes are repainted.
+        ar, ag, ab = AMBIENT
+        self.bg = bytearray(3 * n)
+        for i in range(n):
+            if lay.known[i]:
+                self.bg[3 * i] = ar
+                self.bg[3 * i + 1] = ag
+                self.bg[3 * i + 2] = ab
+        self.frame = None
+        self.view = None
         self.acc = array("H", bytes(2 * n))
+        self.touched = array("H", bytes(2 * n))
         self.glow = int(GLOW * U)
         self.sway_amp = int(SWAY * U)
         self.speed = Param(ctx, "speed", 1.0, 256)
@@ -141,89 +175,117 @@ class Effect:
         if count < 1:
             count = 1
         speed = self.speed.get()
-        n = self.n
         acc = self.acc
-        for i in range(n):
-            acc[i] = 0
+        touched = self.touched
+        nt = 0
         px = self.px
         py = self.py
         pz = self.pz
-        order = self.order
-        band_start = self.band_start
+        grid = self.grid
+        cell_start = self.cell_start
+        cols = self.cols
+        last_row = self.rows - 1
+        xmin = self.xmin
         bw = self.bw
         radius = self.radius
         glow = self.glow
         glow2 = glow * glow
-        top = (U + U // 16) * SUB
+        fy = self.fy
+        fu = self.fu
+        fv = self.fv
+        vel = self.vel
+        sway = self.sway
+        target = self.target
+        landed = self.landed
+        since = self.since
+        amp = self.sway_amp
+        fall = dt * speed
+        tsway = t_ms >> 5
         for f in range(count):
-            led = self.landed[f]
+            led = landed[f]
             if led >= 0:
                 # Settled: hold, then melt.
-                age = t_ms - self.since[f]
+                age = t_ms - since[f]
                 if age >= LINGER_MS:
                     self.spawn(f, U + U // 16, t_ms)
                     continue
-                b = 255 - age * 255 // LINGER_MS
-                v = acc[led] + 1024 + b  # values over 1024 mark settled LEDs
+                v = acc[led]
+                if v == 0:
+                    touched[nt] = led
+                    nt += 1
+                v += 1024 + 255 - age * 255 // LINGER_MS  # over 1024 marks settled
                 acc[led] = v if v < 2047 else 2047
                 continue
-            y = self.fy[f] - (self.vel[f] * dt * speed >> 8) * SUB // 1000
+            y = fy[f] - (vel[f] * fall >> 8) * SUB // 1000
             if y < -glow * SUB:
                 self.spawn(f, U + U // 16, t_ms)
                 continue
-            self.fy[f] = y
+            fy[f] = y
             y = y // SUB
             # Horizontal position: disc point x tree radius at this height,
             # plus a gentle sway.
             b = y // bw
             r = radius[b] if 0 <= b <= BANDS else (radius[0] if b < 0 else radius[BANDS])
-            s = self.sway[f] + (t_ms >> 5)
-            sx = (SIN[s & 255] - 128) * self.sway_amp >> 7
-            sz = (SIN[(s + 64) & 255] - 128) * self.sway_amp >> 7
-            x = (self.fu[f] * r >> 8) + sx
-            z = (self.fv[f] * r >> 8) + sz
-            lo = (y - glow) // bw
-            hi = (y + glow) // bw + 1
-            if lo < 0:
-                lo = 0
-            if hi > BANDS + 1:
-                hi = BANDS + 1
-            if lo >= hi:
+            s = sway[f] + tsway
+            x = (fu[f] * r >> 8) + ((SIN[s & 255] - 128) * amp >> 7)
+            z = (fv[f] * r >> 8) + ((SIN[(s + 64) & 255] - 128) * amp >> 7)
+            r0 = (y - glow) // CELL
+            r1 = (y + glow) // CELL
+            if r0 < 0:
+                r0 = 0
+            if r1 > last_row:
+                r1 = last_row
+            c0 = (x - glow - xmin) // CELL
+            c1 = (x + glow - xmin) // CELL
+            if c0 < 0:
+                c0 = 0
+            if c1 >= cols:
+                c1 = cols - 1
+            if r0 > r1 or c0 > c1:
                 continue
             best = -1
             best_d2 = glow2
-            for k in range(band_start[lo], band_start[hi]):
-                i = order[k]
-                dx = px[i] - x
-                if dx >= glow or dx <= -glow:
-                    continue
-                dz = pz[i] - z
-                if dz >= glow or dz <= -glow:
-                    continue
-                dy = py[i] - y
-                d2 = dx * dx + dy * dy + dz * dz
-                if d2 < glow2:
-                    q = (glow2 - d2) * 255 // glow2
-                    acc[i] += q * q >> 8
-                    if d2 < best_d2:
-                        best_d2 = d2
-                        best = i
-            if best >= 0 and self.target[f] >= 0 and y <= self.target[f]:
-                self.landed[f] = best
-                self.since[f] = t_ms
+            for row in range(r0, r1 + 1):
+                base = row * cols
+                for k in range(cell_start[base + c0], cell_start[base + c1 + 1]):
+                    i = grid[k]
+                    dz = pz[i] - z
+                    if dz >= glow or dz <= -glow:
+                        continue
+                    dx = px[i] - x
+                    dy = py[i] - y
+                    d2 = dx * dx + dy * dy + dz * dz
+                    if d2 < glow2:
+                        q = (glow2 - d2) * 255 // glow2
+                        q = q * q >> 8
+                        if q:
+                            v = acc[i]
+                            if v == 0:
+                                touched[nt] = i
+                                nt += 1
+                            acc[i] = v + q
+                        if d2 < best_d2:
+                            best_d2 = d2
+                            best = i
+            if best >= 0 and 0 <= target[f] and y <= target[f]:
+                landed[f] = best
+                since[f] = t_ms
 
+        # Ambient everywhere (a C-level copy), then paint the LEDs touched.
+        if frame is not self.frame:
+            self.frame = frame
+            self.view = memoryview(frame)
+        self.view[0:len(self.bg)] = self.bg
         fr, fg, fb = FLAKE
         sr, sg, sb = SETTLED
         ar, ag, ab = AMBIENT
-        known = self.known
-        for i in range(n):
-            k = 3 * i
-            if not known[i]:
-                frame[k] = 0
-                frame[k + 1] = 0
-                frame[k + 2] = 0
-                continue
+        for j in range(nt):
+            i = touched[j]
             v = acc[i]
+            acc[i] = 0
+            if v == 0:
+                continue
+            k = 3 * i
             if v >= 1024:
                 # A settled flake (plus any falling glow on top).
                 v -= 1024
