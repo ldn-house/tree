@@ -8,7 +8,7 @@
 Checks, per effect:
 - module metadata: NAME matches, DURATION_MS > 0, PARAMS are (default, min, max)
 - renders N seconds under CPython with real coordinates: no exceptions, not
-  all black, output never above the power budget
+  all black, estimated current never above the cap (amps)
 - deterministic: the same seed renders byte-identical frames twice
 - survives every param at its min and its max, and having no coordinates
 - compiles with mpy-cross (via `uvx --from mpy-cross`, when uv is available)
@@ -77,6 +77,17 @@ def check_imports(rep, name):
                       f"imports {m} (line {node.lineno}); effects must be pure, use ctx.random for randomness")
 
 
+def check_power(rep, name, m, label=""):
+    """The output stage must hold every frame within the current cap."""
+    p = m["power"]
+    peak = p["current_a"]["peak"]
+    suffix = f" with {label}" if label else ""
+    rep.check(peak is None or peak <= p["limit_a"], name,
+              f"peak current {peak} A above the {p['limit_a']} A cap{suffix}")
+    rep.check(p["over_budget_frames"] == 0, name,
+              f"{p['over_budget_frames']} frames above the {p['budget_channel_sum']} channel-sum budget{suffix}")
+
+
 def check_render(rep, name, mod, coords, seconds, fps):
     res = render.run_effect(name, seconds, fps, seed=1, coords=coords)
     m = res["metrics"]
@@ -85,12 +96,12 @@ def check_render(rep, name, mod, coords, seconds, fps):
     rep.check(not m["exceptions"], name, f"exception at frame {m['exceptions'][0]['frame'] if m['exceptions'] else ''}")
     rep.check(m["frames"] == m["frames_requested"], name, f"rendered {m['frames']}/{m['frames_requested']} frames")
     rep.check(not m["all_black"], name, "output is black for the whole run")
-    rep.check(m["power"]["over_budget_frames"] == 0, name, f"{m['power']['over_budget_frames']} frames above the power budget")
+    check_power(rep, name, m)
     again = render.run_effect(name, seconds, fps, seed=1, coords=coords)["metrics"]
     rep.check(again["frames_sha256"] == m["frames_sha256"], name, "not deterministic for a fixed seed")
     p = m["power"]
     print(f"       {m['frames']} frames, cap {100 * p['cap_engaged_rate']:.0f}%, "
-          f"peak {p['current_ma']['peak']} mA, lit {m['lit_fraction']['mean']:.0%}, "
+          f"peak {p['current_a']['peak']:.2f} A, lit {m['lit_fraction']['mean']:.0%}, "
           f"{res['perf']['render_ms_mean']} ms/frame")
 
 
@@ -105,7 +116,7 @@ def check_variants(rep, name, mod, coords, fps):
         if m["exceptions"]:
             print(m["exceptions"][0]["error"])
         rep.check(not m["exceptions"], name, f"exception with {label}")
-        rep.check(m["power"]["over_budget_frames"] == 0, name, f"above power budget with {label}")
+        check_power(rep, name, m, label)
         if label == "no coordinates" and not mod.NEEDS_COORDS:
             rep.check(not m["all_black"], name, "black without coordinates but NEEDS_COORDS is False")
 
