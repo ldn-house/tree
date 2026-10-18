@@ -123,5 +123,6 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 | `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
 | `./render.py all` | Every effect, plus `renders/overview.png` and `renders/summary.json`. |
 | `micropython tools/mp_check.py` | Allocation check under MicroPython. |
+| `./smoke.py [effect...]` | Everything CI checks: metadata, pure imports, renders without exceptions, not all-black, within budget, deterministic, survives params at min/max and no coordinates, mpy-cross compile, MicroPython allocation check. |
 
 The renderer draws front, side and top projections of the real coordinates. Display brightness is gamma-lifted (1/2.2) so that dim output stays visible; the numbers in `metrics.json` are the actual output values.

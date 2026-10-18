@@ -141,6 +141,7 @@ Check changes headlessly:
 ./render.py all                 # every effect + renders/overview.png
 ./render.py <effect> --watch    # re-render on save
 micropython tools/mp_check.py   # every render() is allocation-free on MicroPython
+./smoke.py                      # all checks CI runs (.github/workflows/effects.yml)
 ```
 
 Attach `sheet.png` (and the GIF) to PRs that change an effect.
