@@ -28,10 +28,16 @@ _FAILED = (-1, -2, -3)
 
 
 class Wifi:
-    def __init__(self, ssid, password, hostname):
+    def __init__(self, ssid, password, hostname, fallback=None):
         self.ssid = ssid
         self.password = password
         self.hostname = hostname
+        # The last config that reached the network: tried in turn after
+        # repeated failures, so a bad new SSID/password can't strand the tree.
+        self.creds = [(ssid, password)]
+        if fallback and fallback[0] and tuple(fallback) != (ssid, password):
+            self.creds.append(tuple(fallback))
+        self.using_fallback = False
         self.wlan = None
         self.state = "off" if not ssid else "init"
         self.up = False
@@ -89,13 +95,17 @@ class Wifi:
 
     def _connect(self, now):
         self.attempts += 1
+        # Two attempts per credential set, alternating when there's a fallback.
+        i = ((self.attempts - 1) // 2) % len(self.creds)
+        ssid, password = self.creds[i]
+        self.using_fallback = i > 0
         try:
             if self.attempts > 1:
                 self.wlan.disconnect()
-            self.wlan.connect(self.ssid, self.password)
+            self.wlan.connect(ssid, password)
             self.state = "connecting"
             self.since = now
-            log("wifi: connecting to %s (attempt %d)" % (self.ssid, self.attempts))
+            log("wifi: connecting to %s (attempt %d%s)" % (ssid, self.attempts, ", last good config" if i else ""))
         except Exception as e:
             log("wifi: connect() failed: %r" % (e,))
             self._fail(now)
@@ -163,4 +173,5 @@ class Wifi:
                 self.hb = time.ticks_ms()
 
     def status(self):
-        return {"state": self.state, "ip": self.ip, "rssi": self.rssi(), "connects": self.connects, "failures": self.failures}
+        return {"state": self.state, "ip": self.ip, "rssi": self.rssi(), "connects": self.connects,
+                "failures": self.failures, "fallback": self.using_fallback}

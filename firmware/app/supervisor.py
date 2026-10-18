@@ -30,6 +30,7 @@ PERIOD_MS = 500
 STARTUP_GRACE_MS = 5000
 PERSIST_MS = 2000  # a problem must last this long before feeding stops
 GC_EVERY_MS = 10000
+RESERVE_EVERY_S = 600
 
 
 def take_reason():
@@ -67,6 +68,10 @@ class Supervisor:
         # (heap_min mostly measures garbage not collected yet).
         self.heap_live_min = None
         self._gc_at = 0
+        self.config_done = False
+        # First reserve check 30 s after boot, then every RESERVE_EVERY_S.
+        self._reserve_at = 30 - RESERVE_EVERY_S
+        self._reserve_task = None
 
     def heartbeat(self, name, obj, max_ms):
         def check():
@@ -91,7 +96,7 @@ class Supervisor:
 
     def _trial_ready(self):
         rt = self.rt
-        if rt.cfg.WIFI_SSID and not rt.wifi.up:
+        if rt.cfg.WIFI_SSID and (not rt.wifi.up or rt.wifi.using_fallback):
             return False
         if not rt.http.alive():
             return False
@@ -99,8 +104,40 @@ class Supervisor:
             return False
         return True
 
+    def _config_health(self, uptime_s):
+        """Promote the running config to the recovery fallback only once it
+        has reached the network with its own credentials; a /config change
+        that hasn't by the deadline is reverted (reboot; bootmgr restores
+        the previous config.py)."""
+        rt = self.rt
+        if self.config_done:
+            return
+        if uptime_s >= rt.cfg.TRIAL_HEALTHY_S and self._trial_ready():
+            self.config_done = True
+            if bootmgr.promote_config():
+                log("supervisor: config confirmed and saved as the recovery fallback")
+            rt.info["cfg_trial"] = False
+        elif rt.info.get("cfg_trial") and uptime_s >= rt.cfg.TRIAL_DEADLINE_S:
+            rt.request_reboot("config change did not reach the network after %d s; reverting" % uptime_s)
+
+    async def _reserve(self):
+        for _ in bootmgr.reserve_steps():
+            await asyncio.sleep_ms(5)
+
+    def _maintain(self, uptime_s):
+        rt = self.rt
+        if uptime_s - self._reserve_at < RESERVE_EVERY_S or rt.calib.playing() or rt.updates.busy:
+            return
+        if self._reserve_task is not None and not self._reserve_task.done():
+            return
+        self._reserve_at = uptime_s
+        if bootmgr.reserve_size() != bootmgr.RESERVE_BYTES:
+            self._reserve_task = asyncio.create_task(self._reserve())
+
     def _health(self, uptime_s):
         rt = self.rt
+        self._config_health(uptime_s)
+        self._maintain(uptime_s)
         if rt.info.get("trial") and not self.confirmed:
             if uptime_s >= rt.cfg.TRIAL_HEALTHY_S and self._trial_ready():
                 self.confirmed = True

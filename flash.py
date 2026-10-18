@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-RECOVERY = ["bootmgr.py", "safemode.py", "boot.py", "main.py"]
+RECOVERY = ["cfgcheck.py", "bootmgr.py", "safemode.py", "boot.py", "main.py"]
 REPO = "ldn-house/tree"
 
 
@@ -148,28 +148,26 @@ CLEANUP = (
 
 
 def check_config(path: Path):
-    """Refuse to install a config.py the device couldn't use (review M9):
-    it must run, and have the settings recovery depends on."""
+    """Refuse to install a config.py the device would reject (review M9,
+    R2-H1): the same schema the firmware uses (firmware/cfgcheck.py) checks
+    every setting's type and range. Returns the values to send over Wi-Fi."""
+    sys.path.insert(0, str(ROOT / "firmware"))
+    try:
+        import cfgcheck
+    finally:
+        sys.path.pop(0)
     try:
         cfg = runpy.run_path(str(path))
     except Exception as e:
         die(f"{path} does not load: {e!r}")
-    for k in ("WIFI_SSID", "HTTP_TOKEN"):
-        if not isinstance(cfg.get(k), str) or not cfg[k]:
-            die(f"{path} has no {k}")
-    if len(cfg["HTTP_TOKEN"]) < 8:
-        die("HTTP_TOKEN must be at least 8 characters")
-    out = {}
-    for k, v in cfg.items():
-        if not k.isupper():
-            continue
-        if isinstance(v, (tuple, list)) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
-            out[k] = list(v)  # e.g. LED_TIMING_NS; the device writes it back as a tuple
-        elif isinstance(v, (str, int, float, bool, type(None))):
-            out[k] = v
-        else:
-            die(f"config.py: {k} can't be sent to the device (use strings, numbers, bools or lists of numbers)")
-    return out
+    values = {k: v for k, v in cfg.items() if k.isupper()}
+    clean, errors = cfgcheck.validate(values)
+    if errors:
+        die(f"{path} would be rejected by the device:\n  " + "\n  ".join(errors))
+    unknown = sorted(set(values) - set(cfgcheck.SCHEMA))
+    if unknown:
+        print(f"note: {path}: not device settings, not sent over Wi-Fi: {', '.join(unknown)}")
+    return {k: list(v) if isinstance(v, tuple) else v for k, v in clean.items()}
 
 
 def usb(bundle: Path, extra_files):

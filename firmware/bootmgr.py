@@ -47,6 +47,8 @@ import json
 import os
 import sys
 
+import cfgcheck
+
 try:
     import machine
 except ImportError:  # pragma: no cover
@@ -62,7 +64,7 @@ try:
 except ImportError:  # pragma: no cover
     import ubinascii as binascii
 
-API = 1
+API = 2  # 2: cfgcheck.py is part of the recovery layer
 WDT_MS = 8000
 MAX_FAILED_BOOTS = 3
 
@@ -84,8 +86,10 @@ FREE_MARGIN = 32768
 STAGE = FW + "/new"
 RESERVE = FW + "/reserve.bin"
 RESERVE_BYTES = 256 * 1024
-CONFIG_GOOD = "config.good.json"
-CONFIG_REQUIRED = ("WIFI_SSID", "HTTP_TOKEN")
+RESERVE_HEADROOM = 128 * 1024  # free space to leave when (re)building the reserve
+FLOOR_FILE = FW + "/floor.json"  # redundant copy of the anti-replay floor
+CONFIG_GOOD = "config.good.json"  # last config confirmed to reach the network
+CONFIG_PREV = "config.prev.py"  # config.py before an unconfirmed /config change
 CONFIG_TYPES = (str, int, float, bool, type(None))
 
 _wdt = None
@@ -145,6 +149,15 @@ def rmtree(path):
         os.remove(path)
 
 
+def tree_size(path):
+    """Bytes in the files under path (an estimate of what deleting it frees)."""
+    if not exists(path):
+        return 0
+    if not is_dir(path):
+        return os.stat(path)[6]
+    return sum(tree_size(path + "/" + e) for e in os.listdir(path))
+
+
 def write_atomic(path, data):
     """Write data to path so readers see the old or the new file, never a
     mix: LittleFS rename replaces the target atomically. Any failure leaves
@@ -192,26 +205,47 @@ def reclaim():
     return None if before is None or after is None else after - before
 
 
-def ensure_reserve():
-    """Keep RESERVE_BYTES set aside so recovery can always install a bundle
-    and write state even if something fills the flash. Best effort."""
-    if exists(RESERVE):
-        return
-    free = free_bytes()
-    if free is None or free < 3 * RESERVE_BYTES:
-        return
+def reserve_size():
     try:
-        makedirs(FW)
-        block = bytes(4096)
-        with open(RESERVE, "wb") as f:
-            for _ in range(RESERVE_BYTES // 4096):
-                f.write(block)
-    except OSError as e:
-        log("cannot create reserve: %r" % (e,))
+        return os.stat(RESERVE)[6]
+    except OSError:
+        return 0
+
+
+def reserve_steps():
+    """Generator: (re)build the recovery reserve to RESERVE_BYTES, one 4 KB
+    block per step, resuming a partial file (power cut mid-creation) and
+    truncating an oversized one. Stops quietly if there isn't room for it
+    plus RESERVE_HEADROOM. Async callers yield between steps."""
+    have = reserve_size()
+    if have > RESERVE_BYTES:
         try:
             os.remove(RESERVE)
         except OSError:
-            pass
+            return
+        have = 0
+    missing = RESERVE_BYTES - have
+    if missing <= 0:
+        return
+    free = free_bytes()
+    if free is None or free < missing + RESERVE_HEADROOM:
+        return
+    block = bytes(4096)
+    try:
+        makedirs(FW)
+        with open(RESERVE, "ab") as f:
+            while missing > 0:
+                n = min(4096, missing)
+                f.write(block[:n])
+                missing -= n
+                yield
+    except OSError as e:
+        log("cannot build reserve: %r" % (e,))
+
+
+def ensure_reserve():
+    for _ in reserve_steps():
+        feed()
 
 
 def eq(a, b):
@@ -264,60 +298,47 @@ def slot_manifest(slot):
 _config = None
 
 
-def _config_ok(values):
-    for k in CONFIG_REQUIRED:
-        v = values.get(k)
-        if not isinstance(v, str) or not v:
-            return "%s is missing" % k
-    if len(values["HTTP_TOKEN"]) < 8:
-        return "HTTP_TOKEN is shorter than 8 characters"
-    return None
+def _read_good():
+    try:
+        with open(CONFIG_GOOD) as f:
+            good = json.load(f)
+    except Exception:
+        return None
+    clean, errors = cfgcheck.validate(good) if isinstance(good, dict) else ({}, ["bad"])
+    return None if errors else clean
 
 
 def load_config():
-    """Settings from config.py. If it is missing, broken or lacks the
-    required keys, fall back to the last config that did load
-    (config.good.json), so the board stays reachable and can be fixed over
-    Wi-Fi. Returns (values, source, error)."""
+    """Settings from config.py, checked against cfgcheck.SCHEMA. If it is
+    missing, fails to import or has any invalid setting, the last config
+    confirmed to reach the network (config.good.json) is used instead, so
+    the board stays reachable and can be fixed over Wi-Fi.
+    Returns (values, source, error)."""
     global _config
     if _config is not None:
         return _config
     values = {}
-    error = None
     try:
         import config
 
         for k in dir(config):
-            v = getattr(config, k)
-            if k.isupper() and isinstance(v, CONFIG_TYPES + (list, tuple)):
-                values[k] = v
-        error = _config_ok(values)
+            if k.isupper():
+                values[k] = getattr(config, k)
+        clean, errors = cfgcheck.validate(values)
+        error = "; ".join(errors) if errors else None
     except BaseException as e:
+        clean = {}
         error = "config.py failed to load: %r" % (e,)
     if error is None:
-        try:
-            with open(CONFIG_GOOD) as f:
-                good = json.load(f)
-        except Exception:
-            good = None
-        if good != values:
-            try:
-                write_atomic(CONFIG_GOOD, json.dumps(values).encode())
-            except Exception as e:
-                log("cannot save config snapshot: %r" % (e,))
-        _config = (values, "config.py", None)
+        _config = (clean, "config.py", None)
         return _config
-    log(error)
-    try:
-        with open(CONFIG_GOOD) as f:
-            good = json.load(f)
-        if isinstance(good, dict) and _config_ok(good) is None:
-            log("using the last good config (config.good.json)")
-            _config = (good, CONFIG_GOOD, error)
-            return _config
-    except Exception:
-        pass
-    _config = (values, "defaults", error)
+    log("config: " + error)
+    good = _read_good()
+    if good is not None:
+        log("using the last good config (config.good.json)")
+        _config = (good, CONFIG_GOOD, error)
+        return _config
+    _config = (clean, "defaults", error)
     return _config
 
 
@@ -329,33 +350,91 @@ def config_source():
     return load_config()[1], load_config()[2]
 
 
-def install_config(values):
-    """Write a new config.py from plain values (no code is executed or
-    accepted: every value must be a str, number, bool or None). Takes effect
-    after a reboot. Raises ValueError."""
+def good_config():
+    """The last config confirmed to reach the network, or None."""
+    return _read_good()
+
+
+def promote_config():
+    """Called by the app once the running config is proven: Wi-Fi joined
+    with its own credentials, HTTP serving and MQTT connected (when
+    configured). Only then does it become the recovery fallback, and only
+    then is a /config change confirmed. Returns True if anything changed."""
+    values, source, _err = load_config()
+    if source != "config.py":
+        return False
+    changed = False
+    if _read_good() != values:
+        write_atomic(CONFIG_GOOD, json.dumps(values).encode())
+        changed = True
+    st = read_state()
+    if st["cfg_trial"]:
+        st["cfg_trial"] = False
+        st["cfg_boots"] = 0
+        _event(st, "config change confirmed")
+        write_state(st)
+        changed = True
+    try:
+        os.remove(CONFIG_PREV)
+    except OSError:
+        pass
+    return changed
+
+
+def install_config(values, trial=True):
+    """Replace config.py from plain values, as a trial: the old config.py is
+    kept (config.prev.py) and the new one is only promoted to the recovery
+    fallback once the app reaches the network with it; a boot that doesn't
+    confirm reverts it. Every setting must pass cfgcheck (strict: unknown
+    names are refused) and UPDATE_KEY can't be changed or removed this way
+    (USB only), so a signed config can't switch signing off. No code is
+    accepted: the file is generated from validated literals. Raises
+    ValueError."""
     if not isinstance(values, dict):
         raise ValueError("expected an object")
+    clean, errors = cfgcheck.validate(values, strict=True)
+    if errors:
+        raise ValueError("; ".join(errors))
+    if clean.get("UPDATE_KEY") != config_value("UPDATE_KEY"):
+        raise ValueError("UPDATE_KEY can only be changed over USB")
+    st = read_state()
+    if st["trial"] and st["safe"] is None:
+        raise ValueError("a firmware update is still on trial; try again once it is confirmed")
+    if st["cfg_trial"] and trial:
+        raise ValueError("the previous config change is not confirmed yet")
     lines = ["# Written by the device from a validated /config upload.\n"]
-    clean = {}
-    for k, v in values.items():
-        if not isinstance(k, str) or not k or not all(c.isupper() or c.isdigit() or c == "_" for c in k):
-            raise ValueError("bad setting name %r" % (k,))
-        if isinstance(v, list) and len(v) <= 8 and all(
-            isinstance(x, (int, float)) and not isinstance(x, bool) for x in v
-        ):
-            v = tuple(v)  # e.g. LED_TIMING_NS
-        elif not isinstance(v, CONFIG_TYPES):
-            raise ValueError("%s must be a string, number, bool, null or a short list of numbers" % k)
-        clean[k] = v
-        lines.append("%s = %r\n" % (k, v))
-    err = _config_ok(clean)
-    if err:
-        raise ValueError(err)
+    for k in sorted(clean):
+        lines.append("%s = %r\n" % (k, clean[k]))
     src = "".join(lines)
     compile(src, "config.py", "exec")
+    if exists("config.py"):
+        with open("config.py", "rb") as f:
+            old = f.read()
+        write_atomic(CONFIG_PREV, old)
     write_atomic("config.py", src.encode())
-    write_atomic(CONFIG_GOOD, json.dumps(clean).encode())
+    # From safe mode (trial=False) there is no app boot to confirm it; the
+    # recovery fallback stays the last config that reached the network, and
+    # safe mode's Wi-Fi falls back to its credentials.
+    st["cfg_trial"] = trial
+    st["cfg_boots"] = 0
+    _event(st, "config change installed" + (" (trial)" if trial else " from safe mode"))
+    write_state(st)
     return sorted(clean)
+
+
+def _revert_config(st, why):
+    """Undo an unconfirmed /config change: restore config.py from before it
+    (or, without one, drop config.py so the last good config is used)."""
+    try:
+        if exists(CONFIG_PREV):
+            os.rename(CONFIG_PREV, "config.py")
+        else:
+            os.remove("config.py")
+    except OSError as e:
+        log("cannot revert config: %r" % (e,))
+    st["cfg_trial"] = False
+    st["cfg_boots"] = 0
+    _event(st, "config change reverted: " + why)
 
 
 def signature_ok(kind, body, sig_hex, key=None):
@@ -433,15 +512,32 @@ def _default_state():
         "event": None,
         "events": [],
         "floor": 0,  # lowest bundle generation accepted (anti-replay)
+        "cfg_trial": False,  # a /config change awaiting confirmation
+        "cfg_boots": 0,
     }
+
+
+def _valid_floor(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _floor_file():
+    try:
+        with open(FLOOR_FILE) as f:
+            v = json.load(f)
+        return v if _valid_floor(v) else None
+    except Exception:
+        return None
 
 
 def read_state():
     st = _default_state()
+    parsed = False
     try:
         with open(STATE) as f:
             data = json.load(f)
         if isinstance(data, dict):
+            parsed = True
             for k in st:
                 if k in data:
                     st[k] = data[k]
@@ -455,12 +551,27 @@ def read_state():
         st["previous"] = None
     if not isinstance(st["events"], list):
         st["events"] = []
-    if not isinstance(st["floor"], int) or st["floor"] < 0:
-        st["floor"] = 0
+    if not isinstance(st["cfg_boots"], int) or st["cfg_boots"] < 0:
+        st["cfg_boots"] = 0
+    st["cfg_trial"] = st["cfg_trial"] is True
+    # Anti-replay floor: the highest of boot.json and its redundant copy. If
+    # neither is readable, don't assume "nothing was ever confirmed" (that
+    # would accept any old signed bundle): fall back to the newest installed
+    # slot's generation. An explicit downgrade still gets past it.
+    floor = st["floor"] if parsed and _valid_floor(st["floor"]) else None
+    copy = _floor_file()
+    if floor is None and copy is None:
+        floor = max([generation(slot_manifest(s)) for s in SLOTS] + [0])
+        st["floor_source"] = "slots"
+    else:
+        floor = max(floor or 0, copy or 0)
+    st["floor"] = floor
     return st
 
 
 def write_state(st):
+    st = dict(st)
+    st.pop("floor_source", None)
     write_atomic(STATE, json.dumps(st).encode())
 
 
@@ -537,17 +648,20 @@ def mark_healthy(slot):
     if st["active"] != slot:
         return False
     confirmed = st["trial"]
-    if st["boots"] == 0 and not confirmed:
-        return False
-    st["boots"] = 0
-    st["trial"] = False
-    if confirmed:
-        _event(st, "confirmed %s" % _ver(st["active"]))
     gen = generation(slot_manifest(slot))
-    if gen > st["floor"]:
-        st["floor"] = gen
-    write_state(st)
-    ensure_reserve()
+    if st["boots"] or confirmed or gen > st["floor"]:
+        st["boots"] = 0
+        st["trial"] = False
+        if confirmed:
+            _event(st, "confirmed %s" % _ver(st["active"]))
+        if gen > st["floor"]:
+            st["floor"] = gen
+        write_state(st)
+    if _floor_file() != st["floor"]:
+        try:
+            write_atomic(FLOOR_FILE, json.dumps(st["floor"]).encode())
+        except OSError as e:
+            log("cannot save floor copy: %r" % (e,))
     return confirmed
 
 
@@ -658,6 +772,13 @@ def launch():
     """main.py: count the boot, choose a slot and run it."""
     st = read_state()
     kind, what = decide(st)
+    if st["cfg_trial"]:
+        if st["cfg_boots"] >= 1 or kind == "safe":
+            # The config change didn't confirm on its boot (or we're going
+            # to safe mode, which can't confirm one): put the old one back.
+            _revert_config(st, "it did not reach the network" if kind == "app" else "entering safe mode")
+        else:
+            st["cfg_boots"] += 1
     st["boots"] += 1
     try:
         write_state(st)
@@ -675,6 +796,7 @@ def launch():
         "events": st["events"],
         "previous": st["previous"],
         "reset_cause": reset_cause(),
+        "cfg_trial": st["cfg_trial"],
     }
     watchdog()
     stop_feeder()
@@ -920,13 +1042,13 @@ class Installer:
                 raise InstallError("signed bundles required but no UPDATE_KEY configured")
             if not sig:
                 raise InstallError("bundle is not signed")
-        if sig:
-            if not self.key:
-                # No key to check against; integrity still comes from hashes.
-                return
+        if sig and self.key:
             if not eq(sig, hmac_sha256(self.key, self.mbytes)):
                 raise InstallError("bad signature")
             self.signed = True
+        # Without a key a signature can't be checked; integrity still comes
+        # from the hashes, and the length and generation checks below apply
+        # to every bundle, signed or not.
         expect = len(MAGIC) + 4 + len(self.mbytes) + 4 + len(sig) + self.total
         if expect != self.length:
             raise InstallError("Content-Length does not match the manifest")
@@ -950,7 +1072,11 @@ class Installer:
             reclaim()
             free = free_bytes()
             if free is not None and free < need and self.reclaim_slot:
-                log("safe mode: freeing inactive slot %s for the upload" % self.inactive)
+                # Explicitly requested (safe mode, ?reclaim_slot=1): sacrifice
+                # the inactive slot, but only if that actually makes room.
+                if free + tree_size(slot_dir(self.inactive)) < need:
+                    raise InstallError("not enough flash even without slot %s: need %d" % (self.inactive, need))
+                log("freeing inactive slot %s for the upload (requested)" % self.inactive)
                 st = read_state()
                 if st["previous"] == self.inactive:
                     st["previous"] = None

@@ -26,6 +26,7 @@ import socket
 import time
 
 import bootmgr
+import cfgcheck
 
 try:
     import machine
@@ -49,11 +50,19 @@ def _cfg(name, default=None):
 
 
 def _blank():
+    # Only validated values reach the synchronous C bitstream routine: a bad
+    # timing (all zeros never finishes on the RP2350) or LED count must not
+    # stop recovery before Wi-Fi starts.
     n = _cfg("LED_COUNT", 500)
+    if not (isinstance(n, int) and 1 <= n <= 2000):
+        n = 500
+    pin_no = _cfg("LED_PIN", 0)
+    if not (isinstance(pin_no, int) and 0 <= pin_no <= 29):
+        pin_no = 0
+    timing = cfgcheck.timing_or_default(_cfg("LED_TIMING_NS"))
     try:
-        pin = machine.Pin(_cfg("LED_PIN", 0), machine.Pin.OUT)
-        timing = _cfg("LED_TIMING_NS") or (400, 850, 800, 450)
-        machine.bitstream(pin, 0, tuple(timing), bytes(3 * n))
+        pin = machine.Pin(pin_no, machine.Pin.OUT)
+        machine.bitstream(pin, 0, timing, bytes(3 * n))
     except Exception as e:
         bootmgr.log("safe mode: cannot blank LEDs: %r" % (e,))
 
@@ -63,8 +72,14 @@ class _Wifi:
         self.wlan = None
         self.last = None
         self.attempts = 0
-        ssid = _cfg("WIFI_SSID")
-        if network is None or not ssid:
+        # Credentials to try in turn: the current config's, then the last
+        # config confirmed to reach the network, if different.
+        self.creds = []
+        for c in (bootmgr.load_config()[0], bootmgr.good_config() or {}):
+            pair = (c.get("WIFI_SSID"), c.get("WIFI_PASSWORD"))
+            if pair[0] and pair not in self.creds:
+                self.creds.append(pair)
+        if network is None or not self.creds:
             bootmgr.log("safe mode: no Wi-Fi credentials; USB needed")
             return
         try:
@@ -87,7 +102,9 @@ class _Wifi:
                     self.wlan.active(False)
                     bootmgr.feed()
                     self.wlan.active(True)
-                self.wlan.connect(_cfg("WIFI_SSID"), _cfg("WIFI_PASSWORD"))
+                ssid, password = self.creds[(self.attempts // 2) % len(self.creds)]
+                self.wlan.disconnect()
+                self.wlan.connect(ssid, password)
             except Exception as e:
                 bootmgr.log("safe mode: wifi connect failed: %r" % (e,))
 
@@ -196,13 +213,30 @@ def _length(headers):
         return None
 
 
+def parse_query(qs):
+    q = {}
+    for part in qs.split("&"):
+        if part:
+            k, _, v = part.partition("=")
+            q[k] = v
+    return q
+
+
+def flag(q, name):
+    """Exact key=value, same policy as the app's API (no substring games)."""
+    return q.get(name) in ("1", "true", "yes")
+
+
 def _install(c, headers, query, rest, deadline):
     length = _length(headers)
     if length is None:
         return 400, {"error": "Content-Length required"}
+    q = parse_query(query)
     try:
+        # reclaim_slot=1: if the flash is too full, explicitly allow the
+        # inactive slot to be deleted to make room (only if that suffices).
         inst = bootmgr.Installer(
-            length, _cfg("UPDATE_KEY"), allow_downgrade="allow_downgrade=1" in query, reclaim_slot=True
+            length, _cfg("UPDATE_KEY"), allow_downgrade=flag(q, "allow_downgrade"), reclaim_slot=flag(q, "reclaim_slot")
         )
     except bootmgr.InstallError as e:
         return 400, {"error": str(e)}
@@ -253,7 +287,7 @@ def _config(c, headers, rest, deadline):
     if not bootmgr.signature_ok("config", body, headers.get("x-signature")):
         return 403, {"error": "config uploads must be signed with UPDATE_KEY (X-Signature)"}
     try:
-        keys = bootmgr.install_config(json.loads(body))
+        keys = bootmgr.install_config(json.loads(body), trial=False)
     except (ValueError, SyntaxError) as e:
         return 400, {"error": str(e)}
     return 200, {"written": keys, "rebooting": True}

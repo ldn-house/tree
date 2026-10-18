@@ -209,8 +209,8 @@ def register(rt, srv):
             keys = bootmgr.install_config(json.loads(body))
         except (ValueError, SyntaxError) as e:
             raise HTTPError(400, str(e))
-        rt.request_reboot("config.py replaced over HTTP")
-        return 200, {"written": keys, "rebooting": True}
+        rt.request_reboot("config.py replaced over HTTP (trial)")
+        return 200, {"written": keys, "rebooting": True, "trial_s": rt.cfg.TRIAL_DEADLINE_S}
 
     async def h_update_status(req):
         return 200, rt.updates.status()
