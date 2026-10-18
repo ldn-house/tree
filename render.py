@@ -20,7 +20,7 @@ Usage:
     ./render.py rainbow_cycle
     ./render.py spiral_3d --seconds 8 --fps 30 --param twists=2 --brightness 0.5
     ./render.py all                 # every registered effect + renders/overview.png
-    ./render.py text_scroll --watch # re-render whenever effects/ changes
+    ./render.py spiral_3d --watch   # re-render whenever effects/ changes
 """
 
 import argparse
@@ -84,7 +84,7 @@ def build_params(module, overrides):
             lo, hi = spec[key][1], spec[key][2]
             if isinstance(value, (int, float)) and not lo <= value <= hi:
                 warnings.append(f"param {key}={value} outside [{lo}, {hi}]")
-        elif key != "text":
+        else:
             warnings.append(f"unknown param {key!r} (known: {', '.join(spec) or 'none'})")
         params[key] = value
     return params, warnings

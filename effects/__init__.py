@@ -14,7 +14,6 @@ EFFECTS = [
     "plane_sweep",
     "radial_burst",
     "spiral_3d",
-    "text_scroll",
 ]
 
 
