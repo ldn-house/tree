@@ -338,3 +338,28 @@ def test_dropping_a_session_sends_disconnect_so_no_will_fires(mdev, bus):
     d.set_net("up")
     wait_for(lambda: status(d)["mqtt"]["connected"], 40, what="reconnect")
     bus.wait(AVAIL, lambda p: p == b"online", 10, after=t0)
+
+
+def test_retained_running_effect_tracks_the_latest(mdev, broker, bus):
+    """Every effect_running message (state and attributes) is retained, so a
+    subscriber that (re)subscribes gets what the tree is showing now, not the
+    value from just after connect. (Live subscribers see retain=0: brokers
+    clear the flag when forwarding, as MQTT 3.1.1 requires.)"""
+    d = mdev
+    for eff in ("chase", "height", "solid", "chase"):
+        t = time.time()
+        d.post("/state", {"effect": eff})
+        bus.wait(P + "/effect_running", lambda p, e=eff: p == e.encode(), 5, after=t)
+        time.sleep(1.2)  # past the 1 s rate limit
+        assert retained(broker, P + "/effect_running") == eff.encode(), eff
+        attrs = json.loads(retained(broker, P + "/effect_running/attributes"))
+        assert attrs["selected"] == eff and attrs["mode"] == "locked", attrs
+    # And through auto mode, where the tree switches by itself.
+    d.post("/state", {"effect": "auto", "auto_s": 3})
+    shown = b"chase"
+    for _ in range(3):
+        t = time.time()
+        shown = bus.wait(P + "/effect_running", lambda p, prev=shown: p != prev, 10, after=t)
+        time.sleep(0.3)
+        assert retained(broker, P + "/effect_running") == shown
+        assert json.loads(retained(broker, P + "/effect_running/attributes"))["mode"] == "auto"
