@@ -2,18 +2,25 @@
 
 EFFECTS is ordered: it drives the Home Assistant effect list and the auto
 cycle. Each name is a module in this package, imported lazily by load().
+Only EFFECTS is exposed to Home Assistant, the auto cycle and the tools.
+
+DISABLED lists modules kept in the package but not registered, so they can
+be re-enabled by moving the name back into EFFECTS. Nothing loads them.
 """
 
 EFFECTS = [
     "rainbow_cycle",
     "christmas",
-    "sparkle",
     "candy_cane",
     "twinkle_multi",
     "warm_white",
     "plane_sweep",
     "radial_burst",
     "spiral_3d",
+]
+
+DISABLED = [
+    "sparkle",  # rapid white flashing; disabled 2026-10-18 at the user's request
 ]
 
 

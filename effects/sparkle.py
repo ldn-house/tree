@@ -1,3 +1,4 @@
+# DISABLED: not in effects.EFFECTS. To re-enable, move "sparkle" from DISABLED back into EFFECTS in effects/__init__.py.
 """Random white sparkles: a fresh random set of LEDs lights every tick."""
 
 NAME = "sparkle"
