@@ -80,7 +80,7 @@ The tree supports volumetric 3D animations using camera-calibrated LED positions
 ./calibrate.py solve positions/{front,right,back,left}_detections.json --out coordinates
 ```
 
-`coords.txt` has one `x,y,z` (or `null`) line per LED: y from 0 (lowest LED) to 1 (highest), x and z in the same units, origin on the trunk, +x towards the front view. `coords_metres.csv` adds metres, per-LED confidence and the number of views. The older `analyze.py` and `triangulate.py` still work and still write `coords_compact.txt`.
+`coords.txt` has one `x,y,z` (or `null`) line per LED: y from 0 (lowest LED) to 1 (highest), x and z in the same units, origin on the trunk, +x towards the front view. `coords_metres.csv` adds metres, per-LED confidence and the number of views. After a solve, `./calibrate.py export-legacy` regenerates the legacy `coords_compact.txt` and `coords.json` that older tools read; [coordinates/README.md](coordinates/README.md) describes every file. The older `analyze.py` and `triangulate.py` still work, but writing their output over the calibrated files would replace them.
 
 The synthetic benchmark (`./calibrate.py simulate`, `simulate-video`, `bench-stills`, `bench-video`) renders captures with known ground truth so any pipeline can be scored.
 

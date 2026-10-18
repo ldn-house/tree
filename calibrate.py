@@ -131,11 +131,19 @@ def cmd_solve(args):
     from calib.solve import Solver, ViewObs, to_tree_frame
 
     paths = [Path(p) for p in args.detections]
+    # Views from the same phone and lens share intrinsics; --camera VIEW=LABEL
+    # marks clips from another phone or lens (each label gets its own).
+    labels = dict(kv.split("=", 1) for kv in (args.camera or []))
+    groups = {}
     views = []
     for p in paths:
         d = load_detections(p)
         w, h = d["image_size"]
-        views.append(ViewObs(d["view"], w, h, d["uv"], d["conf"], device=0 if args.same_camera else len(views)))
+        if not args.same_camera:
+            dev = len(views)
+        else:
+            dev = groups.setdefault(labels.get(d["view"], "default"), len(groups))
+        views.append(ViewObs(d["view"], w, h, d["uv"], d["conf"], device=dev))
     solver = Solver(views, min_weight=args.min_conf, verbose=True)
     dupes = solver.duplicate_viewpoints()
     for a, b, shift, n in dupes:
@@ -270,6 +278,15 @@ def cmd_explainer(args):
     print(build_video(Path(args.clips), Path(args.out), Path(args.work), only=only))
 
 
+def cmd_export_legacy(args):
+    from calib.layout import load_coords
+    from calib.output import write_legacy
+
+    src = Path(args.coords)
+    write_legacy(src.parent if args.out is None else Path(args.out), load_coords(src))
+    print(f"wrote coords_compact.txt and coords.json (legacy frame) next to {src}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -330,6 +347,8 @@ def main():
     p.add_argument("--same-camera", action="store_true", default=True,
                    help="all views share intrinsics (default)")
     p.add_argument("--per-view-intrinsics", dest="same_camera", action="store_false")
+    p.add_argument("--camera", action="append", metavar="VIEW=LABEL",
+                   help="clip VIEW was filmed with camera LABEL (another phone or lens); repeat per clip")
     p.add_argument("--no-wire", action="store_true", help="disable the wire prior")
     p.set_defaults(func=cmd_solve)
 
@@ -387,6 +406,12 @@ def main():
     p.add_argument("--work", default=".scratch/explainer")
     p.add_argument("--keyframes", help="comma-separated times: render only these stills to --work/keyframes")
     p.set_defaults(func=cmd_explainer)
+
+    p = sub.add_parser("export-legacy",
+                       help="write coords_compact.txt and coords.json (legacy frame) from a coords.txt")
+    p.add_argument("coords", nargs="?", default="coordinates/coords.txt")
+    p.add_argument("--out", default=None, help="directory (default: next to coords.txt)")
+    p.set_defaults(func=cmd_export_legacy)
 
     args = parser.parse_args()
     args.func(args)

@@ -57,7 +57,9 @@ Six angles take about 3 minutes, well inside the 5-minute window.
 
 ## Adding angles later
 
-If the result has gaps (lights that only one clip could see), you can add angles another evening without redoing everything, as long as **the lights haven't been moved or re-hung** and you **use the same phone on the same 1× lens**. Turning the whole tree is fine; moving individual branches or the wire isn't.
+If the result has gaps (lights that only one clip could see), you can add angles another evening without redoing everything, as long as **the lights haven't been moved or re-hung**. Turning the whole tree is fine; moving individual branches or the wire isn't.
+
+**A different phone or lens is fine too**, for example a flatmate's phone. The computer works out each camera's lens separately; just say which clips came from which phone. Within one evening, keep each phone on one lens and don't zoom.
 
 Film just the new angles, send them over, and the computer side decodes only the new clips and solves again with the old and new ones together.
 
@@ -109,7 +111,9 @@ curl -X PUT --data-binary @coordinates/coords.txt \
   -H "Authorization: Bearer $TREE_TOKEN" http://tree.local:8080/files/coords.txt
 ```
 
-**Adding angles later:** decode only the new clips into the same folder (`./calibrate.py decode-video ~/Desktop/tree-clips/6.mov --out positions/tonight`), then run step 2 again with all of them; the front clip still has to sort first.
+**Adding angles later:** decode only the new clips into the same folder (`./calibrate.py decode-video ~/Desktop/tree-clips/6.mov --out positions/tonight`), then run step 2 again with all of them; the front clip still has to sort first. If the new clips came from a different phone or lens, label them so they get their own lens estimate: `--camera 6=second-phone --camera 7=second-phone`. Clips without a label share the first camera's.
+
+After a new solve, run `./calibrate.py export-legacy coordinates/coords.txt` to refresh the legacy `coords_compact.txt`/`coords.json` that older tools read.
 
 **On a slow or low-memory computer**, `--max-fps 30` skips every other frame of a 60 fps clip, and `--scale 0.5` decodes at half size (a quarter of the memory). Both are slightly less thorough: on the first real calibration, `--scale 0.5` found 12–18% fewer lights.
 

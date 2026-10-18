@@ -70,3 +70,36 @@ def test_near_duplicate_viewpoints_are_flagged_and_handled():
     assert sol.views == [v.name for v in views] and not sol.dropped
     err = position_errors(sol.points, lay.points, lay.pitch)
     assert err["median_cm"] < 1.0 and err["over_10cm"] <= 5
+
+
+def test_views_from_two_cameras_get_their_own_focal_length():
+    lay = get_layout("legacy-cleaned")
+    cams = make_rig("phone", lay, 4, seed=5)
+    for c in cams[2:]:  # a second phone with a longer lens
+        c.fx = c.fy = c.fx * 1.3
+    rng = np.random.default_rng(0)
+    views = []
+    for i, c in enumerate(cams):
+        v = make_view(lay, c, SimParams(), rng)
+        uv = v.uv + rng.normal(0, 1.0, v.uv.shape)
+        uv[~v.visible] = np.nan
+        views.append(ViewObs(c.name, c.width, c.height, uv, np.ones(lay.n), device=0 if i < 2 else 1))
+    sol = Solver(views).solve()
+    assert abs(sol.focal[0] / cams[0].fx - 1) < 0.04 and abs(sol.focal[1] / cams[2].fx - 1) < 0.04
+    assert position_errors(sol.points, lay.points, lay.pitch)["median_cm"] < 1.0
+
+
+def test_legacy_export_round_trips_through_adapt_legacy():
+    # Mirrors effects/_coords.adapt_legacy (harness thread): undo the 1080/608
+    # stretch, rescale y to [0, 1], centre x/z on their centroid.
+    from calib.output import to_legacy
+    rng = np.random.default_rng(1)
+    norm = np.column_stack([rng.normal(0, 0.2, 50), rng.uniform(0, 1, 50), rng.normal(0, 0.2, 50)])
+    norm[:, 1] = (norm[:, 1] - norm[:, 1].min()) / np.ptp(norm[:, 1])
+    leg = to_legacy(norm)
+    h = np.ptp(leg[:, 1])
+    k = (608 / 1080) / h
+    back = np.column_stack([(leg[:, 0] - leg[:, 0].mean()) * k, (leg[:, 1] - leg[:, 1].min()) / h,
+                            (leg[:, 2] - leg[:, 2].mean()) * k])
+    centred = norm - np.array([norm[:, 0].mean(), 0, norm[:, 2].mean()])
+    assert np.allclose(back, centred, atol=1e-9)

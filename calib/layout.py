@@ -95,7 +95,13 @@ def fit_body(points: np.ndarray, inner: float = 0.85) -> TreeBody:
     return TreeBody(height=max(top, hi + 0.05), base_radius=R0 * inner, bottom=lo - 0.1)
 
 
-def cleaned_from_legacy(path: str | Path = "coordinates/coords.csv", height_m: float = 1.75,
+# The December 2025 coordinates (triangulate.py output), frozen here as the seed
+# for the synthetic ground truth, so recalibrating the tree does not change the
+# benchmark.
+LEGACY_COORDS = Path(__file__).with_name("data") / "legacy-coords-2025-12.csv"
+
+
+def cleaned_from_legacy(path: str | Path = LEGACY_COORDS, height_m: float = 1.75,
                         pitch: float = 0.10, seed: int = 0) -> Layout:
     """A plausible ground truth derived from the current (noisy) coordinates.
 

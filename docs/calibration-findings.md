@@ -49,9 +49,9 @@ The first real run used five 1080×1920 portrait HEVC clips at 59 fps, 7.7–26 
 
 ## 1. What is wrong with the current coordinates
 
-### 1.1 Audit of `coordinates/coords.csv`
+### 1.1 Audit of the December 2025 coordinates (formerly `coordinates/coords.csv`, now `calib/data/legacy-coords-2025-12.csv`)
 
-`./calibrate.py quality coordinates/coords.csv --legacy --height-m 1.75 --pitch 0.10 --reference` undoes the legacy x/z stretch, rescales to a 1.75 m LED span, and compares with the synthetic truth layouts. Pitch is the assumed 10 cm wire spacing.
+`./calibrate.py quality calib/data/legacy-coords-2025-12.csv --legacy --height-m 1.75 --pitch 0.10 --reference` undoes the legacy x/z stretch, rescales to a 1.75 m LED span, and compares with the synthetic truth layouts. Pitch is the assumed 10 cm wire spacing.
 
 | Metric | Current coords | Synthetic truth (derived from them) |
 |---|---|---|
@@ -375,7 +375,7 @@ These are in [calibration-web.md](calibration-web.md) §6, with feasibility rati
 
 # Real captures: detect (lag 1 for existing captures) and audit
 ./calibrate.py detect --captures captures --views tue1,tue2,tue3,tue4 --lag 1
-./calibrate.py quality coordinates/coords.csv --legacy --height-m 1.75 --pitch 0.10 --reference
+./calibrate.py quality calib/data/legacy-coords-2025-12.csv --legacy --height-m 1.75 --pitch 0.10 --reference
 
 # The sequence the firmware plays, and its test vectors
 ./calibrate.py sequence --out sequences/default.tcal
