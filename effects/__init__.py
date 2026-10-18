@@ -17,6 +17,9 @@ EFFECTS = [
     "plane_sweep",
     "radial_burst",
     "spiral_3d",
+    "lighthouse",
+    "raindrops",
+    "snowfall",
 ]
 
 DISABLED = [

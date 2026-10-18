@@ -57,6 +57,9 @@ The tree automatically limits total power draw per-frame to prevent PSU brownout
 - Multicolor twinkle
 - Warm white (solid)
 - **Plane sweep** - Horizontal plane moves up/down tree (uses 3D coordinates)
+- **Lighthouse** - Warm beam sweeping round the tree (3D)
+- **Raindrops** - Coloured spherical ripples spreading through the tree (3D)
+- **Snowfall** - Flakes drifting down through the cone, some settling on branches (3D)
 
 ## 3D Coordinate Mapping
 
