@@ -11,7 +11,8 @@
 
 Contents of a slot:
     app/*.mpy           firmware/app (compiled with mpy-cross)
-    effects/*.mpy       effects/ package (compiled), if present
+    effects/*.mpy       effects/ package (compiled; the repo's effects/ unless
+                        --effects says otherwise), minus modules in DISABLED
     data/effects.json   effect metadata (NAME, DURATION_MS, PARAMS, NEEDS_COORDS)
     data/coords_compact.txt   legacy coordinates, if present
     data/calib_default.tcal   standard calibration sequence, if present
@@ -86,7 +87,8 @@ def mpy_cross(src: Path, name: str, out: Path):
 
 def effect_meta(effects_dir: Path):
     """Import the effects package with CPython and read each effect's
-    metadata, so the device need not import every effect to list params."""
+    metadata, so the device need not import every effect to list params.
+    Returns (metadata, names of the modules in DISABLED)."""
     sys.path.insert(0, str(effects_dir.parent))
     try:
         import importlib
@@ -101,7 +103,7 @@ def effect_meta(effects_dir: Path):
                 "params": params,
                 "needs_coords": bool(getattr(mod, "NEEDS_COORDS", False)),
             }
-        return meta
+        return meta, set(getattr(pkg, "DISABLED", ()))
     finally:
         sys.path.pop(0)
 
@@ -123,9 +125,11 @@ def collect(effects_dir: Path | None, source: bool, work: Path, app_dir: Path):
     for src in sorted(app_dir.glob("*.py")):
         add_py(src, f"app/{src.name}")
     if effects_dir and (effects_dir / "__init__.py").exists():
+        meta, disabled = effect_meta(effects_dir)
         for src in sorted(effects_dir.glob("*.py")):
+            if src.stem in disabled:  # kept in the repo, not registered: not shipped
+                continue
             add_py(src, f"effects/{src.name}")
-        meta = effect_meta(effects_dir)
         files.append(("data/effects.json", json.dumps(meta, sort_keys=True).encode()))
     else:
         print("warning: no effects/ package; the firmware will run its built-in fallback only", file=sys.stderr)
