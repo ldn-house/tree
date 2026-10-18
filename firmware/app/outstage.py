@@ -8,9 +8,9 @@ broken.
 """
 
 try:
-    from effects._output import Output, budget_for
+    from effects._output import Output, budget_for, NATIVE
 except Exception:
-    from app._output_fallback import Output, budget_for
+    from app._output_fallback import Output, budget_for, NATIVE
 
 
 def channel_budget(n, limit_a, ma_per_channel, percent=None):
@@ -35,5 +35,7 @@ def estimated_a(channel_sum, ma_per_channel):
     return channel_sum * ma_per_channel / 255000
 
 
-def create(n, budget, gamma, order):
-    return Output(n, budget, gamma, order)
+def create(n, budget, gamma, order, dither=True, white=None):
+    """dither: carry sub-LSB remainders across frames (calibration frames
+    pass False). white: optional (r, g, b) balance, each 0..1."""
+    return Output(n, budget, gamma, order, dither, white)

@@ -64,6 +64,11 @@ LED_MA_PER_CHANNEL = get("LED_MA_PER_CHANNEL", 8)
 # Deprecated: a cap as % of all pixels at full white; overrides POWER_LIMIT_A.
 POWER_BUDGET_PERCENT = get("POWER_BUDGET_PERCENT")
 GAMMA = get("GAMMA")
+# Carry each channel's sub-LSB remainder to the next frame (temporal
+# dithering), so dim colours keep their hue instead of collapsing to red.
+LED_DITHER = get("LED_DITHER", True)
+# Optional per-channel white balance (r, g, b), each 0..1, e.g. (1.0, 0.85, 0.7).
+WHITE_BALANCE = get("WHITE_BALANCE")
 FPS = get("FPS", 40)
 
 # Health needed before a freshly installed update is confirmed.

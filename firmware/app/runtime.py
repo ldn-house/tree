@@ -83,8 +83,11 @@ class Runtime:
             log("power: POWER_BUDGET_PERCENT is deprecated; set POWER_LIMIT_A (amps at 12 V)")
         log("power: limit %.2f A at 12 V (%d mA per channel) = channel sum %d" % (
             outstage.estimated_a(budget, cfg.LED_MA_PER_CHANNEL), cfg.LED_MA_PER_CHANNEL, budget))
-        self.out = outstage.create(self.n, budget, cfg.GAMMA, cfg.COLOR_ORDER)
-        self.cal_out = outstage.create(self.n, budget, None, cfg.COLOR_ORDER)
+        self.out = outstage.create(self.n, budget, cfg.GAMMA, cfg.COLOR_ORDER, cfg.LED_DITHER, cfg.WHITE_BALANCE)
+        log("output: %s kernels, dither %s, gamma %s, white balance %s" % (
+            "native" if outstage.NATIVE else "python", cfg.LED_DITHER, cfg.GAMMA, cfg.WHITE_BALANCE))
+        # Calibration frames: exact, steady levels for the camera.
+        self.cal_out = outstage.create(self.n, budget, None, cfg.COLOR_ORDER, False, None)
         self.engine = engine.Engine(self.n, self.state, self.fx, self.out, self.driver, cfg.FPS)
         self.engine.coords = coords.load(self.n, self.slot_dir)
         bootmgr.feed()

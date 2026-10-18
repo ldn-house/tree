@@ -38,6 +38,20 @@ def _int(lo, hi):
     return lambda v: _num(v, lo, hi, integer=True)
 
 
+def _bool(v):
+    if not isinstance(v, bool):
+        raise ConfigError("must be True or False")
+    return v
+
+
+def _white(v):
+    if v is None:
+        return None
+    if not isinstance(v, (tuple, list)) or len(v) != 3:
+        raise ConfigError("must be three numbers (r, g, b), each 0 to 1")
+    return tuple(_num(c, 0.0, 1.0) for c in v)
+
+
 def _number(lo, hi):
     return lambda v: _num(v, lo, hi)
 
@@ -170,6 +184,8 @@ SCHEMA = {
     "LED_MA_PER_CHANNEL": _number(0.5, 100),
     "POWER_BUDGET_PERCENT": _optional(_number(0, 100)),
     "GAMMA": _gamma,
+    "LED_DITHER": _bool,
+    "WHITE_BALANCE": _white,
     "FPS": _int(1, 100),
     "TRIAL_HEALTHY_S": _int(1, 3600),
     "TRIAL_DEADLINE_S": _int(5, 7200),
