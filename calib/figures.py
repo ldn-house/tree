@@ -125,9 +125,10 @@ def id_map(video: Path, plan, out: Path):
     from .video import DecodeParams, accumulate, _video_frames, blobs, decode_symbols, find_sync, \
         read_small, refine_sync_transitions
     dp = DecodeParams()
-    series, ts, fps, (w, h), smalls, change = read_small(video, dp.downsample, dp.bands, keep=True)
+    series, ts, (w, h), change = read_small(video, dp.downsample, dp.bands)
     sync = refine_sync_transitions(change, ts, plan, find_sync(series, ts, plan, dp), series=series)
-    acc, wsum = accumulate(_video_frames(video), ts, plan, sync, dp.guard_ms, 3 if plan.params.colour else 1)
+    acc, wsum = accumulate(_video_frames(video, mono=not plan.params.colour), ts, plan, sync, dp.guard_ms,
+                           3 if plan.params.colour else 1)
     dec = decode_symbols(acc, wsum, plan, dp, plan.params.colour)
     dets = blobs(dec, plan.params.n_leds, dp)
     cap = cv2.VideoCapture(str(video))

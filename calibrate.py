@@ -136,10 +136,20 @@ def cmd_solve(args):
         d = load_detections(p)
         w, h = d["image_size"]
         views.append(ViewObs(d["view"], w, h, d["uv"], d["conf"], device=0 if args.same_camera else len(views)))
-    sol = Solver(views, min_weight=args.min_conf, verbose=True).solve(wire_prior=not args.no_wire)
+    solver = Solver(views, min_weight=args.min_conf, verbose=True)
+    dupes = solver.duplicate_viewpoints()
+    for a, b, shift, n in dupes:
+        print(f"WARNING: {a} and {b} look like the same viewpoint (median shift {shift:.1%} of the frame, "
+              f"{n} shared LEDs). The second adds little; film from a different angle or turn the tree "
+              f"further between clips.")
+    sol = solver.solve(wire_prior=not args.no_wire)
+    if sol.views[0] != views[0].name:
+        print(f"WARNING: the front view {views[0].name} was dropped; +x now points towards {sol.views[0]}")
     norm, info = to_tree_frame(sol.points, sol, front_view=0)
-    conf = write_outputs(Path(args.out), norm, sol, info, args.height_m, [v.name for v in views],
-                         {"detections": [str(p) for p in paths]})
+    conf = write_outputs(Path(args.out), norm, sol, info, args.height_m, sol.views,
+                         {"detections": [str(p) for p in paths], "dropped_views": sol.dropped,
+                          "duplicate_viewpoints": [{"views": [a, b], "median_shift": sh, "shared": n}
+                                                   for a, b, sh, n in dupes]})
     print(f"median reprojection {sol.cost_px:.2f}px, focal {np.round(sol.focal)}, "
           f"views per LED {np.bincount(sol.views_used, minlength=5).tolist()}, "
           f"mean confidence {conf.mean():.2f} -> {args.out}/coords.txt")
@@ -176,17 +186,44 @@ def cmd_simulate_video(args):
     print(f"wrote {args.views} clips to {args.out}")
 
 
-def cmd_decode_video(args):
+def _decode_one(job):
+    import time
     from calib.detect import save_detections
+    from calib.sequence import SequenceParams, build
     from calib.video import decode_video
 
-    _, plan = _plan_from_args(args)
-    for v in args.videos:
-        res = decode_video(Path(v), plan, verbose=True)
-        name = Path(v).stem
-        save_detections(res, Path(args.out) / f"{name}_detections.json", name, {"sync": res["sync"]})
-        n = sum(d is not None and d.conf >= 0.5 for d in res["detections"].values())
-        print(f"{name}: {n}/500 confident detections")
+    path, plan_kw, out, max_fps, scale = job
+    name = Path(path).stem
+    t0 = time.time()
+
+    def say(msg):
+        print(f"[{name}] {time.time() - t0:5.1f}s {msg}", flush=True)
+
+    plan = build(SequenceParams(**plan_kw))
+    res = decode_video(Path(path), plan, max_fps=max_fps, scale=scale, progress=say)
+    save_detections(res, Path(out) / f"{name}_detections.json", name, {"sync": res["sync"]})
+    n = sum(d is not None and d.conf >= 0.5 for d in res["detections"].values())
+    say(f"done: {n}/500 confident detections, sync score {res['sync']['score']:.2f}")
+    return name, n, time.time() - t0
+
+
+def cmd_decode_video(args):
+    import os
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    params, plan = _plan_from_args(args)
+    if args.sequential:
+        sys.exit("decode-video: the one-LED-at-a-time sequence is only supported by bench-video")
+    jobs = [(v, vars(params), args.out, args.max_fps, args.scale) for v in args.videos]
+    workers = args.workers or max(1, min(len(jobs), (os.cpu_count() or 2) // 2))
+    print(f"decoding {len(jobs)} clips with {workers} worker{'s' if workers > 1 else ''}")
+    done = 0
+    with ProcessPoolExecutor(workers) as ex:
+        futs = [ex.submit(_decode_one, j) for j in jobs]
+        for f in as_completed(futs):
+            name, n, secs = f.result()
+            done += 1
+            print(f"{done}/{len(jobs)} {name}: {n}/500 confident detections in {secs:.0f}s", flush=True)
 
 
 def cmd_bench_video(args):
@@ -321,6 +358,11 @@ def main():
     p = sub.add_parser("decode-video", help="decode calibration videos into detections")
     p.add_argument("videos", nargs="+")
     p.add_argument("--out", default="positions")
+    p.add_argument("--workers", type=int, default=0, help="clips decoded in parallel (default: half the CPUs)")
+    p.add_argument("--max-fps", type=float, default=None,
+                   help="decimate faster clips to about this frame rate (e.g. 30 for 60 fps phone video)")
+    p.add_argument("--scale", type=float, default=1.0,
+                   help="downscale frames before decoding (e.g. 0.5); detections stay in full-size pixels")
     seq_args(p)
     p.set_defaults(func=cmd_decode_video)
 

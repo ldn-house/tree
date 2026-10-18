@@ -72,3 +72,15 @@ def test_rejects_corruption():
 def test_bit_order_lsb_first():
     plane = seqfile.pack_plane([1, 0, 0, 0, 0, 0, 0, 0, 0, 1], 10)
     assert plane == bytes([0b00000001, 0b00000010])
+
+
+def test_sync_drive_table_matches_exposure_integral():
+    from calib.render import _window_drive
+    from calib.video import drive_table
+    plan = build(SequenceParams())
+    drive = plan.rgb().mean(-1)[:, :20]
+    starts = plan.starts_ms().astype(float)
+    tab = drive_table(drive, starts, int(plan.loop_ms), 8.0)
+    t = np.array([0.0, 999.0, 1234.0, 6590.0])
+    exact = _window_drive(drive[..., None], starts, plan.duration_ms.astype(float), t, 8.0, plan.loop_ms)[..., 0]
+    assert np.allclose(tab[t.astype(int)], exact, atol=1e-4)
