@@ -46,15 +46,22 @@ class Host:
     def set_param(self, key, value):
         self.params[key] = value
 
-    def set_budget(self, percent):
-        self.stage.budget = _output.budget_for(self.n, percent)
+    def limits(self):
+        return [_output.LIMIT_A, _output.MA_PER_CHANNEL]
+
+    def set_limit(self, limit_a):
+        self.stage.budget = _output.budget_for_current(limit_a)
 
     def frame(self, t_ms, brightness):
         self.effect.render(int(t_ms), self.raw)
         self.stage.process(self.raw, self.out, int(brightness))
         out_total = sum(self.out)
+        # Estimated current, computed the way the firmware reports it.
+        b = int(brightness)
+        amps = _output.current_a(self.stage.raw_total * self.stage.factor // 4096 * b // 255)
+        limit = _output.current_a(self.stage.budget)
         return (bytes(self.out), bytes(self.raw), self.stage.capped, self.stage.factor,
-                self.stage.raw_total, out_total, self.stage.budget)
+                self.stage.raw_total, out_total, self.stage.budget, amps, limit)
 
     def reload(self):
         for k in [k for k in sys.modules if k == "effects" or k.startswith("effects.")]:
@@ -123,7 +130,8 @@ const handlers = {
     host = py.globals.get("Host")(n, coords.text, coords.legacy);
     py.globals.set("H", host);
     const pos = py.runPython("None if H.coords is None else [list(c) if c else None for c in H.coords]");
-    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null };
+    const limits = host.limits().toJs();
+    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1] };
   },
   async select({ name, seed, params }) {
     const proxy = host.select(name, seed, py.toPy(params || {}));
@@ -135,8 +143,8 @@ const handlers = {
     host.set_param(key, value);
     return {};
   },
-  async budget({ percent }) {
-    host.set_budget(percent);
+  async limit({ amps }) {
+    host.set_limit(amps);
     return {};
   },
   async frame({ t, brightness }) {
@@ -146,7 +154,7 @@ const handlers = {
     const out = new Uint8Array(r[0]);
     const raw = new Uint8Array(r[1]);
     return {
-      out, raw, capped: r[2], factor: r[3] / 4096, rawTotal: r[4], outTotal: r[5], budget: r[6],
+      out, raw, capped: r[2], factor: r[3] / 4096, rawTotal: r[4], outTotal: r[5], budget: r[6], amps: r[7], limitA: r[8],
       __transfer: [out.buffer, raw.buffer],
     };
   },

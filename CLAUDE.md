@@ -126,7 +126,7 @@ Preview effects in 3D in the browser without hardware:
 ./serve.py  # Opens http://localhost:8000/viewer/
 ```
 
-`viewer/` loads `effects/` into Pyodide in a Web Worker and calls it through the effect API, running frames through the same output stage (`effects/_output.py`) as the device. It has an effect picker, param sliders, brightness, power budget, a power-cap indicator and front/side/top/orbit views. Saving a file in `effects/` reloads it in place. `?effect=<name>` selects an effect from the URL.
+`viewer/` loads `effects/` into Pyodide in a Web Worker and calls it through the effect API, running frames through the same output stage (`effects/_output.py`) as the device. It has an effect picker, param sliders, brightness, a current limit in amps, a power-cap indicator showing estimated amps and front/side/top/orbit views. Saving a file in `effects/` reloads it in place. `?effect=<name>` selects an effect from the URL.
 
 ## Effects
 

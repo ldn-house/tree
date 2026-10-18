@@ -5,7 +5,6 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
 const N = 500;
-const MA_PER_CHANNEL = 20; // keep in sync with effects/_output.py
 const $ = (id) => document.getElementById(id);
 
 // ─── Worker RPC ───────────────────────────────────────────────────────────────
@@ -197,12 +196,12 @@ $("bri").addEventListener("input", (e) => {
   state.brightness = parseInt(e.target.value, 10);
   $("bri-out").textContent = `${state.brightness} (${Math.round((state.brightness / 255) * 100)}%)`;
 });
-$("budget").addEventListener("input", async (e) => {
-  $("budget-out").textContent = `${e.target.value}%`;
-  await call("budget", { percent: parseInt(e.target.value, 10) }).catch(showError);
+$("limit").addEventListener("input", async (e) => {
+  $("limit-out").textContent = `${parseFloat(e.target.value).toFixed(1)} A`;
+  await call("limit", { amps: parseFloat(e.target.value) }).catch(showError);
 });
 $("bri").dispatchEvent(new Event("input"));
-$("budget-out").textContent = `${$("budget").value}%`;
+$("limit-out").textContent = `${parseFloat($("limit").value).toFixed(1)} A`;
 
 // ─── Frame loop ───────────────────────────────────────────────────────────────
 
@@ -212,15 +211,13 @@ async function requestFrame() {
   try {
     const t = performance.now() - state.t0;
     const f = await call("frame", { t, brightness: state.brightness });
-    state.last = { t: Math.round(t), capped: f.capped, factor: f.factor, rawTotal: f.rawTotal, outTotal: f.outTotal, budget: f.budget };
+    state.last = { t: Math.round(t), capped: f.capped, factor: f.factor, rawTotal: f.rawTotal, outTotal: f.outTotal, budget: f.budget, amps: f.amps, limitA: f.limitA };
     setColors(state.showRaw ? f.raw : f.out);
-    const ma = (f.outTotal * MA_PER_CHANNEL) / 255;
-    const budgetMa = (f.budget * MA_PER_CHANNEL) / 255;
     const meter = $("meter");
-    meter.firstElementChild.style.width = `${Math.min(100, (100 * f.outTotal) / f.budget)}%`;
+    meter.firstElementChild.style.width = `${Math.min(100, (100 * f.amps) / f.limitA)}%`;
     meter.classList.toggle("capped", f.capped);
     $("cap").className = f.capped ? "on" : "off";
-    $("power").textContent = `${(ma / 1000).toFixed(2)} A of ${(budgetMa / 1000).toFixed(2)} A` +
+    $("power").textContent = `${f.amps.toFixed(2)} A of ${f.limitA.toFixed(2)} A` +
       (f.capped ? ` · scaled ×${f.factor.toFixed(2)}` : "");
     state.frames++;
   } catch (err) {
@@ -283,7 +280,10 @@ function fillPicker(names) {
 
 (async () => {
   try {
-    const { names, coordsPath, positions: pos } = await call("init", { n: N });
+    const { names, coordsPath, positions: pos, limitA, maPerChannel } = await call("init", { n: N });
+    $("limit").value = limitA;
+    $("limit-out").textContent = `${limitA.toFixed(1)} A`;
+    $("limit").title = `Estimated at ${maPerChannel} mA per channel (effects/_output.py)`;
     setPositions(pos);
     $("status").textContent = coordsPath ? `coords: ${coordsPath}` : "no coordinates; showing a stand-in spiral";
     fillPicker(names);
