@@ -37,6 +37,14 @@ class ViewObs:
     device: int = 0           # views sharing intrinsics
 
 
+class PlacementError(RuntimeError):
+    """A view could not be placed against the others (PnP failed)."""
+
+    def __init__(self, view: str):
+        super().__init__(f"PnP failed for {view}")
+        self.view = view
+
+
 @dataclass
 class Solution:
     points: np.ndarray                    # (n, 3) world, arbitrary scale; NaN if unsolved
@@ -49,6 +57,8 @@ class Solution:
     inliers: list                         # per view (n,) bool
     cost_px: float                        # median inlier reprojection error
     log: list = field(default_factory=list)
+    views: list = field(default_factory=list)    # names of the views actually used, in order
+    dropped: list = field(default_factory=list)  # views that could not be placed
 
     def camera_centres(self) -> np.ndarray:
         return np.array([-cv2.Rodrigues(r)[0].T @ t for r, t in zip(self.rvecs, self.tvecs)])
@@ -113,16 +123,53 @@ class Solver:
             print("  " + msg)
 
     # ---- initialisation -------------------------------------------------
+    def pair_stats(self):
+        """Shared LEDs and median image shift (fraction of the diagonal) for every view pair."""
+        V = len(self.views)
+        out = {}
+        for a in range(V):
+            for b in range(a + 1, V):
+                m = self.mask[a] & self.mask[b]
+                if m.sum() == 0:
+                    continue
+                diag = np.hypot(self.views[a].width, self.views[a].height)
+                shift = float(np.median(np.linalg.norm(self.views[a].uv[m] - self.views[b].uv[m], axis=1)) / diag)
+                out[(a, b)] = (int(m.sum()), shift)
+        return out
+
+    def duplicate_viewpoints(self, max_shift: float = 0.03, min_shared: int = 30):
+        """Pairs of views filmed from (nearly) the same place: they add almost no 3D information."""
+        return [(self.views[a].name, self.views[b].name, sh, n) for (a, b), (n, sh) in self.pair_stats().items()
+                if n >= min_shared and sh < max_shift]
+
     def _init(self, f0: float):
+        """Two-view start, then resection. Tries pairs by shared LEDs x parallax.
+
+        A pair filmed from nearly the same place shares many LEDs but pins down
+        no depth, so pairs are ranked by overlap times image shift (capped), and
+        a pair whose triangulation angle is too small is skipped. A view that
+        cannot be placed from any starting pair is dropped with a warning.
+        """
+        stats = self.pair_stats()
+        ranked = sorted(((n * min(1.0, sh / 0.08), a, b) for (a, b), (n, sh) in stats.items() if n >= 15),
+                        reverse=True)
+        if not ranked:
+            raise RuntimeError("not enough shared LEDs between any two views")
+        last = None
+        for _score, a, b in ranked:
+            try:
+                return self._init_from(f0, a, b)
+            except RuntimeError as e:
+                last = e
+                self._say(f"f0={f0:.0f}: start pair {self.views[a].name}+{self.views[b].name} failed ({e})")
+                self.failures.append(getattr(e, "view", None))
+        raise last
+
+    def _init_from(self, f0: float, a: int, b: int):
         V, n = len(self.views), self.n
         rv = [None] * V
         tv = [None] * V
         X = np.full((n, 3), np.nan)
-        common = np.array([[(self.mask[a] & self.mask[b]).sum() if a != b else 0 for b in range(V)]
-                           for a in range(V)])
-        a, b = np.unravel_index(np.argmax(common), common.shape)
-        if common[a, b] < 15:
-            raise RuntimeError("not enough shared LEDs between any two views")
         va, vb = self.views[a], self.views[b]
         m = self.mask[a] & self.mask[b]
         Ka, Kb = _K(f0, va.width, va.height), _K(f0, vb.width, vb.height)
@@ -133,6 +180,15 @@ class Solver:
             raise RuntimeError("essential matrix failed")
         E = E[:3]
         _, R, t, inl2 = cv2.recoverPose(E, pa, pb, np.eye(3), mask=inl)
+        # Triangulation angle: rays from the two centres to the shared points.
+        C_b = (-R.T @ t).ravel()
+        Xab = cv2.triangulatePoints(np.hstack([np.eye(3), np.zeros((3, 1))]), np.hstack([R, t]), pa.T, pb.T)
+        Xab = (Xab[:3] / Xab[3]).T
+        ra, rb = Xab, Xab - C_b
+        cosang = (ra * rb).sum(1) / (np.linalg.norm(ra, axis=1) * np.linalg.norm(rb, axis=1) + 1e-12)
+        angle = float(np.degrees(np.median(np.arccos(np.clip(cosang, -1, 1)))))
+        if angle < 3.0:
+            raise RuntimeError(f"triangulation angle only {angle:.1f} degrees")
         rv[a], tv[a] = np.zeros(3), np.zeros(3)
         rv[b], tv[b] = cv2.Rodrigues(R)[0].ravel(), t.ravel()
         self._triangulate(X, rv, tv, [f0] * self.n_dev, [(0, 0)] * self.n_dev)
@@ -143,13 +199,13 @@ class Solver:
             best = max(todo, key=lambda k: (self.mask[k] & np.isfinite(X).all(1)).sum())
             vk = self.views[best]
             mk = self.mask[best] & np.isfinite(X).all(1)
-            if mk.sum() < 8:
-                raise RuntimeError(f"cannot place view {vk.name}")
-            ok, r, t, inl = cv2.solvePnPRansac(X[mk], vk.uv[mk], _K(f0, vk.width, vk.height), None,
-                                               reprojectionError=6.0, iterationsCount=500)
+            ok = False
+            if mk.sum() >= 8:
+                ok, r, t_, _inl = cv2.solvePnPRansac(X[mk], vk.uv[mk], _K(f0, vk.width, vk.height), None,
+                                                     reprojectionError=6.0, iterationsCount=500)
             if not ok:
-                raise RuntimeError(f"PnP failed for {vk.name}")
-            rv[best], tv[best] = r.ravel(), t.ravel()
+                raise PlacementError(vk.name)
+            rv[best], tv[best] = r.ravel(), t_.ravel()
             self._triangulate(X, rv, tv, [f0] * self.n_dev, [(0, 0)] * self.n_dev)
         return rv, tv, X
 
@@ -181,6 +237,8 @@ class Solver:
         return rv, tv, f, k, X
 
     def _bundle(self, rv, tv, f, k, X, inliers, wire: dict | None = None, iters: int = 60):
+        if wire is None:
+            return self._bundle_lm(rv, tv, f, k, X, inliers)
         V, D, n = len(self.views), self.n_dev, self.n
         solved = np.isfinite(X).all(1)
         if wire is None:
@@ -192,8 +250,16 @@ class Solver:
         n_obs = sum(len(o[1]) for o in obs)
         pairs = np.arange(n - 1) if wire is not None else np.zeros(0, int)
         n_res = 2 * n_obs + (len(pairs) * 4 if wire is not None else 0)
-        x0 = self._pack(rv, tv, f, k, X)
+        # Focal length is optimised as log(f / f0) so it is dimensionless, and every
+        # block gets an explicit typical scale. With x_scale="jac" a focal length
+        # in pixels barely moved in 60 iterations, so it stayed at its guess.
+        f0 = np.array(f, float)
+        x0 = self._pack(rv, tv, np.zeros(D), k, X)
         n_par = len(x0)
+        fin = np.isfinite(X).all(1) & (np.abs(X).sum(1) > 0)
+        scene = float(np.median(np.linalg.norm(X[fin] - np.median(X[fin], 0), axis=1))) if fin.sum() > 3 else 1.0
+        xs = np.concatenate([np.full(3 * V, 1e-2), np.full(3 * V, 1e-2 * scene), np.full(D, 1e-2),
+                             np.full(2 * D, 1e-2), np.full(3 * n, 1e-2 * scene)])
         free_pts = np.ones(n, bool) if wire is not None else solved
         S = lil_matrix((n_res, n_par), dtype=np.uint8)
         row = 0
@@ -220,7 +286,8 @@ class Solver:
             row += 3 * len(pairs)
 
         def resid(x):
-            rv_, tv_, f_, k_, X_ = self._unpack(x)
+            rv_, tv_, lf_, k_, X_ = self._unpack(x)
+            f_ = f0 * np.exp(lf_)
             out = []
             for i, idx, uv, w in obs:
                 v = self.views[i]
@@ -241,11 +308,30 @@ class Solver:
         # Fix the gauge loosely: freeze nothing, but keep point columns of
         # unsolved LEDs out of the problem when there is no wire prior.
         res = least_squares(resid, x0, jac_sparsity=S.tocsr(), loss="huber", f_scale=self.huber,
-                            x_scale="jac", max_nfev=iters, method="trf", verbose=0)
-        rv, tv, f, k, Xn = self._unpack(res.x)
+                            x_scale=xs, max_nfev=iters, method="trf", verbose=0)
+        rv, tv, lf, k, Xn = self._unpack(res.x)
+        f = f0 * np.exp(lf)
         if wire is None:
             Xn = np.where(solved[:, None], Xn, np.nan)
         return list(rv), list(tv), list(f), [tuple(kk) for kk in k], Xn
+
+    def _bundle_lm(self, rv, tv, f, k, X, inliers, iters: int = 40):
+        """Cameras, intrinsics and points by Levenberg-Marquardt (calib.ba)."""
+        from .ba import Problem, bundle_adjust
+        solved = np.isfinite(X).all(1)
+        vi, pi, uv, w = [], [], [], []
+        for i, v in enumerate(self.views):
+            idx = np.nonzero(inliers[i] & solved & self.mask[i])[0]
+            vi.append(np.full(len(idx), i))
+            pi.append(idx)
+            uv.append(v.uv[idx])
+            w.append(np.sqrt(np.clip(v.weight[idx], 0.05, 1)))
+        prob = Problem(np.concatenate(vi), np.concatenate(pi), np.concatenate(uv), np.concatenate(w),
+                       [v.device for v in self.views], [(v.width, v.height) for v in self.views])
+        rv, tv, f, k, Xn, _rms = bundle_adjust(prob, rv, tv, f, k, np.nan_to_num(X), solved, iters=iters,
+                                               huber=self.huber)
+        Xn = np.where(solved[:, None], Xn, np.nan)
+        return rv, [np.asarray(t) for t in tv], f, k, Xn
 
     def _errors(self, rv, tv, f, k, X):
         errs = []
@@ -267,6 +353,7 @@ class Solver:
             rv, tv, f, k, X = self._bundle(rv, tv, f, k, X, [m.copy() for m in self.mask])
             return self._finish(rv, tv, f, k, X, wire_prior, reject_px)
         best = None
+        self.failures = []
         long_side = max(max(v.width, v.height) for v in self.views)
         for g in f_guesses:
             f0 = g * long_side
@@ -284,6 +371,18 @@ class Solver:
             if best is None or med < best[0]:
                 best = (med, rv, tv, f, k, X)
         if best is None:
+            # Last resort: no start pair and focal guess placed every view. Drop the
+            # view that failed most often and solve the rest.
+            names = [v for v in self.failures if v]
+            if names and len(self.views) > 2:
+                worst = max(set(names), key=names.count)
+                self._say(f"WARNING: dropping {worst}: it could not be placed against the other views")
+                keep = [v for v in self.views if v.name != worst]
+                sub = Solver(keep, self.min_weight, self.huber, self.verbose)
+                sub.log = self.log
+                sol = sub.solve(f_guesses, wire_prior, reject_px)
+                sol.dropped = [worst] + sol.dropped
+                return sol
             raise RuntimeError("all initialisations failed")
         _, rv, tv, f, k, X = best
         return self._finish(rv, tv, f, k, X, wire_prior, reject_px)
@@ -311,10 +410,34 @@ class Solver:
             sq += np.where(ok, e ** 2, 0)
         rms = np.where(n_used > 0, np.sqrt(sq / np.maximum(n_used, 1)), np.nan)
         all_inl = np.concatenate([np.where(inl[i], errs[i], np.nan) for i in range(len(self.views))])
-        return Solution(X, n_used, rms, rv, tv, f, k, inl, float(np.nanmedian(all_inl)), self.log)
+        return Solution(X, n_used, rms, rv, tv, f, k, inl, float(np.nanmedian(all_inl)), self.log,
+                        [v.name for v in self.views], [])
 
-    def _wire(self, rv, tv, f, k, X, inl, errs):
+    def ray_angles(self, rv, tv, X, inl):
+        """Widest angle (degrees) between any two inlier rays to each point."""
+        C = np.array([-_rodrigues(r).T @ t for r, t in zip(rv, tv)])
+        best = np.zeros(self.n)
+        ok = np.isfinite(X).all(1)
+        for a in range(len(C)):
+            for b in range(a + 1, len(C)):
+                both = ok & inl[a] & inl[b]
+                if not both.any():
+                    continue
+                ra, rb = X[both] - C[a], X[both] - C[b]
+                cos = (ra * rb).sum(1) / (np.linalg.norm(ra, axis=1) * np.linalg.norm(rb, axis=1) + 1e-12)
+                best[both] = np.maximum(best[both], np.degrees(np.arccos(np.clip(cos, -1, 1))))
+        return best
+
+    def _wire(self, rv, tv, f, k, X, inl, errs, min_angle: float = 3.0):
         n = self.n
+        # A point seen only from (nearly) the same place has an ill-defined depth:
+        # treat it like a single-view point (on its ray, placed by the wire).
+        angle = self.ray_angles(rv, tv, X, inl)
+        weak = np.isfinite(X).all(1) & (angle < min_angle)
+        if weak.any():
+            self._say(f"{int(weak.sum())} LEDs triangulated at under {min_angle:g} degrees "
+                      f"(near-duplicate viewpoints): placed along their rays by the wire prior")
+        X = np.where(weak[:, None], np.nan, X)
         multi = np.isfinite(X).all(1)
         d = np.linalg.norm(np.diff(X, axis=0), axis=1)
         d = d[np.isfinite(d)]
@@ -348,6 +471,7 @@ class Solver:
         depth = np.median(np.linalg.norm(Cs[:, None] - Xi[good][None], axis=-1))
         px_per_unit = float(np.mean(f) / depth)
         n_views = np.array([sum(self.mask[i][p] and inl[i][p] for i in range(len(self.views))) for p in range(n)])
+        n_views = np.where(weak, 1, n_views)  # near-duplicate rays count as one view
         # Midpoint row j is for point j + 1; pull harder where the images say little.
         w_mid = np.where(n_views[1:] >= 2, 0.05, 0.5)
         wire = {"pitch": pitch, "w_hinge": 1.0, "w_mid": w_mid, "px_per_unit": px_per_unit}
