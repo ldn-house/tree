@@ -21,6 +21,32 @@ This is the report for the calibration workstream: what is wrong with today's co
 - **Colour multiplexing (3 bits per frame in R, G, B) is not worth pursuing.** In the phone model it recalls at most 41% of visible LEDs at half resolution (0.5% with 3× crosstalk), where 3D solving fails, and 68% at full resolution, with 70 swaps. Even if it worked, it would shorten the loop only from 6.6 s to 5.1 s. Each bit gets a third of the light, and colour comes from the video's chroma, which phones and H.264 store at quarter resolution and quantise coarsely. Mono differential is the default (section 5.3).
 - **The firmware side is small.** The tree just plays host-built bitplane frames (`.tcal`) on absolute deadlines through the normal output stage, and the firmware thread has already implemented and tested this against the test vector. All pattern design lives on the host.
 
+## 0. First real calibration (18 October 2026)
+
+The first real run used five 1080×1920 portrait HEVC clips at 59 fps, 7.7–26 s long, filmed by turning the tree in front of a fixed phone. Two clips (clip1 and clip2) were taken at the same angle.
+
+**Decoding.** Sync scores were 0.69–0.88, and each clip gave 192–244 confident detections. 453 of 500 LEDs were seen at least once.
+
+**Bugs it exposed, now fixed:**
+
+- **Decoding was too slow and memory-hungry for 60 fps phone video.** The coordinator's sequential run was killed after 30 minutes. Sync refinement recomputed every LED's exposure integral for each of 755 candidates, and the sync pass kept every downsampled frame in RAM (about 5 GB for the 26 s clip). Now the integrals are precomputed per exposure (identical results), only a float16 local-contrast stack is kept, and clips decode in parallel. One clip takes 31.5 s → 4.9 s; **all five decode in 26 s wall-clock**. Detections match the earlier ones to a median of 0.11–0.19 px. `--max-fps 30` and `--scale 0.5` exist for slower machines, but barely help on a fast one (HEVC decoding dominates), and `--scale 0.5` finds 12–18% fewer LEDs.
+- **Bundle adjustment never estimated the focal length.** It always stayed at its initial guess: on synthetic data, the recovered focal was always exactly one of the guesses. The generic sparse solver converged too slowly along the focal/depth direction. It has been replaced with Levenberg–Marquardt with analytic Jacobians (`calib/ba.py`), estimating k1 only, since phone video is already distortion-corrected. Synthetic focal recovery: true 1285 px, recovered 1283 px from starting guesses of 1152, 1632 and 2304; it used to stay at the guess, with 0.6–7 cm 3D error depending on which guess was used. **Benchmark gains:** L0 still captures go from 0.58 cm to 0.45 cm median 3D error; the default video configuration from 0.82 cm to 0.63 cm at 540×960, and from 1.03 cm to 0.59 cm at full resolution.
+- **The solve started from a degenerate pair.** It picked the pair with the most shared LEDs, clip1 + clip2 (222 shared, 1% median image shift), and then failed. Pairs are now ranked by overlap × parallax, a pair with under 3° triangulation angle is skipped, and a view is dropped only as a last resort, with a warning. `solve` warns about near-duplicate viewpoints.
+- **Near-duplicate clips made the wire noisy.** LEDs seen only by the duplicate pair were triangulated from nearly parallel rays, giving 55 steps over twice the median. LEDs whose widest ray angle is under 3° are now treated as single-view and placed along their ray by the wire prior, which brings that down to 5.
+
+**Result with all five clips:**
+
+| Measure | Value |
+|---|---|
+| Median reprojection error | 0.65 px |
+| Focal length | 1642 px (k1 −0.02) |
+| LEDs per number of views (0–5) | 47 / 104 / 149 / 148 / 43 / 9 |
+| Wire audit | 5 steps over 2× the median, 6 outliers |
+| Height/width | 1.57 |
+| Agreement with the 4-clip solve, similarity-aligned | median 0.002, p90 0.007 tree heights |
+
+**Camera layout.** The solved camera azimuths are about 0°, 46°, 133° and −123° (clip1 and clip2 coincide). That corresponds to the tree being turned in front of a fixed phone, which is geometrically the same as walking around it.
+
 ## 1. What is wrong with the current coordinates
 
 ### 1.1 Audit of `coordinates/coords.csv`
