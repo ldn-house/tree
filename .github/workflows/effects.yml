@@ -7,6 +7,7 @@ on:
       - "render.py"
       - "smoke.py"
       - "tools/**"
+      - "tests/effects/**"
       - "coordinates/**"
       - ".github/workflows/effects.yml"
   pull_request:
@@ -15,6 +16,7 @@ on:
       - "render.py"
       - "smoke.py"
       - "tools/**"
+      - "tests/effects/**"
       - "coordinates/**"
       - ".github/workflows/effects.yml"
   workflow_dispatch:
@@ -50,6 +52,9 @@ jobs:
 
       - name: Smoke-test effects
         run: ./smoke.py --require-micropython --require-mpy-cross --micropython ~/micropython-bin/micropython
+
+      - name: Output stage tests
+        run: uv run --with pytest pytest tests/effects -q
 
       - name: Render every effect
         if: always()

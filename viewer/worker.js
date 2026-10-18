@@ -56,9 +56,9 @@ class Host:
         self.effect.render(int(t_ms), self.raw)
         self.stage.process(self.raw, self.out, int(brightness))
         out_total = sum(self.out)
-        # Estimated current, computed the way the firmware reports it.
-        b = int(brightness)
-        amps = _output.current_a(self.stage.raw_total * self.stage.factor // 4096 * b // 255)
+        # Estimated current from the bytes actually output (after gamma,
+        # white balance and dithering), as the firmware reports it.
+        amps = _output.current_a(out_total)
         limit = _output.current_a(self.stage.budget)
         return (bytes(self.out), bytes(self.raw), self.stage.capped, self.stage.factor,
                 self.stage.raw_total, out_total, self.stage.budget, amps, limit)

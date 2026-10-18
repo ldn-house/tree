@@ -6,7 +6,8 @@
 """Headless renderer for tree effects.
 
 Runs an effect from effects/ under CPython through the same output stage as
-the firmware (power cap -> brightness -> gamma) and writes, per effect:
+the firmware (power cap -> brightness -> white balance -> gamma -> dither)
+and writes, per effect:
 
     renders/<effect>/anim.gif    front | side | top views of the real coordinates
     renders/<effect>/sheet.png   contact sheet of evenly spaced frames, plus an
@@ -92,7 +93,7 @@ def build_params(module, overrides):
 
 def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0,
                limit_a=_output.LIMIT_A, ma_per_channel=_output.MA_PER_CHANNEL, gamma=None,
-               coords=None, n=LED_COUNT, keep_raw=False):
+               coords=None, n=LED_COUNT, keep_raw=False, dither=True, white=None):
     """Render an effect headlessly. Returns a dict with output frames
     (uint8 array frames x n x 3, after the output stage) and metrics."""
     module = effects.load(name)
@@ -103,7 +104,7 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
     if float(ma_per_channel).is_integer():
         ma_per_channel = int(ma_per_channel)
     budget = int(_output.budget_for_current(limit_a, ma_per_channel))
-    stage = _output.Output(n, budget=budget, gamma=gamma)
+    stage = _output.Output(n, budget=budget, gamma=gamma, dither=dither, white=white)
     bri = max(0, min(255, round(brightness * 255)))
     count = max(1, round(seconds * fps))
     raw = bytearray(3 * n)
@@ -150,10 +151,12 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
 
     out_totals = outs.reshape(done, -1).sum(axis=1).astype(np.int64) if done else np.zeros(0)
     lit = (outs.max(axis=2) > 0).mean(axis=1) if done else np.zeros(0)
-    # Estimated current per frame, computed as the firmware does from the
-    # stage telemetry: raw_total * factor // 4096 * brightness // 255.
-    current = np.array([_output.current_a(int(raw_totals[f]) * int(factor[f]) // 4096 * bri // 255,
-                                          ma_per_channel) for f in range(done)])
+    # Estimated current per frame from the bytes actually output (after cap,
+    # brightness, white balance, gamma and dithering), as the firmware does.
+    current = np.array([_output.current_a(int(out_totals[f]), ma_per_channel) for f in range(done)])
+    # Dithering may put a frame up to 1 LSB per lit channel above its exact
+    # target; on average the output stays within the budget.
+    lit_channels = (outs > 0).reshape(done, -1).sum(axis=1) if done else np.zeros(0)
     uncapped = np.array([_output.current_a(int(raw_totals[f]) * bri // 255, ma_per_channel)
                          for f in range(done)])
 
@@ -174,6 +177,8 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
         "params": params,
         "brightness": round(bri / 255, 4),
         "gamma": gamma,
+        "dither": bool(dither),
+        "white": list(white) if white else None,
         "led_count": n,
         "coords_loaded": sum(1 for c in (coords or []) if c is not None),
         "power": {
@@ -186,7 +191,9 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
             "current_a": {"mean": round(float(current.mean()), 3) if done else None,
                           "peak": round(float(current.max()), 3) if done else None},
             "uncapped_peak_a": round(float(uncapped.max()), 3) if done else None,
-            "over_budget_frames": int((out_totals > budget).sum()),
+            "over_budget_frames": int((out_totals > budget + lit_channels).sum()),
+            "mean_over_budget": round(float(out_totals.mean() - budget), 2) if done else None,
+            "max_over_budget": int((out_totals - budget).max()) if done else None,
             "per_frame": {"current_a": [round(float(c), 3) for c in current],
                           "capped": [bool(c) for c in capped[:done]]},
         },
@@ -405,7 +412,8 @@ def render_one(name, args, coords, coords_src, overrides, out_root):
     out_dir = out_root / name
     out_dir.mkdir(parents=True, exist_ok=True)
     result = run_effect(name, args.seconds, args.fps, args.seed, overrides, args.brightness,
-                        args.limit_a, args.ma_per_channel, args.gamma, coords, keep_raw=args.view == "raw")
+                        args.limit_a, args.ma_per_channel, args.gamma, coords, keep_raw=args.view == "raw",
+                        dither=not args.no_dither, white=args.white)
     if args.view == "raw" and result["raw"] is not None:
         result["frames"] = result["raw"]
     result["metrics"]["coords_source"] = coords_src
@@ -474,6 +482,9 @@ def parse_args(argv=None):
     ap.add_argument("--ma-per-channel", type=float, default=_output.MA_PER_CHANNEL,
                     help=f"current of one channel at 255, mA (default {_output.MA_PER_CHANNEL})")
     ap.add_argument("--gamma", type=float, default=None, help="output gamma (default: linear)")
+    ap.add_argument("--no-dither", action="store_true", help="round each frame instead of dithering over time")
+    ap.add_argument("--white", type=lambda v: tuple(float(x) for x in v.split(",")), default=None,
+                    metavar="R,G,B", help="per-channel white balance, e.g. 1,0.85,0.7")
     ap.add_argument("--coords", help="coordinates file (default: coordinates/coords.txt, "
                                      "else the legacy coordinates/coords_compact.txt)")
     ap.add_argument("--no-coords", action="store_true", help="render as if uncalibrated")
