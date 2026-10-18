@@ -14,3 +14,10 @@ for name in ("boot.py", "main.py"):
     except OSError:
         continue
     exec(compile(src, name, "exec"), g)
+
+# main.py only returns after a KeyboardInterrupt (someone at the USB REPL).
+# mpremote then resets the board with machine.reset(), as its reset command does.
+if os.getenv("DEVSIM_MOCKS"):
+    import machine
+
+    machine.reset()

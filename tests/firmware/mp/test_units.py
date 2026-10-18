@@ -576,6 +576,55 @@ def r2h1_update_key_cannot_change_over_the_network():
 
 
 @test
+def floor_is_set_after_a_first_install_whose_trial_was_cleared():
+    """Bring-up: a first USB install's trial boot couldn't confirm (old Wi-Fi
+    credentials) and was cleared with "nothing to roll back to"; the floor
+    must still be set once the slot is next marked healthy."""
+    reset_flash()
+    install_commit(make_bundle(GOOD, mutate=_gen(500)))
+    st = bootmgr.read_state()
+    st["boots"] = 1  # the trial boot didn't confirm
+    bootmgr.decide(st)
+    assert "nothing to roll back to" in st["event"] and not st["trial"]
+    bootmgr.write_state(st)
+    assert bootmgr.read_state()["floor"] == 0
+    bootmgr.mark_healthy("a")  # the next boot reaches health (HEALTHY_S)
+    assert bootmgr.read_state()["floor"] == 500
+    with open(bootmgr.FLOOR_FILE) as f:
+        assert json.load(f) == 500
+
+
+@test
+def reset_cause_uses_the_watchdog_reason_register():
+    real = bootmgr.machine
+
+    class M:
+        PWRON_RESET = 1
+        WDT_RESET = 3
+        DEVSIM_WATCHDOG_BASE = 0x400D8000
+
+        def __init__(self, cause, reason):
+            self.cause = cause
+            self.mem32 = {0x400D8000 + 8: reason, 0x400D8000 + 0x0C: 0}
+
+        def reset_cause(self):
+            return self.cause
+
+    try:
+        for cause, reason, want in ((3, 1, "watchdog"), (3, 2, "reboot"), (1, 0, "pwron"), (3, 3, "watchdog")):
+            bootmgr.machine = M(cause, reason)
+            assert bootmgr.reset_cause() == want, (cause, reason)
+        m = M(3, 2)
+        bootmgr.machine = m
+        bootmgr.scratch_set(4)
+        assert bootmgr.scratch_get() == 4
+        bootmgr.deliberate()
+        assert bootmgr.scratch_get() is None
+    finally:
+        bootmgr.machine = real
+
+
+@test
 def r2m5_explicit_reclaim_needs_enough_room():
     two_slots()
     bootmgr.mark_healthy("b")

@@ -163,7 +163,7 @@ def test_hanging_effect_is_quarantined_after_watchdog(device):
     assert "hang" in st["effect"]["quarantined"]
     assert st["state"]["effect"] == "hang" and st["effect"]["running"] != "hang"
     # The loop was blocked, so nothing could record a reason; the cause is enough.
-    assert st["boot"]["reset_cause"] == "wdt"
+    assert st["boot"]["reset_cause"] == "watchdog"  # REASON TIMER: a genuine expiry
     # Healthy (boot counter reset) after 30 s, with no further resets.
     wait_for(lambda: status(d)["supervisor"]["healthy"], 45, what="healthy")
     assert len(d.boots) == 1  # no reboot loop

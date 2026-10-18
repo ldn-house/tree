@@ -4,6 +4,10 @@ Driven by tests/firmware/devsim.py through environment variables:
     DEVSIM_WDT      file touched on every WDT.feed() (the harness resets the
                     "board" if it goes stale for longer than the timeout)
     DEVSIM_RESET    reset cause for this boot: pwron | wdt
+    DEVSIM_WDT_REASON  the watchdog REASON register: 0 (power-on), 1 (TIMER:
+                    the watchdog expired) or 2 (FORCE: machine.reset())
+    DEVSIM_SCRATCH  file holding the watchdog scratch registers, which (like
+                    the RP2350's) survive watchdog and forced resets
 """
 
 import os
@@ -41,7 +45,45 @@ def soft_reset():
 
 
 def reset_cause():
+    # Like the rp2 port: any watchdog-driven reset, including machine.reset()
+    # (watchdog_reboot), reads as WDT_RESET; only REASON tells them apart.
     return WDT_RESET if os.getenv("DEVSIM_RESET") == "wdt" else PWRON_RESET
+
+
+# The RP2350 watchdog block, so firmware code that reads REASON and the
+# scratch registers through mem32 runs unchanged.
+DEVSIM_WATCHDOG_BASE = 0x400D8000
+_REASON = DEVSIM_WATCHDOG_BASE + 0x08
+
+
+class _Mem32:
+    def _load(self):
+        try:
+            import json
+
+            with open(os.getenv("DEVSIM_SCRATCH")) as f:
+                return json.load(f)
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def __getitem__(self, addr):
+        if addr == _REASON:
+            return int(os.getenv("DEVSIM_WDT_REASON") or 0)
+        return self._load().get(str(addr), 0)
+
+    def __setitem__(self, addr, value):
+        path = os.getenv("DEVSIM_SCRATCH")
+        if not path:
+            return
+        import json
+
+        d = self._load()
+        d[str(addr)] = value & 0xFFFFFFFF
+        with open(path, "w") as f:
+            json.dump(d, f)
+
+
+mem32 = _Mem32()
 
 
 def unique_id():

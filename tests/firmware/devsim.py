@@ -51,6 +51,7 @@ def mp_env(root: Path, extra=None):
     env["DEVSIM_MOCKS"] = str(MOCKS)
     env["DEVSIM_WDT"] = str(root / ".wdt")
     env["DEVSIM_NET"] = str(root / ".net")
+    env["DEVSIM_SCRATCH"] = str(root / ".scratch_regs")
     env.update(extra or {})
     return env
 
@@ -158,8 +159,18 @@ class Device:
         except (OSError, ValueError):
             return None, None
 
+    def interrupt(self):
+        """Ctrl-C at the USB REPL, as mpremote does; the runner then calls
+        machine.reset(), as mpremote's reset command does."""
+        import signal
+
+        if self.proc and self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGINT)
+
     def _loop(self):
         cause = "pwron"
+        reason = 0
+        (self.root / ".scratch_regs").unlink(missing_ok=True)  # power-on clears them
         log = open(self.root / "console.log", "a")
         while not self._stop.is_set():
             for f in (".wdt", ".wdt.timeout"):
@@ -170,7 +181,7 @@ class Device:
             self.proc = subprocess.Popen(
                 [MICROPYTHON, "-X", f"heapsize={HEAP}", str(RUNNER)],
                 cwd=self.root,
-                env=mp_env(self.root, {"DEVSIM_RESET": cause}),
+                env=mp_env(self.root, {"DEVSIM_RESET": cause, "DEVSIM_WDT_REASON": str(reason)}),
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
@@ -180,21 +191,22 @@ class Device:
                 rc = self.proc.poll()
                 fed, timeout = self._wdt()
                 if self._next_cause and rc is not None:
-                    outcome, cause = "power cut", self._next_cause
+                    outcome, cause, reason = "power cut", self._next_cause, 0
+                    (self.root / ".scratch_regs").unlink(missing_ok=True)
                 elif rc is None:
                     if fed is not None and time.time() - fed > timeout:
                         self.proc.kill()
                         self.proc.wait()
-                        outcome, cause = "watchdog reset", "wdt"
+                        outcome, cause, reason = "watchdog reset", "wdt", 1
                 elif rc == 42:
-                    outcome, cause = "machine.reset()", "wdt"
+                    outcome, cause, reason = "machine.reset()", "wdt", 2
                 elif self._stop.is_set():
                     break  # we killed it (stop()): not a boot outcome
                 elif fed is not None:
                     # Dropped to the REPL; the running watchdog resets the board.
                     while time.time() - fed <= timeout and not self._stop.is_set():
                         time.sleep(0.1)
-                    outcome, cause = f"exited ({rc}) then watchdog reset", "wdt"
+                    outcome, cause, reason = f"exited ({rc}) then watchdog reset", "wdt", 1
                 else:
                     outcome = f"exited ({rc}) with no watchdog: board would hang at the REPL"
                     self.hung = True
