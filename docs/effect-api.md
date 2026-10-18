@@ -46,7 +46,7 @@ class Effect:
 | Attribute | Meaning |
 |---|---|
 | `ctx.n` | LED count (500). |
-| `ctx.coords` | `None`, or a list of `n` entries, each `(x, y, z)` or `None`; see [Coordinates](#coordinates). |
+| `ctx.coords` | `None`, or a list of `n` entries, each `(x, y, z)` or `None`; see [Coordinates](#coordinates). To change coordinates, the runtime passes a new list rather than editing this one, because derived tables are cached per list. |
 | `ctx.params` | Dict of current param values. The runtime assigns new values into this same dict between frames, and never swaps the dict itself, since effects keep a reference to it. Read params in `render()` (see `Param` below). |
 | `ctx.random` | Random source with `seed()`, `random()` and `getrandbits(k)`. On the Pico this is the `random` module; in the renderer and viewer it is `random.Random(seed)`. Use this, never the global `random`. |
 
@@ -73,7 +73,7 @@ class Effect:
 
 | Helper | Use |
 |---|---|
-| `Layout(ctx)` | Per-LED integer tables: `known`, `h` (height 0..ONE), `theta` (azimuth 0..ONE-1, from `atan2(z, x)`), `r` (radius, ONE = tree's outer radius), `x`, `z`. Unknown LEDs get `known[i] = 0` and `h = i/n`, so string-order fallbacks keep working. |
+| `Layout(ctx)` | Per-LED integer tables: `known`, `h` (height 0..ONE), `theta` (azimuth 0..ONE-1, from `atan2(z, x)`), `r` (radius, ONE = tree's outer radius), `x`, `z`. Unknown LEDs get `known[i] = 0` and `h = i/n`, so string-order fallbacks keep working. The tables are built once per coordinates list and shared by every effect, so treat them as read-only. Building them is the expensive part of an effect's `__init__` (float maths per LED); sharing them keeps effect switches in the auto cycle from churning the heap. |
 | `Param(ctx, name, default, scale=ONE)` | `.get()` returns `int(value * scale)`, recomputed only when the value object changes. |
 | `Phase(period_ms)` | `.update(t_ms, speed)` returns 0..ONE-1, one cycle per `period_ms` at `speed == ONE`; accumulates per-frame deltas, so speed changes stay smooth. |
 | `WHEEL`, `SIN` | 256-entry colour wheel (RGB triples) and sine (0-255) tables. |

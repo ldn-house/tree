@@ -103,44 +103,70 @@ class Layout:
     - r[i]: distance from the trunk axis, ONE = the tree's outer radius
       (98th percentile, so a few stray LEDs don't shrink everything else).
     - x[i], z[i]: horizontal position in the same units as r (signed).
+
+    The tables are computed once per coordinates list and shared by every
+    effect, so treat them as read-only. Building them takes float maths per
+    LED, which on the Pico means a lot of short-lived heap objects; doing it
+    once instead of on every effect switch keeps the auto cycle's heap churn
+    near zero.
     """
 
     def __init__(self, ctx):
-        n = ctx.n
-        coords = ctx.coords
-        self.n = n
-        self.known = bytearray(n)
-        self.h = array("H", bytes(2 * n))
-        self.theta = array("H", bytes(2 * n))
-        self.r = array("H", bytes(2 * n))
-        self.x = array("h", bytes(2 * n))
-        self.z = array("h", bytes(2 * n))
-        self.count = 0
-        radii = []
-        if coords:
-            for i in range(n):
-                c = coords[i] if i < len(coords) else None
-                if c is not None:
-                    radii.append(math.sqrt(c[0] * c[0] + c[2] * c[2]))
-        rmax = 1.0
-        if radii:
-            radii.sort()
-            rmax = radii[int(0.98 * (len(radii) - 1))] or 1.0
-        self.rmax = rmax
-        tau = 2 * math.pi
-        for i in range(n):
-            c = coords[i] if coords and i < len(coords) else None
-            if c is None:
-                self.h[i] = i * ONE // n
-                continue
-            x, y, z = c
-            self.known[i] = 1
-            self.count += 1
-            self.h[i] = min(ONE, max(0, fp(y)))
-            self.theta[i] = int((math.atan2(z, x) + math.pi) / tau * ONE) & MASK
-            self.r[i] = min(65535, fp(math.sqrt(x * x + z * z) / rmax))
-            self.x[i] = max(-32768, min(32767, fp(x / rmax)))
-            self.z[i] = max(-32768, min(32767, fp(z / rmax)))
+        t = _tables(ctx.coords, ctx.n)
+        self.n = ctx.n
+        self.known, self.h, self.theta, self.r, self.x, self.z, self.count, self.rmax = t
+
+
+# (coords, n, tables) of the last layout built.
+_shared = [None, -1, None]
+
+
+def _tables(coords, n):
+    if _shared[0] is coords and _shared[1] == n:
+        return _shared[2]
+    _shared[2] = None  # let the old tables go before building new ones
+    known = bytearray(n)
+    h = array("H", bytes(2 * n))
+    theta = array("H", bytes(2 * n))
+    r = array("H", bytes(2 * n))
+    x = array("h", bytes(2 * n))
+    z = array("h", bytes(2 * n))
+    # First pass in 1/65536 units so the radius normalisation below is
+    # integer maths (fewer float temporaries per LED).
+    ri = array("i", bytes(4 * n))
+    xi = array("i", bytes(4 * n))
+    zi = array("i", bytes(4 * n))
+    k_theta = ONE / (2 * math.pi)
+    half = ONE / 2
+    count = 0
+    for i in range(n):
+        c = coords[i] if coords and i < len(coords) else None
+        if c is None:
+            h[i] = i * ONE // n
+            continue
+        cx, cy, cz = c
+        known[i] = 1
+        count += 1
+        h[i] = min(ONE, max(0, int(cy * ONE + 0.5)))
+        theta[i] = int(math.atan2(cz, cx) * k_theta + half) & MASK
+        ri[i] = min(1 << 20, int(math.sqrt(cx * cx + cz * cz) * 65536 + 0.5))
+        xi[i] = max(-(1 << 20), min(1 << 20, int(cx * 65536)))
+        zi[i] = max(-(1 << 20), min(1 << 20, int(cz * 65536)))
+    rmax = 65536
+    if count:
+        radii = sorted(ri[i] for i in range(n) if known[i])
+        rmax = radii[int(0.98 * (len(radii) - 1))] or 65536
+        radii = None
+    for i in range(n):
+        if known[i]:
+            r[i] = min(65535, (ri[i] * ONE + rmax // 2) // rmax)
+            x[i] = max(-32768, min(32767, xi[i] * ONE // rmax))
+            z[i] = max(-32768, min(32767, zi[i] * ONE // rmax))
+    t = (known, h, theta, r, x, z, count, rmax / 65536)
+    _shared[0] = coords
+    _shared[1] = n
+    _shared[2] = t
+    return t
 
 
 def clear(frame):
