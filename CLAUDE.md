@@ -55,6 +55,8 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 - `flash.py` - uv script (PEP 723) to flash/run code via USB or OTA
 - `simulator.html` - Browser-based simulator using Pyodide (runs same Python code)
 - `serve.py` - Local HTTP server for the simulator
+- `effects/` - Pure effect modules plus shared output stage and coordinate loading (see `docs/effect-api.md`)
+- `render.py` - Headless effect renderer (GIF, contact sheet, metrics)
 
 ### Calibration Tools (for 3D coordinate mapping)
 
@@ -126,32 +128,19 @@ Preview animations in the browser without hardware:
 
 Uses Pyodide to run the actual `main.py` Python code in WebAssembly. The simulator mocks `machine`, `neopixel`, and `time` modules to render to a canvas.
 
-## Adding Animations
+## Effects
 
-Add new animation functions to `main.py` and register them in the `ANIMATIONS` list as `(name, lambda)` tuples:
+Effects live in `effects/`, one module per effect, written against the pure API in `docs/effect-api.md`: `Effect(ctx).render(t_ms, frame)` fills a raw RGB bytearray, and the runtime owns timing, brightness, the power cap and the hardware. The same files run on the Pico, under CPython and in Pyodide. (The firmware runtime that loads `effects/` is being rewritten; until it lands, the device still runs the animations in `main.py`.)
 
-```python
-ANIMATIONS = [
-    ("auto", None),  # Special: cycles through all effects
-    ("my_animation", lambda: my_animation(param1, param2)),
-    ...
-]
+To add an effect, create `effects/<name>.py` with `NAME`, `DURATION_MS`, `PARAMS`, `NEEDS_COORDS` and an `Effect` class, then add the name to `EFFECTS` in `effects/__init__.py`. `render()` must not allocate on MicroPython, so use integer maths over tables precomputed in `__init__` (see `effects/_util.py`).
+
+Check changes headlessly:
+
+```bash
+./render.py <effect>            # renders/<effect>/{sheet.png,anim.gif,metrics.json}
+./render.py all                 # every effect + renders/overview.png
+./render.py <effect> --watch    # re-render on save
+micropython tools/mp_check.py   # every render() is allocation-free on MicroPython
 ```
 
-Each animation function should:
-- Use `scale(color)` to apply brightness (also handles GRB color order)
-- Call `safe_write()` instead of `strip.write()` for automatic power limiting
-- Call `check_interrupt()` periodically and return early if True (for responsive HA control)
-- Accept duration/cycle parameters to control length
-
-Example:
-```python
-def my_animation(wait_ms=50, cycles=10):
-    for _ in range(cycles):
-        if check_interrupt():
-            return
-        for i in range(LED_COUNT):
-            strip[i] = scale((255, 0, 0))
-        safe_write()
-        time.sleep_ms(wait_ms)
-```
+Attach `sheet.png` (and the GIF) to PRs that change an effect.

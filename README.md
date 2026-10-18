@@ -43,14 +43,13 @@ The tree integrates with Home Assistant via MQTT, appearing as a light entity wi
 
 ### Power Limiting (HDR)
 
-The tree automatically limits total power draw per-frame to prevent PSU brownouts. Sparse animations (sparkle) can be brighter than dense ones (rainbow). Brightness slider goes 0-100% but actual output is capped based on how many LEDs are lit.
+The tree automatically limits total power draw per-frame to prevent PSU brownouts. Sparse animations (plane sweep) can be brighter than dense ones (rainbow). Brightness slider goes 0-100% but actual output is capped based on how many LEDs are lit.
 
 ## Animations
 
 - **auto** - Cycles through all effects
 - Rainbow cycle
 - Christmas (red/green theater chase)
-- White sparkle
 - Candy cane stripes
 - Multicolor twinkle
 - Warm white (solid)
