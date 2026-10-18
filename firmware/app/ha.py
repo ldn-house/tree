@@ -10,6 +10,9 @@ Topics (prefix cfg.MQTT_PREFIX, default "xmas_tree"):
     <p>/state, <p>/set       the light (JSON schema), as before
     <p>/settings             speed, auto-cycle duration, effect params (JSON)
     <p>/diag                 diagnostics (JSON, every 30 s)
+    <p>/effect_running       what the strip shows: effect name, "off" or
+                             "calibration" (retained, on change, <= 1/s)
+    <p>/effect_running/attributes   {"mode", "selected", "next_switch_s"}
     <p>/update               firmware update entity state (JSON)
     <p>/cmd/...              number/button/update commands
     <p>/calibrate/set|state  calibration (docs/calibration-protocol.md, 7)
@@ -27,6 +30,7 @@ import asyncio
 from app.log import log
 
 DIAG_EVERY_MS = 30000
+EFFECT_MIN_MS = 1000
 REDISCOVER_DELAY_MS = 3000
 
 
@@ -57,6 +61,10 @@ class HA:
         self.t_set = p + "/set"
         self.t_settings = p + "/settings"
         self.t_diag = p + "/diag"
+        # What the strip is showing, published on every change (diag is only
+        # every 30 s and auto mode switches effects every 8-20 s).
+        self.t_effect = p + "/effect_running"
+        self.t_effect_attr = p + "/effect_running/attributes"
         self.t_update = p + "/update"
         self.t_cmd = p + "/cmd/"
         self.t_cal_set = p + "/calibrate/set"
@@ -67,6 +75,8 @@ class HA:
         mqtt.on_connect = self.on_connect
         mqtt.on_message = self.on_message
         self.dirty = {"light": False, "settings": False, "update": False, "calib": False, "diag": False}
+        self.effect_shown = None  # (label, mode) last published
+        self.effect_at = None  # ticks of that publish
         self.ready = False  # discovery published for this session
         self.rediscover_at = None
         self.last_diag = 0
@@ -239,8 +249,8 @@ class HA:
                 }
         yield "sensor", "effect_running", {
             "name": "Running effect",
-            "state_topic": self.t_diag,
-            "value_template": "{{ value_json.effect }}",
+            "state_topic": self.t_effect,
+            "json_attributes_topic": self.t_effect_attr,
             "icon": "mdi:animation-play",
         }
         sensors = (
@@ -369,8 +379,27 @@ class HA:
             await self.mqtt.publish(self.t_diag, json.dumps(self.diag_payload()), retain=True)
             self.last_diag = time.ticks_ms()
 
+    async def _effect(self, now):
+        """Publish the running effect when it changes: auto advance, a new
+        selection, a skip past a failed or quarantined effect, the fallback,
+        power off ("off") and calibration ("calibration"). At most one
+        publish per EFFECT_MIN_MS; a change inside that window goes out as
+        soon as it ends, so the last state always lands."""
+        label, mode, nxt = self.rt.engine.running()
+        if (label, mode) == self.effect_shown:
+            return
+        if self.effect_at is not None and time.ticks_diff(now, self.effect_at) < EFFECT_MIN_MS:
+            return
+        self.effect_shown = (label, mode)
+        self.effect_at = now
+        attrs = {"mode": mode, "selected": self.rt.state.get("effect"), "next_switch_s": nxt}
+        await self.mqtt.publish(self.t_effect_attr, json.dumps(attrs), retain=True)
+        await self.mqtt.publish(self.t_effect, label, retain=True)
+
     async def on_connect(self):
         self.ready = False
+        self.effect_shown = None
+        self.effect_at = None
         await self.mqtt.publish(self.t_avail, "online", retain=True)
         await self.publish_discovery()
         for k in self.dirty:
@@ -395,6 +424,7 @@ class HA:
                 self.dirty["calib"] = True
             if time.ticks_diff(now, self.last_diag) >= DIAG_EVERY_MS and not calib.playing():
                 self.dirty["diag"] = True
+            await self._effect(now)
             for what in ("light", "calib", "settings", "update", "diag"):
                 if self.dirty[what]:
                     self.dirty[what] = False

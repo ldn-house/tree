@@ -172,6 +172,22 @@ class Engine:
             return False
         return True
 
+    def running(self):
+        """(label, mode, next_switch_s) for what the strip is showing now:
+        label is the effect, "off" or "calibration"; next_switch_s is the
+        time left before auto mode moves on (None when locked)."""
+        if self.owner is not None:
+            return "calibration", "calibration", None
+        if not self.state.get("power"):
+            return "off", "off", None
+        if self.name is None:
+            return "starting", "auto" if self.state.get("effect") == "auto" else "locked", None
+        mode = self.mode()
+        nxt = None
+        if mode != "locked":
+            nxt = max(0, time.ticks_diff(self.auto_until, time.ticks_ms()) // 1000)
+        return self.name, mode, nxt
+
     def mode(self):
         eff = self.state.get("effect")
         if eff != "auto" and self.name == eff:

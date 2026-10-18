@@ -181,3 +181,57 @@ def test_reboot_button(mdev, bus):
     wait_for(lambda: len(d.boots) == 1, 15)
     bus.wait(AVAIL, lambda p: p == b"online", 30, after=t0 + 0.5)
     assert "requested" in status(d)["boot"]["reset_reason"]
+
+
+EFF = P + "/effect_running"
+
+
+def test_running_effect_is_published_on_change(mdev, bus):
+    d = mdev
+    wait_for(lambda: len(configs(bus)) >= 20, 20, what="discovery")
+    sensor = configs(bus)["homeassistant/sensor/xmas_tree/effect_running/config"]
+    assert sensor["state_topic"] == EFF and sensor["json_attributes_topic"] == EFF + "/attributes"
+    bus.wait(EFF, timeout=10)
+    # A manual selection reaches HA within about a second.
+    time.sleep(1.2)
+    t0 = time.time()
+    d.post("/state", {"effect": "chase"})
+    bus.wait(EFF, lambda p: p == b"chase", 5, after=t0)
+    lag = [at for t, p, _r, at in bus.msgs if t == EFF and p == b"chase" and at >= t0][0] - t0
+    assert lag < 1.5, lag
+    attrs = json.loads(bus.last(EFF + "/attributes"))
+    assert attrs == {"mode": "locked", "selected": "chase", "next_switch_s": None}
+    # Auto mode advances by itself (fixture effects run 4 s each) and says so.
+    t0 = time.time()
+    d.post("/state", {"effect": "auto"})
+    names = wait_for(lambda: (lambda ps: ps if len(set(ps)) >= 3 else None)(
+        [p for t, p in bus.since(t0, EFF)]), 20, what="auto advances")
+    attrs = json.loads(bus.last(EFF + "/attributes"))
+    assert attrs["mode"] == "auto" and attrs["selected"] == "auto" and isinstance(attrs["next_switch_s"], int)
+    # Power off and calibration.
+    t0 = time.time()
+    d.post("/state", {"power": False})
+    bus.wait(EFF, lambda p: p == b"off", 5, after=t0)
+    d.post("/state", {"power": True})
+    t0 = time.time()
+    d.post("/calibrate/start")
+    bus.wait(EFF, lambda p: p == b"calibration", 5, after=t0)
+    assert json.loads(bus.last(EFF + "/attributes"))["mode"] == "calibration"
+    d.post("/calibrate/stop")
+    bus.wait(EFF, lambda p: p not in (b"calibration", b"off"), 5, after=time.time())
+
+
+def test_running_effect_publishes_are_rate_limited(mdev, bus):
+    d = mdev
+    bus.wait(EFF, timeout=10)
+    time.sleep(1.5)
+    t0 = time.time()
+    for name in ("solid", "chase", "height", "solid", "chase"):  # flapping
+        d.post("/state", {"effect": name})
+        time.sleep(0.1)
+    time.sleep(3)
+    pubs = bus.since(t0, EFF)
+    times = [at for t, p, _r, at in bus.msgs if t == EFF and at >= t0]
+    assert len(pubs) <= 4, pubs  # ~1/s over ~3.5 s, not one per change
+    assert all(b - a >= 0.9 for a, b in zip(times, times[1:])), times
+    assert pubs[-1][1] == b"chase"  # the final state still lands
