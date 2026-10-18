@@ -11,7 +11,9 @@ take the runtime down:
   which effect it was: watchdog scratch 0 (set whenever an effect starts,
   survives the reset) and /fx_probe.txt (written before an effect's first
   frames each boot). Either way it is quarantined for the next boot instead
-  of causing a reboot loop.
+  of causing a reboot loop, but only after a genuine watchdog expiry
+  (bootmgr.reset_cause() == "watchdog"); every deliberate reset clears both
+  records first (bootmgr.deliberate()).
 """
 
 import gc
@@ -97,7 +99,10 @@ class Engine:
         """Only a watchdog reset can mean an effect hung; after a power cut
         the probe file just records what happened to be starting."""
         names = self.fx.names()
-        if reset_cause == "wdt":
+        # Only a genuine expiry ("watchdog": REASON TIMER) can mean a hang.
+        # Deliberate resets ("reboot": REASON FORCE) also read WDT_RESET on
+        # the rp2, and their markers are cleared beforehand anyway.
+        if reset_cause == "watchdog":
             try:
                 with open(PROBE) as f:
                     name = f.read().strip()

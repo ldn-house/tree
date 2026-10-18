@@ -203,7 +203,7 @@ class Supervisor:
         write_reason("requested: " + rt.reboot_reason)
         rt.state.save_now()
         rt.engine.clear_probe()
-        hw.scratch_set(None)
+        bootmgr.deliberate()
         if rt.mqtt is not None and rt.mqtt.connected and rt.ha is not None:
             try:
                 await asyncio.wait_for(rt.mqtt.publish(rt.ha.t_avail, "offline", retain=True), 1)

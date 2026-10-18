@@ -740,13 +740,82 @@ def leave_safe_mode():
     write_state(st)
 
 
+# --- resets: deliberate or watchdog? ------------------------------------------
+#
+# On the rp2 port machine.reset() is watchdog_reboot(): it forces a watchdog
+# reset, so machine.reset_cause() reports WDT_RESET after *every* deliberate
+# reset (mpremote's reset, flash.py, /reboot, post-update reboots) as well
+# as after a real hang. The watchdog's REASON register tells them apart:
+# TIMER (bit 0) when the watchdog expired, FORCE (bit 1) when it was
+# triggered. Watchdog scratch 0 holds the running effect (see app.engine).
+
+_WD_REASON = 0x08
+_WD_SCRATCH0 = 0x0C
+_SCRATCH_MAGIC = 0x7EE00000
+
+
+def _watchdog_base():
+    if machine is None or not hasattr(machine, "mem32"):
+        return None
+    base = getattr(machine, "DEVSIM_WATCHDOG_BASE", None)  # the unix-port simulator
+    if base:
+        return base
+    chip = getattr(sys.implementation, "_machine", "")
+    if "RP2350" in chip:
+        return 0x400D8000
+    if "RP2040" in chip:
+        return 0x40058000
+    return None
+
+
+def watchdog_reason():
+    """REASON bits for the last reset: 1 timer (expired), 2 force, 0 neither
+    (power-on, RUN pin), None if unknown on this platform."""
+    base = _watchdog_base()
+    if base is None:
+        return None
+    return machine.mem32[base + _WD_REASON] & 3
+
+
+def scratch_set(value):
+    """Record a 16-bit value (or None to clear) in watchdog scratch 0; it
+    survives watchdog and forced resets but not a power cycle."""
+    base = _watchdog_base()
+    if base is not None:
+        machine.mem32[base + _WD_SCRATCH0] = 0 if value is None else _SCRATCH_MAGIC | (value & 0xFFFF)
+
+
+def scratch_get():
+    base = _watchdog_base()
+    if base is None:
+        return None
+    v = machine.mem32[base + _WD_SCRATCH0] & 0xFFFFFFFF
+    if v & 0xFFF00000 != _SCRATCH_MAGIC:
+        return None
+    return v & 0xFFFF
+
+
+def deliberate():
+    """Before any intentional reset (or when someone takes over at the USB
+    REPL): forget which effect was running, so the next boot can't mistake
+    this reset for that effect hanging the board."""
+    scratch_set(None)
+    try:
+        os.remove("fx_probe.txt")
+    except OSError:
+        pass
+
+
 def reset():
+    deliberate()
     if machine is not None:
         machine.reset()
     raise SystemExit(0)
 
 
 def reset_cause():
+    """pwron, watchdog (it expired: something hung), reboot (a deliberate
+    machine.reset()), or wdt if the platform can't say which."""
     if machine is None:
         return "unknown"
     try:
@@ -755,8 +824,18 @@ def reset_cause():
         return "unknown"
     for name in ("PWRON_RESET", "HARD_RESET", "WDT_RESET", "DEEPSLEEP_RESET", "SOFT_RESET"):
         if getattr(machine, name, None) == c:
-            return name[:-6].lower()
-    return str(c)
+            cause = name[:-6].lower()
+            break
+    else:
+        return str(c)
+    if cause == "wdt":
+        reason = watchdog_reason()
+        if reason is not None:
+            if reason & 1:
+                return "watchdog"
+            if reason & 2:
+                return "reboot"
+    return cause
 
 
 def record_crash(e):
@@ -815,7 +894,10 @@ def launch():
 
             runtime.run(info)
     except KeyboardInterrupt:
-        # Someone is at the USB REPL: keep the watchdog fed for them.
+        # Someone is at the USB REPL: keep the watchdog fed for them, and
+        # forget the running effect (mpremote's reset is coming, and it is
+        # not a hang).
+        deliberate()
         start_feeder()
         print("[boot] interrupted; watchdog fed by timer. machine.reset() to restart.")
         return
