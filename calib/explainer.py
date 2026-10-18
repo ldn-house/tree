@@ -422,7 +422,7 @@ class Film:
         """Positions (n, 3) and linear colours (n, 3) at film time t."""
         P = self.P
         tw = 0.78 + 0.22 * np.sin(self.phase + t * 2.2 * self.twf)
-        warm = np.outer(tw, self.warm) * 1.0
+        warm = np.outer(tw, self.warm) * 1.6
         if t < 7.4:
             return P, warm
         if t < 14.2:
@@ -465,12 +465,12 @@ class Film:
             hue = (th / (2 * np.pi) + y * 1.3 - (t - 60.4) * 0.45) % 1.0
             rgb = np.array([colorsys.hsv_to_rgb(float(hh), 0.85, 1.0) for hh in np.nan_to_num(hue)], np.float32)
             mix = span(t, 60.4, 61.0)
-            c = lin(rgb * 255) * 1.1 * mix + warm * 0.05 * (1 - mix)
+            c = lin(rgb * 255) * 1.6 * mix + warm * 0.05 * (1 - mix)
             return self.Ps, np.nan_to_num(c)
         mix = span(t, 64.6, 65.6)
         hue = (th / (2 * np.pi) + y * 1.3 - (t - 60.4) * 0.45) % 1.0
         rgb = np.array([colorsys.hsv_to_rgb(float(hh), 0.85, 1.0) for hh in np.nan_to_num(hue)], np.float32)
-        return self.Ps, np.nan_to_num(lin(rgb * 255) * 1.1 * (1 - mix) + warm * mix)
+        return self.Ps, np.nan_to_num(lin(rgb * 255) * 1.6 * (1 - mix) + warm * mix)
 
     def rays(self, t, P):
         segs, alpha = [], 0.0
