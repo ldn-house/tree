@@ -142,20 +142,12 @@ def test_frame_and_default_sequence(device, tmp_path):
     f = frame(d)
     assert f[:3] == bytes([10, 20, 30]) and sum(f) == 60 * N
     d.post("/calibrate/stop")
-    code, res = d.post("/calibrate/play?sequence=default")
-    assert code == 409 and res["error"] == "no default sequence"
-    vec = devsim.ROOT / "tests" / "data" / "calib-default.tcal"
-    if vec.exists():
-        data = vec.read_bytes()
-    else:
-        r = subprocess.run(["git", "show", "origin/calibration/video-pipeline:sequences/default.tcal"],
-                           cwd=devsim.ROOT, capture_output=True)
-        if r.returncode:
-            pytest.skip("no default sequence available")
-        data = r.stdout
-    (d.root / "fw" / "a" / "data" / "calib_default.tcal").write_bytes(data)
+    # The bundle carries sequences/default.tcal as data/calib_default.tcal,
+    # so the HA "Play calibration sequence" button works out of the box.
+    want = (devsim.ROOT / "sequences" / "default.tcal").read_bytes()
+    assert (d.root / "fw" / "a" / "data" / "calib_default.tcal").read_bytes() == want
     st = cal(d)
-    assert st["sequences"]["default"]["frames"] > 10
+    assert st["sequences"]["default"] == {"crc32": "83cffe28", "frames": 57, "loop_ms": 6600}
     code, res = d.post("/calibrate/play?sequence=default&loops=1")
     assert code == 200
     loop_ms = res["loop_ms"]
@@ -184,3 +176,10 @@ def test_calibration_over_mqtt(make_device, bundles, broker, bus):
     bus.wait("xmas_tree/calibrate/state", lambda p: json.loads(p)["state"] == "idle", 10, after=t0)
     assert d.get("/")[1]["state"]["power"] is False
     assert len(d.boots) == 0
+
+
+def test_missing_default_sequence_is_a_clear_409(device):
+    d = device
+    (d.root / "fw" / "a" / "data" / "calib_default.tcal").unlink()
+    code, res = d.post("/calibrate/play?sequence=default")
+    assert code == 409 and res["error"] == "no default sequence"
