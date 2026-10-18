@@ -1,6 +1,7 @@
 """network mock. The link state comes from the file named by $DEVSIM_NET,
 read on every call, so a test can take Wi-Fi up and down at runtime:
     up        associates ~0.5 s after connect()
+    only:X    like up, but only for SSID X (others: STAT_NO_AP_FOUND)
     down      connect() never completes (AP missing)
     badauth   connect() fails with STAT_WRONG_PASSWORD
 """
@@ -65,6 +66,7 @@ class WLAN:
         if not self._active:
             raise OSError("wifi not active")
         self._connect_at = time.ticks_ms()
+        self._ssid = ssid
 
     def disconnect(self):
         self._connect_at = None
@@ -80,6 +82,10 @@ class WLAN:
         mode = _mode()
         if mode == "badauth":
             return STAT_WRONG_PASSWORD
+        if mode.startswith("only:"):
+            if getattr(self, "_ssid", None) != mode[5:]:
+                return STAT_NO_AP_FOUND
+            mode = "up"
         if mode != "up":
             return STAT_CONNECTING
         if time.ticks_diff(time.ticks_ms(), self._connect_at) < 500:

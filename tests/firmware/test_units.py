@@ -111,3 +111,33 @@ asyncio.run(main())
     srv.close()
     assert r.returncode == 0, r.stdout + r.stderr
     assert seen == [b""], seen
+
+
+def _run_regressions2(firmware, tmp_path):
+    work = tmp_path / ("rr2-" + firmware.parent.name)
+    work.mkdir()
+    return subprocess.run([devsim.MICROPYTHON, str(HERE / "mp" / "regress_review2.py"), str(firmware), str(work)],
+                          capture_output=True, text=True, timeout=120)
+
+
+def test_review_round2_reproductions_are_fixed(tmp_path):
+    r = _run_regressions2(devsim.ROOT / "firmware", tmp_path)
+    print(r.stdout)
+    assert r.returncode == 0 and "FAIL" not in r.stdout, r.stdout + r.stderr
+
+
+def test_review_round2_reproductions_fail_on_the_reviewed_commit(tmp_path):
+    """The same script against 1d0b869 (the commit round 2 reviewed)."""
+    old = tmp_path / "old"
+    old.mkdir()
+    a = subprocess.run(["git", "archive", "1d0b869", "firmware"], cwd=devsim.ROOT, capture_output=True)
+    if a.returncode:
+        import pytest
+
+        pytest.skip("reviewed commit not in this checkout")
+    subprocess.run(["tar", "-x", "-C", str(old)], input=a.stdout, check=True)
+    r = _run_regressions2(old / "firmware", tmp_path)
+    print(r.stdout)
+    for finding in ("R2-H1 config with HTTP_PORT null", "R2-H1 unconfirmed", "R2-H2", "R2-H3", "R2-M4 floor after",
+                    "R2-M4 floor of", "R2-M5", "R2-M6", "R2-M8", "R2-L7"):
+        assert "FAIL " + finding in r.stdout, finding

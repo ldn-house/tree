@@ -291,4 +291,4 @@ def test_led_timing_and_power_budget_config(make_device, bundles):
     d2 = make_device(bundles["v1"], LED_TIMING_NS=(400, 850, 800, 100))
     st = d2.wait_http(30)
     assert st["led_timing_ns"] == [400, 850, 800, 450] and st["driver"] == "pio+dma"
-    assert "bad LED_TIMING_NS" in d2.console()
+    assert "LED_TIMING_NS" in st["config_error"]  # the schema rejects it; nothing uses it

@@ -65,7 +65,7 @@ def version_info():
 
 
 def bootmgr_api():
-    m = re.search(r"^API = (\d+)$", (ROOT / "firmware" / "bootmgr.py").read_text(), re.M)
+    m = re.search(r"^API = (\d+)\b", (ROOT / "firmware" / "bootmgr.py").read_text(), re.M)
     return int(m.group(1))
 
 

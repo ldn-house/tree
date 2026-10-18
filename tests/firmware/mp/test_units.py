@@ -58,7 +58,7 @@ def make_bundle(files, key=None, version="t1", mutate=None):
     manifest = {
         "format": 1,
         "version": version,
-        "bootmgr": 1,
+        "bootmgr": 2,
         "files": [{"path": p, "size": len(d), "sha256": bootmgr.hexlify(hashlib.sha256(d).digest())} for p, d in files],
     }
     if mutate:
@@ -467,34 +467,165 @@ def h5_floor_only_rises_on_confirmation():
     install(make_bundle(GOOD, mutate=_gen(150))).abort()  # still allowed: 300 never proved itself
 
 
-@test
-def m9_config_install_and_fallback():
-    for p in ("config.py", bootmgr.CONFIG_GOOD):
+def _cfg_reset():
+    for p in ("config.py", bootmgr.CONFIG_GOOD, bootmgr.CONFIG_PREV):
         try:
             os.remove(p)
         except OSError:
             pass
-    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x"}), "HTTP_TOKEN")
-    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "X": ["a"]}), "must be")
-    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "X": {"a": 1}}), "must be")
-    raises(lambda: bootmgr.install_config({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "lower": 1}), "bad setting")
-    keys = bootmgr.install_config({"WIFI_SSID": "net\"'\n", "HTTP_TOKEN": "t" * 10, "MQTT_PORT": 1883,
-                                   "LED_TIMING_NS": [400, 850, 800, 450]})
-    assert keys == ["HTTP_TOKEN", "LED_TIMING_NS", "MQTT_PORT", "WIFI_SSID"]
+    sys.modules.pop("config", None)
+    bootmgr._config = None
+
+
+GOODCFG = {"WIFI_SSID": "net", "HTTP_TOKEN": "t" * 10, "HTTP_PORT": 8080}
+
+
+@test
+def m9_config_schema_and_literals():
+    _cfg_reset()
+    reset_flash()
+    bootmgr.write_state(bootmgr._default_state())
+    for bad, needle in (({"WIFI_SSID": "x"}, "HTTP_TOKEN is required"),
+                        (dict(GOODCFG, HTTP_PORT=None), "HTTP_PORT"),
+                        (dict(GOODCFG, HTTP_PORT=70000), "HTTP_PORT"),
+                        (dict(GOODCFG, LED_MA_PER_CHANNEL=0), "LED_MA_PER_CHANNEL"),
+                        (dict(GOODCFG, GAMMA=0.5), "GAMMA"),
+                        (dict(GOODCFG, LED_TIMING_NS=[0, 0, 0, 0]), "LED_TIMING_NS"),
+                        (dict(GOODCFG, X=["a"]), "unknown"),
+                        (dict(GOODCFG, POWER_LIMIT_A=float("inf")), "POWER_LIMIT_A"),
+                        (dict(GOODCFG, MQTT_PORT=True), "MQTT_PORT")):
+        raises(lambda: bootmgr.install_config(bad), needle)
+    keys = bootmgr.install_config(dict(GOODCFG, WIFI_SSID="net\"'\n", LED_TIMING_NS=[400, 850, 800, 450]))
+    assert keys == ["HTTP_PORT", "HTTP_TOKEN", "LED_TIMING_NS", "WIFI_SSID"]
     ns = {}
     with open("config.py") as f:
         exec(f.read(), ns)
-    assert ns["WIFI_SSID"] == "net\"'\n" and ns["MQTT_PORT"] == 1883
-    assert ns["LED_TIMING_NS"] == (400, 850, 800, 450)
-    # Broken config.py: the snapshot keeps the board reachable.
+    assert ns["WIFI_SSID"] == "net\"'\n" and ns["LED_TIMING_NS"] == (400, 850, 800, 450)
+    # Installing doesn't make it the recovery fallback: only reaching the network does.
+    assert not bootmgr.exists(bootmgr.CONFIG_GOOD)
+    assert bootmgr.read_state()["cfg_trial"]
+    raises(lambda: bootmgr.install_config(GOODCFG), "not confirmed")
+
+
+@test
+def r2h1_config_trial_reverts_unless_confirmed():
+    _cfg_reset()
+    reset_flash()
+    install_commit(make_bundle(GOOD))
+    bootmgr.mark_healthy("a")
     with open("config.py", "w") as f:
-        f.write("WIFI_SSID = 'x'\nthis is not python\n")
+        f.write("WIFI_SSID = 'net'\nHTTP_TOKEN = 'tttttttttt'\n")
+    old = open("config.py").read()
+    bootmgr.install_config({"WIFI_SSID": "wrong-net", "HTTP_TOKEN": "t" * 10})
+    st = bootmgr.read_state()
+    assert st["cfg_trial"] and bootmgr.exists(bootmgr.CONFIG_PREV)
+    # Boot 1 with the new config: counted, not yet reverted.
+    st = bootmgr.read_state()
+    kind, _ = bootmgr.decide(st)
+    assert kind == "app"
+    # Simulate launch() bookkeeping for two boots without confirmation.
+    for _ in range(2):
+        st = bootmgr.read_state()
+        bootmgr.decide(st)
+        if st["cfg_trial"]:
+            if st["cfg_boots"] >= 1:
+                bootmgr._revert_config(st, "test")
+            else:
+                st["cfg_boots"] += 1
+        bootmgr.write_state(st)
+    assert not bootmgr.read_state()["cfg_trial"]
+    assert open("config.py").read() == old  # the previous config is back
+    assert "reverted" in bootmgr.read_state()["event"]
+
+
+@test
+def r2h1_promotion_only_after_confirmation():
+    if "" not in sys.path:
+        sys.path.insert(0, "")  # import config from the work dir, as on the board
+    _cfg_reset()
+    reset_flash()
+    bootmgr.write_state(bootmgr._default_state())
+    with open("config.py", "w") as f:
+        f.write("WIFI_SSID = 'net'\nHTTP_TOKEN = 'tttttttttt'\nHTTP_PORT = 8080\n")
+    values, source, err = bootmgr.load_config()
+    assert source == "config.py" and err is None
+    assert not bootmgr.exists(bootmgr.CONFIG_GOOD)  # loading alone never promotes
+    assert bootmgr.promote_config()
+    with open(bootmgr.CONFIG_GOOD) as f:
+        assert json.load(f) == values
+    # A broken config.py now falls back to that confirmed one.
+    with open("config.py", "w") as f:
+        f.write("WIFI_SSID = 'x'\nHTTP_PORT = None\n")
     sys.modules.pop("config", None)
     bootmgr._config = None
     values, source, err = bootmgr.load_config()
-    assert source == bootmgr.CONFIG_GOOD and "failed to load" in err and values["HTTP_TOKEN"] == "t" * 10
-    bootmgr._config = None
-    os.remove("config.py")
+    assert source == bootmgr.CONFIG_GOOD and "HTTP_PORT" in err and values["HTTP_PORT"] == 8080
+    _cfg_reset()
+
+
+@test
+def r2h1_update_key_cannot_change_over_the_network():
+    _cfg_reset()
+    reset_flash()
+    bootmgr.write_state(bootmgr._default_state())
+    bootmgr._config = ({"UPDATE_KEY": "k" * 20}, "config.py", None)
+    raises(lambda: bootmgr.install_config(dict(GOODCFG)), "UPDATE_KEY")  # removing it
+    raises(lambda: bootmgr.install_config(dict(GOODCFG, UPDATE_KEY="z" * 20)), "UPDATE_KEY")
+    bootmgr.install_config(dict(GOODCFG, UPDATE_KEY="k" * 20))  # unchanged is fine
+    _cfg_reset()
+
+
+@test
+def r2m5_explicit_reclaim_needs_enough_room():
+    two_slots()
+    bootmgr.mark_healthy("b")
+    real = bootmgr.free_bytes
+    bootmgr.free_bytes = lambda: 0
+    try:
+        data = make_bundle(GOOD)
+        raises(lambda: install(data, reclaim_slot=True), "not enough flash even without slot")
+        assert bootmgr.slot_ok("a")  # not deleted: it wouldn't have been enough
+        raises(lambda: install(data), "not enough flash")
+        assert bootmgr.slot_ok("a")
+    finally:
+        bootmgr.free_bytes = real
+
+
+@test
+def r2m4_floor_copy_survives_boot_json_loss():
+    two_slots(g1=100, g2=300)
+    bootmgr.mark_healthy("b")
+    assert bootmgr.read_state()["floor"] == 300
+    with open(bootmgr.FLOOR_FILE) as f:
+        assert json.load(f) == 300
+    os.remove("boot.json")
+    assert bootmgr.read_state()["floor"] == 300  # from the redundant copy
+    os.remove(bootmgr.FLOOR_FILE)
+    st = bootmgr.read_state()
+    assert st["floor"] == 300 and st["floor_source"] == "slots"  # from the slots, not 0
+
+
+@test
+def r2h3_cap_holds_for_every_accepted_setting():
+    import cfgcheck
+    from app import outstage
+    import random
+
+    random.seed(7)
+    for ma in (0.5, 1, 7.3, 8, 8.9, 12, 40, 100):
+        for limit in (0, 0.2, 1.5, 3, 20):
+            for gamma in (None, 1.0, 1.7, 2.2, 4.0):
+                clean, err = cfgcheck.validate({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10, "LED_MA_PER_CHANNEL": ma,
+                                                "POWER_LIMIT_A": limit, "GAMMA": gamma})
+                assert not err, err
+                out = outstage.create(500, outstage.channel_budget(500, limit, ma), gamma, "RGB")
+                dst = bytearray(1500)
+                for frame in (bytes([255]) * 1500, bytes(random.getrandbits(8) for _ in range(1500))):
+                    out.process(frame, dst, 255)
+                    assert outstage.estimated_a(sum(dst), ma) <= limit + 1e-9, (ma, limit, gamma)
+    for bad in ({"LED_MA_PER_CHANNEL": 0}, {"LED_MA_PER_CHANNEL": -8}, {"GAMMA": 0.5}, {"POWER_LIMIT_A": -1},
+                {"LED_MA_PER_CHANNEL": float("nan")}):
+        assert cfgcheck.validate(dict({"WIFI_SSID": "x", "HTTP_TOKEN": "t" * 10}, **bad))[1], bad
 
 
 @test

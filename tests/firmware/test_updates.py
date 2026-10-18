@@ -153,7 +153,7 @@ def test_signed_bundles_required_when_key_configured(make_device, bundles):
     running(d, "v2-signed", confirmed=True)
     code, body = push(d, bundles["v2"])
     assert code == 400 and "not signed" in body["error"]
-    d2 = make_device(bundles["v1"], UPDATE_KEY="another-key")
+    d2 = make_device(bundles["v1"], UPDATE_KEY="another-signing-key")
     running(d2, "v1", confirmed=True)
     code, body = push(d2, bundles["v2-signed"])
     assert code == 400 and "bad signature" in body["error"]

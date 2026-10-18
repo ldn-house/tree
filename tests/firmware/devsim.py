@@ -33,7 +33,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 MOCKS = HERE / "mocks"
 RUNNER = HERE / "runner.py"
-RECOVERY = ("boot.py", "main.py", "bootmgr.py", "safemode.py")
+RECOVERY = ("boot.py", "main.py", "bootmgr.py", "safemode.py", "cfgcheck.py")
 MICROPYTHON = os.environ.get("MICROPYTHON", "micropython")
 HEAP = os.environ.get("DEVSIM_HEAP", "1M")
 

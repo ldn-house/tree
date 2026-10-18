@@ -1,7 +1,11 @@
 """
 Device settings. Copy to config.py, fill in, and install over USB:
     ./flash.py --config
-config.py is never sent or changed over the network.
+Every setting is checked against firmware/cfgcheck.py (flash.py runs the same
+check first); a config with an invalid setting is not used.
+Over Wi-Fi, ./flash.py --ota --config sends it as signed JSON values; the
+device tries it and reverts unless it reaches the network. UPDATE_KEY can
+only be changed over USB.
 """
 
 WIFI_SSID = "YOUR_WIFI_SSID"
@@ -39,7 +43,7 @@ MQTT_PASSWORD = "your_ha_password"
 # LED_TIMING_NS = (400, 850, 800, 450)  # T0H, T0L, T1H, T1L in ns (800 kHz);
 #     MicroPython neopixel's timing. The BSS138 level shifter's slow rising
 #     edge means T0H shouldn't go much below 400 ns.
-# GAMMA = None                # e.g. 2.2 for perceptual dimming
+# GAMMA = None                # e.g. 2.2 for perceptual dimming; must be >= 1
 
 # Power cap, in amps at the strip's 12 V supply. Every frame is scaled so
 # the estimated strip current stays at or below POWER_LIMIT_A.
@@ -49,5 +53,5 @@ MQTT_PASSWORD = "your_ha_password"
 #     the 20 A PSU. Raise only after fused power-injection runs are installed
 #     and the far end has been checked for dimming.
 # LED_MA_PER_CHANNEL = 8      # mA per colour channel of one pixel at full
-#                             # duty (~0.3 W per pixel at full white). Measure!
+#                             # duty (~0.3 W per pixel at full white); > 0. Measure!
 # POWER_BUDGET_PERCENT = 13   # deprecated alias: % of full white
