@@ -18,6 +18,8 @@ try:
 except ImportError:  # pragma: no cover
     rp2 = None
 
+import cfgcheck
+
 from app.log import log
 
 RESET_US = 300  # WS2811 latches after >= 280 us low
@@ -28,36 +30,12 @@ RESET_US = 300  # WS2811 latches after >= 280 us low
 # bullets). The shifter's high side rises only through its pull-up (RC
 # about 0.5 us with the cable), so short high pulses can vanish: don't go
 # below ~400 ns for T0H. Override with LED_TIMING_NS in config.py.
-DEFAULT_TIMING_NS = (400, 850, 800, 450)
+DEFAULT_TIMING_NS = cfgcheck.DEFAULT_TIMING_NS
 PIO_FREQ = 20_000_000
-CYCLE_NS = 1_000_000_000 // PIO_FREQ  # 50 ns
-MAX_CYCLES = 16  # 1 + 4-bit delay (one of the 5 delay/side-set bits is side-set)
-
-
-class TimingError(ValueError):
-    pass
-
-
-def cycles(timing_ns):
-    """PIO cycle counts (T1, T2, T3) for (T0H, T0L, T1H, T1L).
-
-    The program below holds the line high for T1 then, for a 1 bit, T2
-    more; low for T3, plus T2 for a 0 bit. So T0H = T1, T1H = T1 + T2,
-    T1L = T3 and T0L = T2 + T3, which needs T0H + T0L == T1H + T1L (one
-    bit period). Values are rounded to the 50 ns PIO cycle."""
-    try:
-        t0h, t0l, t1h, t1l = (int(v) for v in timing_ns)
-    except (TypeError, ValueError):
-        raise TimingError("LED_TIMING_NS must be four numbers (T0H, T0L, T1H, T1L)")
-    if t0h + t0l != t1h + t1l:
-        raise TimingError("T0H + T0L must equal T1H + T1L (one bit period)")
-    c1 = (t0h + CYCLE_NS // 2) // CYCLE_NS
-    c2 = (t1h - t0h + CYCLE_NS // 2) // CYCLE_NS
-    c3 = (t1l + CYCLE_NS // 2) // CYCLE_NS
-    for c in (c1, c2, c3):
-        if not 1 <= c <= MAX_CYCLES:
-            raise TimingError("timing out of range for the PIO program (50-800 ns per step, T1H > T0H)")
-    return c1, c2, c3
+CYCLE_NS = cfgcheck.CYCLE_NS  # 50 ns at 20 MHz
+TimingError = cfgcheck.ConfigError
+# One validator for the app, safe mode and flash.py (firmware/cfgcheck.py).
+cycles = cfgcheck.timing_cycles
 
 
 def program(timing_ns=DEFAULT_TIMING_NS):

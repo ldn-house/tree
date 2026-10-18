@@ -12,16 +12,26 @@ as the power budget allows" and lower values dim proportionally (review H7).
 All per-frame arithmetic is integer, and process() does not allocate.
 """
 
-# Fraction of theoretical maximum (every channel at 255) the PSU may supply.
-# Matches the original firmware's MAX_POWER (13%).
-BUDGET_PERCENT = 13
+# The cap is a current limit. The strip is 12 V WS2811 bullets on a single
+# feed, which binds at about 1.5 A; the runtime converts amps to the
+# channel-sum budget Output takes.
+MA_PER_CHANNEL = 8   # 12 V WS2811 bullet: one channel at 255. Today's 20 is a WS2812/5 V figure.
+LIMIT_A = 1.5        # default cap, amps at 12 V
 
-# Current estimate for a 12V WS2811 pixel: ~20 mA per channel at 255
-# (60 mA full white, as the original firmware assumed).
-MA_PER_CHANNEL = 20
+# The original firmware's cap (13% of full white), kept for compatibility.
+BUDGET_PERCENT = 13
 
 # Fixed-point precision of the combined cap x brightness scale.
 _Q = 12
+
+
+def budget_for_current(limit_a=LIMIT_A, ma_per_channel=MA_PER_CHANNEL):
+    """Channel-sum budget for a current limit (what Output(budget=...) takes)."""
+    return int(limit_a * 1000 * 255) // ma_per_channel
+
+
+def current_a(channel_sum, ma_per_channel=MA_PER_CHANNEL):
+    return channel_sum * ma_per_channel / 255000
 
 
 def budget_for(n, percent=BUDGET_PERCENT):
@@ -29,7 +39,7 @@ def budget_for(n, percent=BUDGET_PERCENT):
 
 
 def current_ma(channel_sum):
-    """Estimated LED current for a frame whose channels sum to channel_sum."""
+    """Estimated LED current in mA for a frame whose channels sum to channel_sum."""
     return channel_sum * MA_PER_CHANNEL // 255
 
 
@@ -38,7 +48,8 @@ class Output:
 
     order is the wire colour order as a string of "R", "G", "B" (e.g. "GRB").
     The renderer and viewer use "RGB"; the firmware passes whatever its
-    driver needs. gamma=None keeps the response linear.
+    driver needs. gamma=None keeps the response linear. budget is a channel
+    sum; the default is budget_for_current() (LIMIT_A at MA_PER_CHANNEL).
 
     After each process() call:
     - raw_total: channel sum of the raw frame
@@ -48,7 +59,7 @@ class Output:
 
     def __init__(self, n, budget=None, gamma=None, order="RGB"):
         self.n = n
-        self.budget = budget_for(n) if budget is None else int(budget)
+        self.budget = budget_for_current() if budget is None else int(budget)
         self.order = bytes(["RGB".index(c) for c in order])
         self.lut = bytearray(256)
         self.gamma = None

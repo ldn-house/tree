@@ -71,7 +71,9 @@ class Runtime:
         bootmgr.feed()
         self.engine.boot_quarantine(info.get("reset_cause"))
 
-        self.wifi = net.Wifi(cfg.WIFI_SSID, cfg.WIFI_PASSWORD, cfg.HOSTNAME)
+        good = bootmgr.good_config() or {}
+        self.wifi = net.Wifi(cfg.WIFI_SSID, cfg.WIFI_PASSWORD, cfg.HOSTNAME,
+                             fallback=(good.get("WIFI_SSID"), good.get("WIFI_PASSWORD")))
         self.mqtt = None
         self.ha = None
         if cfg.MQTT_BROKER:
@@ -138,13 +140,9 @@ class Runtime:
         return ("%s: %s" % (name, errs[name]))[:250]
 
     def led_amps(self):
-        """Estimated strip current for the last effect frame, amps at 12 V
-        (after the cap and brightness; gamma, if on, only lowers it)."""
-        if self.engine.dark or self.engine.owner is not None:
-            return 0.0
-        out = self.out
-        shown = out.raw_total * out.factor // 4096 * self.state.get("brightness") // 255
-        return round(outstage.estimated_a(shown, cfg.LED_MA_PER_CHANNEL), 2)
+        """Estimated strip current, amps at 12 V, from the bytes actually
+        sent last (after cap, brightness and gamma; calibration frames too)."""
+        return round(outstage.estimated_a(sum(self.engine.last), cfg.LED_MA_PER_CHANNEL), 3)
 
     def diag(self):
         es = self.engine.status()
@@ -202,6 +200,8 @@ class Runtime:
                 "capped": bool(self.out.capped) and not self.engine.dark,
                 "volts": 12,
             },
+            "reserve": {"bytes": bootmgr.reserve_size(), "complete": bootmgr.reserve_size() == bootmgr.RESERVE_BYTES},
+            "floor": bootmgr.read_state()["floor"],
             "wifi": self.wifi.status(),
             "mqtt": self.mqtt.status() if self.mqtt else None,
             "http": {"requests": self.http.requests, "rejected": self.http.rejected, "auth": bool(cfg.HTTP_TOKEN)},
@@ -211,6 +211,8 @@ class Runtime:
                            "heap_live_min": self.sup.heap_live_min},
             "config_error": cfg.ERROR,
             "config_source": cfg.SOURCE,
+            "config_trial": bool(self.info.get("cfg_trial")),
+            "wifi_fallback": self.wifi.using_fallback,
             "restarts": self.restarts,
         }
 

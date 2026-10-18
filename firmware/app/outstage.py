@@ -20,7 +20,11 @@ def channel_budget(n, limit_a, ma_per_channel, percent=None):
     (When effects/_output.py gains a current-based helper, use it here.)"""
     if percent is not None:
         return budget_for(n, percent)
-    return max(0, int(limit_a * 1000 * 255) // max(1, int(ma_per_channel)))
+    if not ma_per_channel > 0:
+        return 0  # no meaningful current model: dark rather than uncapped
+    # Keep fractions (8.9 mA must not become 8) and round down, so the
+    # budget never allows more than limit_a.
+    return max(0, int(limit_a * 1000.0 * 255 / ma_per_channel))
 
 
 def estimated_ma(channel_sum, ma_per_channel):
