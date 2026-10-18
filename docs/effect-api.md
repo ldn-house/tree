@@ -143,14 +143,19 @@ Other options:
 - `--delete` removes a pushed overlay, reverting to the firmware's copy.
 - `--mpy` pushes mpy-cross bytecode. The `.mpy` version must match the device's MicroPython.
 
-The token comes from `--token` or `$TREE_TOKEN` and is sent as `Authorization: Bearer`. `tools/mock_tree.py` mirrors the endpoints for local testing.
+Credentials are read the way `flash.py` reads them:
+- **Token**: from `--token`, `$TREE_TOKEN` or `HTTP_TOKEN` in `config.py`, sent as `Authorization: Bearer`.
+- **Signature**: when `config.py` sets `UPDATE_KEY`, every push carries `X-Signature`, the hex HMAC-SHA256 keyed with `UPDATE_KEY` of `b"tree-effect\n" + name + b"\n" + body`. The name is included, so a signed effect can't be replayed under another name.
+- **Port**: from `HTTP_PORT` or `OTA_PORT` in `config.py`, else 8080.
+
+`--config PATH` reads another `config.py`. `tools/mock_tree.py [--token T] [--update-key K]` mirrors the endpoints for local testing.
 
 The firmware (`firmware/app/api.py`) defines the device side:
 
 | Endpoint | Behaviour |
 |---|---|
 | `GET /effects` | `{"effects": [{"name", "duration_ms", "needs_coords", "params": {k: {"default", "min", "max", "value"}}, "overlay", "eligible", "error"}], "running", "fx_error"}` |
-| `PUT` or `POST /effects/<name>` | Auth required. The body is module source, or `.mpy` (sniffed, or `?format=mpy`), at most 32 KB. Optional `X-Content-SHA256`; `?activate=1` also selects the effect. The device compile-checks the module, imports it under a staging name, builds `Effect(ctx)` and renders t=0 and t=33. Only then does it replace the overlay (`/fx/fx_<name>.py`) and hot-reload. Replies `200 {"effect", "overlay": true, "activated", "duration_ms", "params", "needs_coords"}`, or `400 {"error"}` and keeps the previous version. |
+| `PUT` or `POST /effects/<name>` | Auth required (401). If the device has `UPDATE_KEY`, `X-Signature` must verify before any of the code runs (403). The body is module source, or `.mpy` (sniffed, or `?format=mpy`), at most 32 KB. Optional `X-Content-SHA256`; `?activate=1` also selects the effect. The device compile-checks the module, imports it under a staging name, builds `Effect(ctx)` and renders t=0 and t=33. Only then does it replace the overlay (`/fx/fx_<name>.py`) and hot-reload. Replies `200 {"effect", "overlay": true, "activated", "duration_ms", "params", "needs_coords"}`, or `400 {"error"}` and keeps the previous version. |
 | `DELETE /effects/<name>` | Auth required. Removes the overlay. |
 
 Limits:

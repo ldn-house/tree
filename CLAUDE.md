@@ -149,4 +149,4 @@ micropython tools/mp_check.py   # every render() is allocation-free on MicroPyth
 
 Attach `sheet.png` (and the GIF) to PRs that change an effect.
 
-To try an effect on the tree without a firmware update, use `./push_effect.py <name> --host <ip> --activate`. It needs the firmware's effects API; see "Pushing one effect over OTA" in `docs/effect-api.md`.
+To try an effect on the tree without a firmware update, use `./push_effect.py <name> --host <ip> --activate`. It reads `HTTP_TOKEN` and `UPDATE_KEY` from `config.py` (like `flash.py`), signs each push, and needs the firmware's effects API; see "Pushing one effect over OTA" in `docs/effect-api.md`.

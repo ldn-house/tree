@@ -20,13 +20,20 @@ pushed; shared modules (effects/_util.py etc.) ship with firmware. A new
 effect doesn't need registering on the device. See "Pushing one effect over
 OTA" in docs/effect-api.md; tools/mock_tree.py is a local stand-in.
 
---host defaults to $TREE_HOST; the HTTP token comes from --token or $TREE_TOKEN.
+--host defaults to $TREE_HOST. Like flash.py, the HTTP token comes from
+--token, $TREE_TOKEN or HTTP_TOKEN in config.py, and when config.py sets
+UPDATE_KEY each upload is signed: X-Signature is the hex HMAC-SHA256, keyed
+with UPDATE_KEY, of b"tree-effect\n" + name + b"\n" + body. A device with
+UPDATE_KEY set refuses unsigned or wrongly signed effects (403) before
+running any of their code.
 """
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -43,11 +50,26 @@ import render  # noqa: E402
 import smoke  # noqa: E402
 
 
+def load_config(path):
+    """Upper-case settings from config.py, as flash.py reads them."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    return {k: v for k, v in runpy.run_path(str(path)).items() if k.isupper()}
+
+
+def sign(key, name, body):
+    """X-Signature for an effect push (firmware bootmgr.signature_ok("effect", ...))."""
+    msg = b"tree-effect\n" + name.encode() + b"\n" + body
+    return hmac.new(key.encode(), msg, hashlib.sha256).hexdigest()
+
+
 class Device:
-    def __init__(self, host, port, token, timeout):
+    def __init__(self, host, port, token, timeout, update_key=None):
         self.base = f"http://{host}:{port}"
         self.token = token
         self.timeout = timeout
+        self.update_key = update_key
 
     def request(self, method, path, body=None, headers=None):
         req = urllib.request.Request(self.base + path, data=body, method=method, headers=headers or {})
@@ -77,10 +99,13 @@ class Device:
         if activate:
             query.append("activate=1")
         path = f"/effects/{name}" + ("?" + "&".join(query) if query else "")
-        return self.request("PUT", path, body, {
+        headers = {
             "Content-Type": "application/octet-stream" if mpy else "text/x-python",
             "X-Content-SHA256": hashlib.sha256(body).hexdigest(),
-        })
+        }
+        if self.update_key:
+            headers["X-Signature"] = sign(self.update_key, name, body)
+        return self.request("PUT", path, body, headers)
 
 
 def _json(raw):
@@ -119,8 +144,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="+", help="effect names (or effects/<name>.py paths)")
     ap.add_argument("--host", default=os.environ.get("TREE_HOST"))
-    ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--token", default=os.environ.get("TREE_TOKEN"))
+    ap.add_argument("--port", type=int, help="HTTP port (default: HTTP_PORT/OTA_PORT in config.py, else 8080)")
+    ap.add_argument("--token", default=os.environ.get("TREE_TOKEN"), help="HTTP token ($TREE_TOKEN, else config.py)")
+    ap.add_argument("--config", default=str(ROOT / "config.py"), help="config.py to read HTTP_TOKEN and UPDATE_KEY from")
     ap.add_argument("--activate", "--select", action="store_true", help="switch the tree to the last effect pushed")
     ap.add_argument("--mpy", action="store_true",
                     help="push bytecode compiled by mpy-cross (must match the device's MicroPython .mpy version)")
@@ -153,7 +179,13 @@ def main():
     if not args.host:
         sys.exit("--host (or $TREE_HOST) is required")
 
-    dev = Device(args.host, args.port, args.token, args.timeout)
+    cfg = load_config(args.config)
+    token = args.token or cfg.get("HTTP_TOKEN")
+    key = cfg.get("UPDATE_KEY")
+    port = args.port or cfg.get("HTTP_PORT") or cfg.get("OTA_PORT") or 8080
+    if not key and not args.delete:
+        print("warning: no UPDATE_KEY in config.py; pushing unsigned (a device with UPDATE_KEY set refuses this)")
+    dev = Device(args.host, port, token, args.timeout, key)
     dev.effects()  # fail early if this isn't the tree
 
     if args.delete:
@@ -168,8 +200,12 @@ def main():
         body = compile_mpy(n) if args.mpy else (ROOT / "effects" / f"{n}.py").read_bytes()
         activate = args.activate and k == len(names) - 1
         status, data = dev.push(n, body, args.mpy, activate)
-        if status in (401, 403):
-            print(f"push {n}: unauthorised (HTTP {status}); pass --token or set $TREE_TOKEN")
+        if status == 401:
+            print(f"push {n}: unauthorised (HTTP 401); set HTTP_TOKEN in config.py, $TREE_TOKEN or --token")
+            return 1
+        if status == 403:
+            print(f"push {n}: refused (HTTP 403): {data.get('error', data)}\n"
+                  "  the device requires a signature; check UPDATE_KEY in config.py matches the device's")
             return 1
         if status != 200 or data.get("effect") != n:
             print(f"push {n}: FAILED (HTTP {status})\n  {data.get('error', data)}")

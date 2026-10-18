@@ -10,16 +10,19 @@ without hardware. It mirrors the firmware's endpoints (firmware/app/api.py):
     PUT    /effects/<name>         hot-push an effect (also POST); ?activate=1
     DELETE /effects/<name>         remove a pushed overlay
 
-    tools/mock_tree.py --port 8080 [--token SECRET]
+    tools/mock_tree.py --port 8080 [--token SECRET] [--update-key KEY]
 
 Bundled effects come from this checkout's effects/; pushed ones are kept in
 memory. An upload is validated like the device does it: optional
 X-Content-SHA256, compile, import under a staging name, build Effect(ctx) and
-render t=0 and t=33; only then does it replace the overlay.
+render t=0 and t=33; only then does it replace the overlay. With
+--update-key, a push must carry X-Signature = hex HMAC-SHA256(KEY,
+b"tree-effect\n" + name + b"\n" + body), checked before any code runs.
 """
 
 import argparse
 import hashlib
+import hmac
 import http.server
 import json
 import random
@@ -81,7 +84,21 @@ class Tree:
                 "needs_coords": mod.NEEDS_COORDS}
 
 
-def make_handler(tree, token):
+def signature_ok(key, kind, body, sig_hex):
+    """Mirror of firmware bootmgr.signature_ok: True if no key is set."""
+    if not key:
+        return True
+    if not sig_hex:
+        return False
+    try:
+        sig = bytes.fromhex(sig_hex.strip())
+    except ValueError:
+        return False
+    want = hmac.new(key.encode(), b"tree-" + kind.encode() + b"\n" + body, hashlib.sha256).digest()
+    return hmac.compare_digest(sig, want)
+
+
+def make_handler(tree, token, update_key=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def reply(self, status, data):
             body = json.dumps(data).encode()
@@ -121,6 +138,8 @@ def make_handler(tree, token):
             want = self.headers.get("X-Content-SHA256")
             if want and hashlib.sha256(data).hexdigest() != want.strip().lower():
                 return self.reply(400, {"error": "X-Content-SHA256 does not match the body"})
+            if not signature_ok(update_key, "effect", name.encode() + b"\n" + data, self.headers.get("X-Signature")):
+                return self.reply(403, {"error": "effects must be signed with UPDATE_KEY (X-Signature header)"})
             if query.get("format") == "mpy" or (len(data) > 4 and data[0] == 0x4D and data[1] < 32):
                 return self.reply(400, {"error": "mock tree cannot run .mpy; push source"})
             try:
@@ -157,9 +176,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--token", help="require this bearer token on writes")
+    ap.add_argument("--update-key", help="require effect pushes signed with this UPDATE_KEY")
     args = ap.parse_args()
     print(f"mock tree on http://127.0.0.1:{args.port}", flush=True)
-    http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(Tree(), args.token)).serve_forever()
+    http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(Tree(), args.token, args.update_key)).serve_forever()
 
 
 if __name__ == "__main__":
