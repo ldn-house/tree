@@ -88,10 +88,17 @@ def test_resets_are_classified_on_old_recovery_layer(make_device, bundles, old):
     wait_for(lambda: len(d.boots) >= 1, 20, what="reset")
     st = d.wait_http(30)
     assert st["boot"]["reset_cause"] == "reboot" and st["effect"]["quarantined"] == [], st
+    # Interrupt once this boot is fully up and running solid (a Ctrl-C during
+    # start-up, before the recovery layer's handler is reached, drops to the
+    # REPL and the watchdog resets the board: a different scenario).
+    wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
+    time.sleep(1)
     d.interrupt()  # mpremote takes over: API 2's main.py doesn't clear the markers, the app does
     wait_for(lambda: len(d.boots) >= 2, 20, what="reset")
     st = d.wait_http(30)
-    assert st["effect"]["quarantined"] == [], st["effect"]
+    why = (d.boots, st["boot"], d.console()[-2500:])
+    assert d.boots[1] == "machine.reset()" and st["boot"]["reset_cause"] == "reboot", why
+    assert st["effect"]["quarantined"] == [], why
     from test_resets import LATE_HANG
 
     code, _ = d.request("PUT", "/effects/latehang?activate=1", body=LATE_HANG)
