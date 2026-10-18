@@ -1,6 +1,6 @@
 # Calibration protocol
 
-Status: **draft v1**. Owner: the calibration thread (`calibration/video-pipeline`). Consumer: the firmware rewrite (`firmware/rewrite`).
+Status: **v1, implemented** in `firmware/app/calib.py` (#21), with the vendored codec `firmware/app/seqfile.py` and device tests in `tests/firmware/test_calibration.py`. The host side is `calib/` and `calibrate.py` (#22).
 
 This document says exactly what the firmware must do so that the tree can play a calibration sequence that a phone (or webcam) films and an offline decoder turns into 3D LED coordinates. The key words MUST, SHOULD and MAY are used as in RFC 2119.
 
@@ -50,7 +50,7 @@ Calibration frames MUST go through the same runtime output stage as effects (`do
 - **The power cap still applies.** If a frame's raw RGB sum exceeds the budget, the stage scales it uniformly, exactly as for effects. The host builds standard sequences to stay under the budget reported by `GET /calibrate` (section 6), so in practice the cap never engages. When it does engage, the firmware MUST count it in the playback log.
 - **Colour order** is the stage's job: levels in the file are logical R, G, B.
 
-Today's firmware writes calibration frames directly and bypasses the cap (review M6). The rewrite MUST NOT do this.
+The old single-file firmware wrote calibration frames directly and bypassed the cap (review M6). The rewrite MUST NOT do this, and doesn't.
 
 ## 4. Sequence file format (`.tcal`, version 1)
 
@@ -264,7 +264,7 @@ Levels: all-on frames light all 500 LEDs, so they use `floor(budget / 1500)`. Co
 
 Phone browsers only allow camera access (`getUserMedia`) on HTTPS or localhost pages. An HTTPS page cannot `fetch()` the tree's plain-HTTP API (mixed content). So the page can drive the tree directly only when it is served over plain HTTP from the LAN, and then it cannot use the camera. The design in `docs/calibration-web.md` therefore triggers playback through Home Assistant or MQTT, or simply lets the tree loop, and relies on the in-video sync preamble rather than a shared clock. The CORS headers above still help laptop tools and LAN pages.
 
-## 11. Changes from the current firmware
+## 11. Changes from the old firmware
 
 - Calibration frames go through the output stage and power cap (was: direct `strip.write()`).
 - The lock has a TTL, restores state on exit, and MQTT stays serviced (was: no timeout, MQTT paused).

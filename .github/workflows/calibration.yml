@@ -1,0 +1,42 @@
+name: Calibration
+
+on:
+  push:
+    paths:
+      - "calib/**"
+      - "calibrate.py"
+      - "sequences/**"
+      - "coordinates/**"
+      - "tests/data/**"
+      - "tests/test_seqfile.py"
+      - "tests/test_solve.py"
+      - "firmware/app/seqfile.py"
+      - ".github/workflows/calibration.yml"
+  pull_request:
+    paths:
+      - "calib/**"
+      - "calibrate.py"
+      - "sequences/**"
+      - "coordinates/**"
+      - "tests/data/**"
+      - "tests/test_seqfile.py"
+      - "tests/test_solve.py"
+      - "firmware/app/seqfile.py"
+      - ".github/workflows/calibration.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Firmware carries the calibration codec unchanged
+        run: cmp calib/seqfile.py firmware/app/seqfile.py
+
+      - name: Calibration tests (sequence format and test vector, solver)
+        run: |
+          uv run --python 3.12 --with pytest --with numpy --with scipy --with opencv-python-headless \
+            pytest tests/test_seqfile.py tests/test_solve.py -q

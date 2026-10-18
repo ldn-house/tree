@@ -1,0 +1,64 @@
+name: Effects
+
+on:
+  push:
+    paths:
+      - "effects/**"
+      - "render.py"
+      - "smoke.py"
+      - "tools/**"
+      - "coordinates/**"
+      - ".github/workflows/effects.yml"
+  pull_request:
+    paths:
+      - "effects/**"
+      - "render.py"
+      - "smoke.py"
+      - "tools/**"
+      - "coordinates/**"
+      - ".github/workflows/effects.yml"
+  workflow_dispatch:
+
+env:
+  MICROPYTHON_VERSION: v1.29.0
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Cache MicroPython unix port
+        id: mp-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/micropython-bin
+          key: micropython-unix-${{ env.MICROPYTHON_VERSION }}-${{ runner.os }}
+
+      - name: Build MicroPython unix port
+        if: steps.mp-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libffi-dev pkg-config
+          git clone --depth 1 --branch "$MICROPYTHON_VERSION" https://github.com/micropython/micropython.git /tmp/micropython
+          make -C /tmp/micropython/mpy-cross -j"$(nproc)"
+          make -C /tmp/micropython/ports/unix submodules
+          make -C /tmp/micropython/ports/unix -j"$(nproc)"
+          mkdir -p ~/micropython-bin
+          cp /tmp/micropython/ports/unix/build-standard/micropython ~/micropython-bin/
+
+      - name: Smoke-test effects
+        run: ./smoke.py --require-micropython --require-mpy-cross --micropython ~/micropython-bin/micropython
+
+      - name: Render every effect
+        if: always()
+        run: ./render.py all --out renders
+
+      - name: Upload renders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: effect-renders
+          path: renders/
+          retention-days: 14

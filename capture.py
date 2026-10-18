@@ -43,9 +43,23 @@ def get_pico_url(host: str, port: int = 8080) -> str:
 
 
 def pico_request(base_url: str, endpoint: str, timeout: float = 5.0) -> dict | None:
-    """Make request to Pico and return JSON response."""
+    """Make request to Pico and return JSON response.
+
+    Calibration endpoints need the device's HTTP token: $TREE_TOKEN, or
+    HTTP_TOKEN from config.py next to this script."""
+    import os
+
+    token = os.environ.get("TREE_TOKEN")
+    if not token:
+        try:
+            import runpy
+
+            token = runpy.run_path(str(Path(__file__).with_name("config.py"))).get("HTTP_TOKEN")
+        except (OSError, SyntaxError):
+            token = None
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        resp = requests.get(f"{base_url}{endpoint}", timeout=timeout)
+        resp = requests.get(f"{base_url}{endpoint}", timeout=timeout, headers=headers)
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException as e:
@@ -323,8 +337,9 @@ def capture_sequential(base_url: str, angle: str, cap: cv2.VideoCapture,
     for i, led in enumerate(range(start, end)):
         set_led(base_url, led)
         # Read (rather than sleep) through the settle time so no stale frames
-        # are left in the camera buffer. The current firmware applies changes
-        # on a 100 ms poll, so settle must exceed that.
+        # are left in the camera buffer. The old firmware applied changes on a
+        # 100 ms poll, so settle must exceed that there; the rewrite shows a
+        # static frame within one frame.
         frame = rotate_frame(capture_frame(cap, settle_frames=2, drain_ms=settle_ms), rotation)
         filename = angle_dir / f"led_{led:04d}.jpg"
         cv2.imwrite(str(filename), frame)

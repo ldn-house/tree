@@ -155,7 +155,7 @@ def cmd_solve(args):
         print(f"WARNING: the front view {views[0].name} was dropped; +x now points towards {sol.views[0]}")
     norm, info = to_tree_frame(sol.points, sol, front_view=0)
     conf = write_outputs(Path(args.out), norm, sol, info, args.height_m, sol.views,
-                         {"detections": [str(p) for p in paths], "dropped_views": sol.dropped,
+                         {"detections": [p.name for p in paths], "dropped_views": sol.dropped,
                           "duplicate_viewpoints": [{"views": [a, b], "median_shift": sh, "shared": n}
                                                    for a, b, sh, n in dupes]})
     print(f"median reprojection {sol.cost_px:.2f}px, focal {np.round(sol.focal)}, "

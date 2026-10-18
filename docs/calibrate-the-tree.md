@@ -85,15 +85,15 @@ It helps to name them in the order you filmed, front first: `1-front`, `2`, `3`,
 
 ## For whoever runs the computer bit
 
-This needs the tree repository on branch `calibration/video-pipeline` (or `main` once #22 is merged), with [uv](https://docs.astral.sh/uv/) installed. Put the clips in a folder, for example `~/Desktop/tree-clips`, named so the front clip sorts first.
+This needs the tree repository (`main`) with [uv](https://docs.astral.sh/uv/) installed, and the tree's HTTP token in `config.py` or `$TREE_TOKEN` (as for `flash.py`). Put the clips in a folder, for example `~/Desktop/tree-clips`, named so the front clip sorts first.
 
-**Before anyone films, check the tree has the calibration sequence.** If it doesn't, the button does nothing.
+The firmware ships with the calibration sequence. To check it's there (optional, read-only):
 
 ```bash
 curl -s http://tree.local:8080/calibrate
 ```
 
-`"default"` under `"sequences"` must not be `null`; with the current sequence it shows `"crc32": "83cffe28"`. If it is `null`, the firmware needs a build from #21 that bundles `sequences/default.tcal`, which is a firmware update.
+Under `"sequences"`, `"default"` shows `"crc32": "83cffe28"`, 57 frames and a 6600 ms loop.
 
 ```bash
 # 1. Find the LEDs in each clip. Clips are decoded in parallel, with progress per clip;
@@ -103,17 +103,17 @@ curl -s http://tree.local:8080/calibrate
 # 2. Combine the views into 3D (front clip first, which the name order handles)
 ./calibrate.py solve positions/tonight/*_detections.json --out coordinates
 
-# 3. Optional: check for wire-continuity problems (assumes a 1.75 m light span and 10 cm spacing)
+# 3. Refresh the legacy coordinate files that older tools read
+./calibrate.py export-legacy coordinates/coords.txt
+
+# 4. Optional: check for wire-continuity problems (assumes a 1.75 m light span and 10 cm spacing)
 ./calibrate.py quality coordinates/coords.txt --height-m 1.75 --pitch 0.10
 
-# 4. Install it (needs the tree's HTTP token, as for flash.py)
-curl -X PUT --data-binary @coordinates/coords.txt \
-  -H "Authorization: Bearer $TREE_TOKEN" http://tree.local:8080/files/coords.txt
+# 5. Install it on the tree (live, no reboot)
+./flash.py --ota --host tree.local --coords
 ```
 
-**Adding angles later:** decode only the new clips into the same folder (`./calibrate.py decode-video ~/Desktop/tree-clips/6.mov --out positions/tonight`), then run step 2 again with all of them; the front clip still has to sort first. If the new clips came from a different phone or lens, label them so they get their own lens estimate: `--camera 6=second-phone --camera 7=second-phone`. Clips without a label share the first camera's.
-
-After a new solve, run `./calibrate.py export-legacy coordinates/coords.txt` to refresh the legacy `coords_compact.txt`/`coords.json` that older tools read.
+**Adding angles later:** decode only the new clips into the same folder (`./calibrate.py decode-video ~/Desktop/tree-clips/6.mov --out positions/tonight`), then run steps 2, 3 and 5 again with all of them; the front clip still has to sort first. If the new clips came from a different phone or lens, label them so they get their own lens estimate: `--camera 6=second-phone --camera 7=second-phone`. Clips without a label share the first camera's.
 
 **On a slow or low-memory computer**, `--max-fps 30` skips every other frame of a 60 fps clip, and `--scale 0.5` decodes at half size (a quarter of the memory). Both are slightly less thorough: on the first real calibration, `--scale 0.5` found 12–18% fewer lights.
 
@@ -123,6 +123,6 @@ After a new solve, run `./calibrate.py export-legacy coordinates/coords.txt` to 
 - **Step 2** prints a median reprojection error. About 1 px or less means the views agree. Much more than about 8 px means something went wrong, usually a zoomed or moving clip. Leave that clip out and run it again.
 - **Step 2 warns** "… look like the same viewpoint" when two clips were filmed from the same angle. Lights seen only in those two clips are treated as seen once. If a clip can't be placed at all, it's left out with a warning, and the rest are solved.
 - **Step 2** also fills in LEDs seen in fewer than two angles along the wire, and marks them with low confidence in `coordinates/coords_metres.csv`.
-- **Step 4** takes effect straight away; `coords.txt` takes precedence over any old `coords_compact.txt`.
+- **Step 5** takes effect straight away: the tree uses `coords.txt` in preference to any older `coords_compact.txt`. To keep the result, commit `coordinates/`.
 
 **First real calibration (18 October):** five clips, filmed by turning the tree in front of a fixed phone; two were from the same angle. 453 of 500 lights were seen at least once, the views agreed to 0.65 px, and the shape came out as a clean cone. If a run looks off, keep the clips and the `positions/tonight` folder so it can be checked.

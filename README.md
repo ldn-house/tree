@@ -5,34 +5,50 @@ RGB LED strip controller for a 6ft Christmas tree with 500 WS2811 LEDs, inspired
 ## Hardware
 
 - Pi Pico 2W running MicroPython
-- 500x WS2811 12V RGB LEDs (GRB color order)
+- 500x WS2811 12V RGB LEDs (RGB on the wire), driven by PIO + DMA
 - Logic level shifter (3.3V → 5V for data signal)
 - 12V power supply for LEDs
 
 ## Usage
 
 ```bash
-# Flash to Pico (saves as main.py, auto-runs on boot)
-./flash.py
-
-# First-time setup (all scripts: main, ota, mqtt, config)
+# First-time setup over USB: recovery layer, firmware, config.py, coordinates
+cp config.example.py config.py   # fill in Wi-Fi, HTTP_TOKEN, MQTT
 ./flash.py --all
 
-# Push updates via WiFi OTA (no USB needed)
-./flash.py --ota --host 192.168.2.149
+# Update over Wi-Fi from a local build (waits for the device to confirm it).
+# The bundle holds the firmware and every effect registered in effects/.
+./flash.py --ota --host tree.local
 
-# Preview animations in browser
+# ...or from the latest GitHub Release
+./flash.py --ota --host tree.local --github
+
+# Preview effects in the browser (3D viewer with hot reload)
 ./serve.py
+
+# Render an effect headlessly (GIF, contact sheet, metrics)
+./render.py rainbow_cycle
+
+# Try an edited effect on the tree without a firmware update (hot-push)
+./push_effect.py rainbow_cycle --host tree.local --activate
 ```
 
 uv automatically handles dependencies.
 
+### Updates that can't brick the tree
+
+The firmware has two slots. An update is staged, verified (sizes, SHA-256 hashes, signature, an anti-replay generation, compile checks), only then copied over the unused slot, and booted as a trial; if it doesn't come up healthy it is rolled back automatically. A rejected update changes nothing. If nothing will boot, or the flash can't be written, the tree drops into a safe mode that still accepts a new bundle (or a fixed config) over Wi-Fi. The small recovery layer that does this is installed over USB and no update path writes it. Code you install yourself (firmware, hot-pushed effects) is trusted and runs with full access, so set `UPDATE_KEY` to require your signature on all of it. See CLAUDE.md, "Trust model".
+
 ## Home Assistant Integration
 
-The tree integrates with Home Assistant via MQTT, appearing as a light entity with:
-- Power on/off
-- Brightness control (with automatic power limiting)
-- Effect selection (auto-cycle or lock to specific effect)
+The tree integrates with Home Assistant via MQTT discovery, as one device with:
+- A light: power, brightness (with automatic power limiting) and effect (auto-cycle or lock to one effect)
+- Settings: speed, auto-cycle duration and each effect's parameters
+- A firmware update entity, plus reboot and calibration buttons
+- Diagnostics: Wi-Fi signal, free memory, uptime, frame rate, power cap, last reset cause, boot status
+- Availability: shown unavailable as soon as the tree drops off (MQTT last will)
+
+The tree remembers its power, brightness and effect across reboots and network outages.
 
 ### Setup
 
@@ -43,46 +59,45 @@ The tree integrates with Home Assistant via MQTT, appearing as a light entity wi
 
 ### Power Limiting (HDR)
 
-The tree automatically limits total power draw per-frame to prevent PSU brownouts. Sparse animations (sparkle) can be brighter than dense ones (rainbow). Brightness slider goes 0-100% but actual output is capped based on how many LEDs are lit.
+The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
 
 ## Animations
 
 - **auto** - Cycles through all effects
 - Rainbow cycle
 - Christmas (red/green theater chase)
-- White sparkle
 - Candy cane stripes
 - Multicolor twinkle
 - Warm white (solid)
 - **Plane sweep** - Horizontal plane moves up/down tree (uses 3D coordinates)
+- **Lighthouse** - Warm beam sweeping round the tree (3D)
+- **Raindrops** - Coloured spherical ripples spreading through the tree (3D)
+- **Snowfall** - Flakes drifting down through the cone, some settling on branches (3D)
 
 ## 3D Coordinate Mapping
 
-The tree supports volumetric 3D animations using camera-calibrated LED positions. `calibrate.py` is the current toolkit; see [docs/calibration-findings.md](docs/calibration-findings.md) for why, and for benchmark numbers.
+The tree supports volumetric 3D animations using camera-calibrated LED positions, made with `calibrate.py`. [docs/calibrate-the-tree.md](docs/calibrate-the-tree.md) is the step-by-step guide (no technical knowledge needed to film), and [docs/calibration-findings.md](docs/calibration-findings.md) has the method and benchmark numbers.
 
-**Video (recommended, needs the calibration protocol in firmware).** The tree loops a short coded sequence ([docs/calibration-protocol.md](docs/calibration-protocol.md)). Film it for about 11 s from each of 4–6 spots around the tree, front view first:
+**Video (recommended).** Press **Play calibration sequence** in Home Assistant: the tree loops a short coded blinking pattern ([docs/calibration-protocol.md](docs/calibration-protocol.md)). Film it for about 12 s from each of 4–6 angles, walking round the tree or turning it in front of a fixed phone, front first. Then:
 
 ```bash
-./calibrate.py decode-video front.mp4 right.mp4 back.mp4 left.mp4 --out positions
+./calibrate.py decode-video clips/* --out positions/tonight              # clips in parallel
+./calibrate.py solve positions/tonight/*_detections.json --out coordinates
+./calibrate.py export-legacy coordinates/coords.txt                      # refresh the legacy files
+./flash.py --ota --host tree.local --coords                              # install (live, no reboot)
+```
+
+**Still captures (one LED per frame, with a webcam).**
+
+```bash
+TREE_TOKEN=... ./capture.py --angle front --host tree.local      # repeat for 4+ angles, front first
+./calibrate.py detect --views front,right,back,left               # captures before capture_version 2: --lag 1
 ./calibrate.py solve positions/{front,right,back,left}_detections.json --out coordinates
 ```
 
-**Still captures (works with the current firmware).**
+`coordinates/coords.txt` has one `x,y,z` (or `null`) line per LED: y from 0 (lowest LED) to 1 (highest), x and z in the same units, origin on the trunk, +x towards the front view. It's what the firmware, `render.py`, `smoke.py` and the viewer load first; [coordinates/README.md](coordinates/README.md) describes the other files. The older `analyze.py` and `triangulate.py` still run but are superseded; their output would overwrite the calibrated files.
 
-```bash
-# 1. Capture each LED from 4 or more angles (front first)
-./capture.py --angle front --host 192.168.2.149
-
-# 2. Detect LEDs (captures made before capture_version 2 show LED i-1 in led_i: use --lag 1)
-./calibrate.py detect --views front,right,back,left
-
-# 3. Triangulate with perspective bundle adjustment -> coordinates/coords.txt
-./calibrate.py solve positions/{front,right,back,left}_detections.json --out coordinates
-```
-
-`coords.txt` has one `x,y,z` (or `null`) line per LED: y from 0 (lowest LED) to 1 (highest), x and z in the same units, origin on the trunk, +x towards the front view. `coords_metres.csv` adds metres, per-LED confidence and the number of views. After a solve, `./calibrate.py export-legacy` regenerates the legacy `coords_compact.txt` and `coords.json` that older tools read; [coordinates/README.md](coordinates/README.md) describes every file. The older `analyze.py` and `triangulate.py` still work, but writing their output over the calibrated files would replace them.
-
-The synthetic benchmark (`./calibrate.py simulate`, `simulate-video`, `bench-stills`, `bench-video`) renders captures with known ground truth so any pipeline can be scored.
+The synthetic benchmark (`./calibrate.py simulate`, `simulate-video`, `bench-stills`, `bench-video`) renders captures with known ground truth, so any pipeline can be scored.
 
 ## Roadmap
 

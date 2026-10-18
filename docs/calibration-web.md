@@ -47,7 +47,7 @@ The protocol is designed so that none of this matters for timing. The tree loops
 
 Two options, with the same algorithm as `calib/video.py`.
 
-**A. Pyodide (recommended first).** The repo already runs Python in the browser for `simulator.html`. Pyodide ships numpy, scipy and OpenCV, so `calib/video.py` and `calib/solve.py` run unchanged. Frames come from a `<video>` element fed by the camera stream, drawn into an `OffscreenCanvas` at reduced resolution and handed to Python as `Uint8ClampedArray` views (zero copy with `pyodide.ffi.to_py` on a `memoryview`).
+**A. Pyodide (recommended first).** The repo already runs Python in the browser: the 3D effects viewer (`viewer/`, served by `serve.py`) runs the effects in Pyodide. Pyodide ships numpy, scipy and OpenCV, so `calib/video.py` and `calib/solve.py` run unchanged. Frames come from a `<video>` element fed by the camera stream, drawn into an `OffscreenCanvas` at reduced resolution and handed to Python as `Uint8ClampedArray` views (zero copy with `pyodide.ffi.to_py` on a `memoryview`).
 
 - **Pass 1 (sync)** is cheap: a 270 × 480 sparkle series per frame.
 - **Pass 2** is needed because decoding needs the phase. Hold the clip for one loop (about 6.6 s) at 540 × 960 luminance in a ring buffer: 200 frames × 0.5 MB = 100 MB, which fits even on iOS. Then accumulate symbols row-wise. Accumulating a second loop on the fly after sync is found avoids the ring buffer entirely: the sequence loops, so the page can sync on loop 1 and accumulate from loop 2 onwards.
