@@ -176,7 +176,7 @@ Legacy levels: `/calibrate/led` used (255, 255, 255) and `/calibrate/binary` use
   "protocol": 1,
   "state": "idle",
   "led_count": 500,
-  "power_budget": 49725,
+  "power_budget": 47812,
   "min_frame_ms": 20,
   "max_sequence_bytes": 65536,
   "ttl_s": 0,
@@ -258,7 +258,7 @@ This section describes what the host puts in the file. The firmware does not nee
 | code | `bits` × 2 × symbol | for each code bit, the pattern frame then its complement. Each LED shows its codeword bit and then the inverse, so every LED is lit exactly half the time. The decoder compares each pair, which removes exposure drift, ambient light and bloom from neighbours. Colour mode puts three bits in each frame, one per channel. |
 | tail | 13 × symbol | Barker-13 again, used to measure clock drift across the loop. |
 
-Levels: all-on frames light all 500 LEDs, so they use `floor(budget / 1500)` (33). Code and training frames use one shared level, the highest that keeps the brightest code frame under the budget (64). Every frame stays under the cap.
+Levels: all-on frames light all 500 LEDs, so they use `floor(budget / 1500)`. Code and training frames use one shared level, the highest that keeps the brightest code frame under the budget. Every frame stays under the cap. For the firmware's `power_budget` of 47,812 (a 1.5 A single 12 V feed at 8 mA per channel), that's 31 for all-on frames and 62 for code frames, with a brightest frame of 47,616. The host should build sequences against the device's reported budget: `./calibrate.py sequence --host <tree>` reads it from `GET /calibrate`, and refuses to guess if the tree can't be reached. The committed `sequences/default.tcal` is built for 47,812. If the cap changes, regenerate it and the test vector together.
 
 ## 10. Notes for the browser page (informative)
 

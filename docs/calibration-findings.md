@@ -198,7 +198,7 @@ Notes:
   - each code bit as pattern then complement;
   - Barker-13 tail.
 
-  The default is the extended Hamming (14, 9) code over the Gray code of the index (minimum distance 4), 100 ms frames, a 6.6 s loop, 3.9 KB of `.tcal`. Every frame stays under the 49,725 power budget: code frames run at level 64, and all-on frames at 33.
+  The default is the extended Hamming (14, 9) code over the Gray code of the index (minimum distance 4), 100 ms frames, a 6.6 s loop, 3.9 KB of `.tcal`. Every frame stays under the firmware's 47,812 power budget (1.5 A at 12 V, 8 mA per channel): code frames run at level 62, and all-on frames at 31. The benchmark rows below were rendered against the earlier 49,725 budget (levels 64 and 33); a re-run at the new levels is reported after the table.
 - **Decoder** (`calib/video.py`):
   1. **Sync.** A per-band series of local contrast (light above the local level, relative to it) from the pixels that blink. This is invariant to auto exposure and static for light fittings. It's correlated with the plan's brightness to find the loop phase, then refined on frame-to-frame change energy, because every LED flips at each pattern→complement boundary. That fits phase, rolling-shutter readout and exposure. The brightness score breaks the symbol-period ambiguity.
   2. **Symbols.** Each symbol image is assembled row by row from the frames whose exposure for that row lies inside the symbol, averaged over loops.
@@ -246,6 +246,17 @@ Recall counts only LEDs that are actually visible in a view (transmission above 
 | Colour, 3× dimmer LEDs | 0.176 | 0 | solve fails | – | – | – |
 
 ![Video recall by configuration](img/calibration/chart-video-recall.png)
+
+**Re-run at the firmware's 47,812 budget** (levels 62 and 31 instead of 64 and 33; same seed, cameras and phase):
+
+| Configuration | Budget | Recall of visible | Wrong IDs | 3D median | 3D p90 | Over 10 cm | Swaps |
+|---|---|---|---|---|---|---|---|
+| Default, 540×960 | 49,725 | 0.916 | 0 | 0.70 cm | 1.69 | 0 | 0 |
+| Default, 540×960 | **47,812** | **0.916** | **0** | **0.82** | **1.72** | **0** | **0** |
+| Default, 1080×1920 | 49,725 | 0.957 | 0 | 0.92 | 1.61 | 0 | 0 |
+| Default, 1080×1920 | **47,812** | **0.959** | **0** | **1.03** | **1.94** | **0** | **0** |
+
+Decoding is unchanged. The 0.1 cm shift in median is within the run-to-run variation noted below.
 
 ### 5.3 What the sweep says
 

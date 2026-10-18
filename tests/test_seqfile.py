@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 import numpy as np  # noqa: E402
 
 from calib import seqfile  # noqa: E402
-from calib.sequence import SequenceParams, build  # noqa: E402
+from calib.sequence import SequenceParams, build, sequential_plan  # noqa: E402
 
 DATA = ROOT / "tests" / "data"
 
@@ -44,8 +44,18 @@ def test_roundtrip_matches_plan():
 
 
 def test_frames_stay_under_power_budget():
-    for params in (SequenceParams(), SequenceParams(colour=True)):
+    for params in (SequenceParams(), SequenceParams(colour=True), SequenceParams(power_budget=40000)):
         assert build(params).frame_power().max() <= params.power_budget
+    seq = sequential_plan(power_budget=40000)
+    assert seq.frame_power().max() <= 40000
+
+
+def test_default_vector_fits_firmware_budget():
+    # The rewrite firmware reports power_budget 47812 (1.5 A, 8 mA per channel)
+    # and keeps at most 4 mono level tables.
+    _n, _loops, frames = seqfile.decode((DATA / "calib-default.tcal").read_bytes())
+    assert max(sum(f.rgb(500)) for f in frames) <= 47812
+    assert len({f.level for f in frames if f.mono}) <= 4
 
 
 def test_rejects_corruption():

@@ -33,11 +33,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
+def device_power_budget(host: str, port: int = 8080, timeout: float = 3.0) -> int | None:
+    """power_budget from the tree's GET /calibrate (read-only, no token), or None."""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/calibrate", timeout=timeout) as r:
+            return int(json.load(r)["power_budget"])
+    except (OSError, ValueError, KeyError) as e:
+        print(f"could not read power_budget from {host}:{port} ({e})")
+        return None
+
+
 def cmd_sequence(args):
-    from calib.sequence import SequenceParams, build, sequential_plan
+    from calib.sequence import DEFAULT_POWER_BUDGET, SequenceParams, build, sequential_plan
+
+    budget = args.power_budget
+    if budget is None and args.host:
+        budget = device_power_budget(args.host, args.port)
+        if budget is None:
+            sys.exit("refusing to guess the budget for a device sequence; pass --power-budget")
+        print(f"power_budget {budget} from {args.host}")
+    if budget is None:
+        budget = DEFAULT_POWER_BUDGET
+    args.power_budget = budget
 
     if args.sequential:
-        plan = sequential_plan(symbol_ms=args.symbol_ms)
+        plan = sequential_plan(symbol_ms=args.symbol_ms, power_budget=args.power_budget)
     else:
         plan = build(SequenceParams(codebook=args.codebook, differential=not args.single,
                                     colour=args.colour, symbol_ms=args.symbol_ms,
@@ -217,7 +239,10 @@ def main():
     p.add_argument("--sequential", action="store_true", help="one LED at a time")
     p.add_argument("--symbol-ms", type=int, default=100)
     p.add_argument("--loops", type=int, default=0, help="default loops (0 = until stopped)")
-    p.add_argument("--power-budget", type=int, default=49725)
+    p.add_argument("--power-budget", type=int, default=None,
+                   help="raw RGB sum per frame (default: --host's GET /calibrate, else 47812)")
+    p.add_argument("--host", help="read power_budget from this tree's GET /calibrate")
+    p.add_argument("--port", type=int, default=8080)
     p.set_defaults(func=cmd_sequence)
 
     p = sub.add_parser("simulate", help="render a synthetic still capture with ground truth")

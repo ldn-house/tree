@@ -24,10 +24,12 @@ from .codes import Codebook, make_codebook
 
 BARKER13 = np.array([1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1], np.uint8)
 
-# Raw RGB sum budget the runtime's power cap allows (13% of 500*765), see
-# main.py MAX_POWER. Frames are built to stay under it so the cap never
-# rescales a calibration frame.
-DEFAULT_POWER_BUDGET = int(500 * 255 * 3 * 0.13)
+# Raw RGB sum per frame the firmware's power cap allows, as reported by
+# GET /calibrate (power_budget). The rewrite firmware (#21) caps a single 12 V
+# feed at 1.5 A with 8 mA per fully driven WS2811 channel: 1500 / 8 * 255.
+# Frames are built to stay under it so the cap never rescales a calibration
+# frame. Prefer the device's value (calibrate.py sequence --host).
+DEFAULT_POWER_BUDGET = 47812
 
 
 @dataclass
@@ -155,10 +157,11 @@ def build(params: SequenceParams) -> Plan:
     return Plan(params, cb, roles, bits, on, level, dur)
 
 
-def sequential_plan(n_leds: int = 500, symbol_ms: int = 100, level: int = 255) -> Plan:
+def sequential_plan(n_leds: int = 500, symbol_ms: int = 100, level: int = 255,
+                    power_budget: int = DEFAULT_POWER_BUDGET) -> Plan:
     """One LED at a time, the video equivalent of capture.py's sequential mode."""
     params = SequenceParams(codebook="binary", differential=False, symbol_ms=symbol_ms,
-                            n_leds=n_leds, sync=True)
+                            n_leds=n_leds, sync=True, power_budget=power_budget)
     cb = make_codebook("binary", n_leds)
     roles, bits, on = [], [], []
     off = np.zeros((3, n_leds), bool)
@@ -183,7 +186,8 @@ def sequential_plan(n_leds: int = 500, symbol_ms: int = 100, level: int = 255) -
     on = np.stack(on)
     roles_arr = np.array(roles)
     level_arr = np.zeros((len(roles), 3), np.uint8)
-    full_lvl = min(level, DEFAULT_POWER_BUDGET // (3 * n_leds))
+    full_lvl = min(level, power_budget // (3 * n_leds))
+    level = min(level, power_budget // 3)
     level_arr[:] = full_lvl
     level_arr[roles_arr == "single"] = level
     dur = np.full(len(roles), symbol_ms, int)
