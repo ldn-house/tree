@@ -31,7 +31,7 @@ import sys
 
 import bootmgr
 
-from app import coords, fx as fxmod, recovery
+from app import coords, fx as fxmod, recovery, trace
 from app.httpd import HTTPError
 from app.log import lines, log
 
@@ -281,6 +281,7 @@ def _try_effect(rt, name, data, ext):
     bootmgr.makedirs(fxmod.OVERLAY)
     with open(stage, "wb") as f:
         f.write(data)
+    trace.at(trace.EFFECT_START)  # its code runs here, inside the request
     try:
         if stage_mod in sys.modules:
             del sys.modules[stage_mod]

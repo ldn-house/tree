@@ -84,7 +84,11 @@ def test_m8_mqtt_drop_closes_the_socket(tmp_path):
         c, _ = srv.accept()
         c.settimeout(5)
         try:
-            seen.append(c.recv(100))
+            while True:  # DISCONNECT, then EOF
+                b = c.recv(100)
+                seen.append(b)
+                if not b:
+                    break
         except OSError as e:
             seen.append(e)
         c.close()
@@ -110,7 +114,7 @@ asyncio.run(main())
     t.join(10)
     srv.close()
     assert r.returncode == 0, r.stdout + r.stderr
-    assert seen == [b""], seen
+    assert b"".join(x for x in seen if isinstance(x, bytes)) == b"\xe0\x00" and seen[-1] == b"", seen
 
 
 def _run_regressions2(firmware, tmp_path):

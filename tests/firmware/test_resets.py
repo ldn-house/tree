@@ -108,16 +108,16 @@ def test_watchdog_hang_reports_where_the_loop_was(device):
     blocked, and nothing in RAM survived to say where. app.trace keeps the
     phase in watchdog scratch 1, which does."""
     d = device
-    code, _ = d.request("PUT", "/effects/slowstart", body=SLOW_START)
-    assert code == 200
-    d.post("/state", {"effect": "slowstart"})  # the engine task constructs it, and hangs
+    try:  # validation constructs it inside the request, which never answers
+        d.request("PUT", "/effects/slowstart", body=SLOW_START)
+    except OSError:
+        pass
     wait_for(lambda: len(d.boots) >= 1, 40, what="watchdog reset")
     assert d.boots[0] == "watchdog reset"
     st = d.wait_http(30)
     assert st["boot"]["reset_cause"] == "watchdog"
     assert st["boot"]["hang"]["phase"] == "effect start", st["boot"]
     assert st["boot"]["reset_reason"].startswith("hung in effect start")
-    assert "slowstart" in st["effect"]["quarantined"]
     assert any("watchdog expired: hung in effect start" in line for line in d.get("/log")[1]["lines"])
     # A deliberate reset clears it.
     d.post("/reboot")

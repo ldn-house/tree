@@ -12,7 +12,11 @@ manages Wi-Fi, which here belongs to app.net. What matters for reliability:
   only when idle starved last_rx on a tree that publishes all the time and
   the session was dropped every 45 s;
 - reconnects back off from 1 s to 60 s, never blocking the event loop;
-- the last will marks the device offline when the session dies;
+- the last will marks the device offline when the session dies, but
+  only when the device itself is gone: whenever the firmware drops a
+  session it sends DISCONNECT first (best effort), so the broker discards
+  the will instead of publishing "offline" over the next session's
+  "online";
 - one task reads; writes go through a lock so packets never interleave.
 """
 
@@ -71,6 +75,7 @@ class MQTT:
         self.last_tx = 0
         self.last_ping = 0
         self.pings = 0
+        self.disconnects = 0
         self.pid = 0
         self.connects = 0
         self.failures = 0
@@ -159,9 +164,18 @@ class MQTT:
         if self.connected:
             log("mqtt: " + why)
         self.last_error = why
+        stream = self.w or self.r
+        if self.connected and stream is not None:
+            # A clean DISCONNECT, so the broker drops the will (see above).
+            # Non-blocking and best effort: a dead link just loses it.
+            sock = getattr(stream, "s", None)
+            try:
+                sock.write(b"\xe0\x00")
+                self.disconnects += 1
+            except Exception:
+                pass
         self.connected = False
         # Close the socket now: Stream.close() alone doesn't (see streams).
-        stream = self.w or self.r
         self.w = None
         self.r = None
         close_now(stream)
@@ -303,4 +317,5 @@ class MQTT:
             "rx": self.rx,
             "tx": self.tx,
             "pings": self.pings,
+            "disconnects": self.disconnects,
         }

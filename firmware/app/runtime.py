@@ -226,6 +226,7 @@ class Runtime:
             "floor": bootmgr.read_state()["floor"],
             "wifi": self.wifi.status(),
             "mqtt": self.mqtt.status() if self.mqtt else None,
+            "ha": {"discoveries": self.ha.discoveries, "offline_seen": self.ha.offline_seen} if self.ha else None,
             "http": {"requests": self.http.requests, "rejected": self.http.rejected, "auth": bool(cfg.HTTP_TOKEN)},
             "calibration": self.calib.state,
             "update": self.updates.status(),

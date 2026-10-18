@@ -23,6 +23,7 @@ overrides what the tree restored from flash at boot.
 """
 
 import gc
+import hashlib
 import json
 import time
 
@@ -34,6 +35,8 @@ from app.log import log
 DIAG_EVERY_MS = 30000
 EFFECT_MIN_MS = 1000
 REDISCOVER_DELAY_MS = 3000
+ONLINE_AGAIN_MS = 1500  # re-assert "online" this long after connecting
+RETAINED_WAIT_MS = 1000  # for the broker to replay our retained availability
 
 
 def _title(name):
@@ -73,7 +76,9 @@ class HA:
         self.t_cal_state = p + "/calibrate/state"
         self.t_ha_status = self.dp + "/status"
         mqtt.will = (self.t_avail, "offline", True)
-        mqtt.subs = [self.t_set, self.t_cmd + "#", self.t_cal_set, self.t_ha_status]
+        # Our own availability too: if the broker publishes the will of an
+        # older session over this one's "online", put "online" back.
+        mqtt.subs = [self.t_set, self.t_cmd + "#", self.t_cal_set, self.t_ha_status, self.t_avail]
         mqtt.on_connect = self.on_connect
         mqtt.on_message = self.on_message
         self.dirty = {"light": False, "settings": False, "update": False, "calib": False, "diag": False}
@@ -81,6 +86,11 @@ class HA:
         self.effect_at = None  # ticks of that publish
         self.ready = False  # discovery published for this session
         self.rediscover_at = None
+        self.discovered = None  # digest of the discovery configs last published
+        self.discoveries = 0
+        self.online_at = None  # when to (re-)publish "online"
+        self.avail_retained = False  # the broker replayed a retained availability
+        self.offline_seen = 0
         self.last_diag = 0
         self.last_cal = 0
         self.ignored_retained = 0
@@ -102,6 +112,14 @@ class HA:
     # -- incoming --
 
     def on_message(self, topic, payload, retained):
+        if topic == self.t_avail:
+            if retained:
+                self.avail_retained = True
+            if payload == b"offline" and self.mqtt.connected:
+                self.offline_seen += 1
+                log("ha: availability says offline while connected; re-publishing online")
+                self.online_at = time.ticks_ms()
+            return
         if topic == self.t_ha_status:
             if payload == b"online":
                 self.rediscover_at = time.ticks_add(time.ticks_ms(), REDISCOVER_DELAY_MS)
@@ -326,29 +344,51 @@ class HA:
             return "%s/%s/xmas_tree/config" % (self.dp, comp)
         return "%s/%s/xmas_tree/%s/config" % (self.dp, comp, obj)
 
-    async def publish_discovery(self):
+    def _configs(self):
+        """(topic, JSON config, object id) for every entity."""
         dev = self._device()
         origin = {"name": "tree firmware", "sw_version": self.rt.version, "support_url": "https://github.com/ldn-house/tree"}
-        params = []
-        n = 0
         for comp, obj, cfg in self._entities():
             self.hb = time.ticks_ms()
-            n += 1
             if obj is not None:
                 cfg["unique_id"] = "xmas_tree_" + obj
             cfg["availability_topic"] = self.t_avail
             cfg["device"] = dev
             cfg["origin"] = origin
+            yield self._config_topic(comp, obj), json.dumps(cfg), obj
+
+    def _digest(self):
+        h = hashlib.sha256()
+        for topic, js, _obj in self._configs():
+            h.update(topic)
+            h.update(js)
+        return h.digest()
+
+    async def publish_discovery(self, force=False):
+        """Discovery configs are retained, so they only need publishing when
+        they change (a new firmware or effect set), on the first connect,
+        or when Home Assistant asks (its birth message). Re-publishing them
+        on every reconnect made HA re-initialise every entity each time."""
+        digest = self._digest()
+        if not force and digest == self.discovered:
+            return False
+        params = []
+        n = 0
+        for topic, js, obj in self._configs():
+            n += 1
             if obj and obj.startswith("param_"):
                 params.append(obj)
-            await self.mqtt.publish(self._config_topic(comp, obj), json.dumps(cfg), retain=True)
+            await self.mqtt.publish(topic, js, retain=True)
         # Remove entities for params that no longer exist.
         for obj in self.rt.state.get("ha_params"):
             if obj not in params:
                 await self.mqtt.publish(self._config_topic("number", obj), b"", retain=True)
         self.rt.state.set_ha_params(params)
+        self.discovered = digest
+        self.discoveries += 1
         gc.collect()
         log("ha: discovery published (%d entities, %d bytes free after collect)" % (n, hw.mem_free()))
+        return True
 
     # -- outgoing state --
 
@@ -404,14 +444,30 @@ class HA:
         await self.mqtt.publish(self.t_effect, label, retain=True)
 
     async def on_connect(self):
+        """Every new session: availability, discovery only if it changed,
+        and every state again (retained), so nothing is left stale."""
         self.ready = False
+        # We subscribed to our own availability before this runs: a broker
+        # that kept its retained messages replays it (retain flag set). If
+        # nothing comes, it has lost them (restarted without persistence),
+        # discovery configs included, so publish those again.
+        self.avail_retained = False
+        end = time.ticks_add(time.ticks_ms(), RETAINED_WAIT_MS)
+        while not self.avail_retained and time.ticks_diff(end, time.ticks_ms()) > 0:
+            self.hb = time.ticks_ms()
+            await asyncio.sleep_ms(50)
+        await self.mqtt.publish(self.t_avail, "online", retain=True)
+        await self.publish_discovery(force=not self.avail_retained)
+        self._republish()
+        # In case the broker publishes an older session's will after this.
+        self.online_at = time.ticks_add(time.ticks_ms(), ONLINE_AGAIN_MS)
+        self.ready = True
+
+    def _republish(self):
         self.effect_shown = None
         self.effect_at = None
-        await self.mqtt.publish(self.t_avail, "online", retain=True)
-        await self.publish_discovery()
         for k in self.dirty:
             self.dirty[k] = True
-        self.ready = True
 
     async def run(self):
         while True:
@@ -424,8 +480,12 @@ class HA:
             calib = self.rt.calib
             if self.rediscover_at is not None and time.ticks_diff(now, self.rediscover_at) >= 0:
                 self.rediscover_at = None
-                log("ha: Home Assistant restarted, re-publishing discovery")
-                await self.on_connect()
+                log("ha: Home Assistant restarted (or entities changed), re-publishing discovery")
+                await self.publish_discovery(force=True)
+                self._republish()
+            if self.online_at is not None and time.ticks_diff(now, self.online_at) >= 0:
+                self.online_at = None
+                await self.mqtt.publish(self.t_avail, "online", retain=True)
             if calib.version != self.last_cal or (calib.playing() and time.ticks_diff(now, calib.published_at) >= 1000):
                 self.last_cal = calib.version
                 calib.published_at = now

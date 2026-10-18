@@ -259,4 +259,82 @@ def test_busy_publisher_keeps_its_session(mdev, bus):
     assert st["tx"] > 30, st
     states = [p for _t, p in bus.since(t0, P + "/state")]
     assert len(states) >= 15, len(states)  # it really was publishing all along
-    assert [p for _t, p in bus.since(t0, AVAIL)] == [], "availability flapped"
+    assert [p for _t, p in bus.since(t0, AVAIL) if p != b"online"] == [], "availability flapped"
+
+
+def retained(broker, topic, timeout=5):
+    """What a fresh subscriber gets for topic: the retained value, or None."""
+    import paho.mqtt.client as mqtt
+
+    got = []
+    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    c.on_message = lambda c, u, m: got.append(m.payload)
+    c.on_connect = lambda c, u, f, rc, p=None: c.subscribe(topic)
+    c.connect("127.0.0.1", broker.port)
+    c.loop_start()
+    try:
+        end = time.time() + timeout
+        while not got and time.time() < end:
+            time.sleep(0.1)
+    finally:
+        c.loop_stop()
+        c.disconnect()
+    return got[0] if got else None
+
+
+def test_availability_survives_an_unclean_drop_and_a_late_will(mdev, broker, bus):
+    """On the tree, HA's Running effect went Unavailable and came back stale
+    at every reconnect: the broker can publish an old session's will
+    ("offline", retained) after the new session's "online", and every
+    reconnect re-sent all discovery configs. Now the firmware disconnects
+    cleanly when it drops a session, re-asserts "online" after connecting and
+    whenever it sees "offline", and re-sends only the states."""
+    d = mdev
+    assert status(d)["ha"]["discoveries"] == 1
+    # An unclean drop: the broker stops answering, the tree gives up on the
+    # session (no traffic for 1.5 x 5 s) and reconnects once it's back.
+    broker.pause()
+    try:
+        wait_for(lambda: not status(d)["mqtt"]["connected"], 30, what="drop detected")
+    finally:
+        broker.resume()
+    t_back = time.time()
+    st = wait_for(lambda: (lambda s: s if s["mqtt"]["connected"] else None)(status(d)), 70, what="reconnect")
+    assert st["mqtt"]["connects"] == 2 and st["mqtt"]["disconnects"] >= 1, st["mqtt"]
+    time.sleep(3)  # past the re-assert
+    assert retained(broker, AVAIL) == b"online"
+    # States were re-published, discovery was not (unchanged configs).
+    assert bus.since(t_back, P + "/state") and bus.since(t_back, P + "/effect_running")
+    assert [t for t, _p in bus.since(t_back) if t.startswith("homeassistant/")] == []
+    assert status(d)["ha"]["discoveries"] == 1
+    # The running effect still reaches a subscriber after the reconnect.
+    t1 = time.time()
+    d.post("/state", {"effect": "chase"})
+    bus.wait(P + "/effect_running", lambda p: p == b"chase", 5, after=t1)
+    # A will from an older session arriving late, over our "online".
+    t2 = time.time()
+    bus.pub(AVAIL, "offline", retain=True)
+    bus.wait(AVAIL, lambda p: p == b"online", 5, after=t2)
+    time.sleep(0.5)
+    assert retained(broker, AVAIL) == b"online"
+    assert status(d)["ha"]["offline_seen"] >= 1
+    # HA's birth message still forces discovery.
+    t3 = time.time()
+    bus.pub("homeassistant/status", "online")
+    wait_for(lambda: [t for t, _p in bus.since(t3) if t.endswith("/config")], 15, what="re-discovery")
+    assert status(d)["ha"]["discoveries"] == 2
+
+
+def test_dropping_a_session_sends_disconnect_so_no_will_fires(mdev, bus):
+    """When the firmware ends a session itself it sends DISCONNECT, so the
+    broker discards the will instead of marking the tree offline."""
+    d = mdev
+    t0 = time.time()
+    d.set_net("down")  # the firmware drops the session ("wifi down"); the broker is still there
+    st = wait_for(lambda: (lambda s: s if not s["mqtt"]["connected"] else None)(status(d)), 20, what="drop")
+    assert st["mqtt"]["disconnects"] == 1, st["mqtt"]
+    time.sleep(10)  # well past the broker's 1.5 x keepalive
+    assert [p for _t, p in bus.since(t0, AVAIL)] == [], "the will fired"
+    d.set_net("up")
+    wait_for(lambda: status(d)["mqtt"]["connected"], 40, what="reconnect")
+    bus.wait(AVAIL, lambda p: p == b"online", 10, after=t0)
