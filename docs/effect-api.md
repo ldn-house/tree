@@ -88,12 +88,12 @@ raw RGB frame -> power cap (on the raw frame) -> brightness -> gamma (optional) 
 
 `effects/_output.py` is the reference implementation, used unchanged by the renderer and viewer. The firmware should use it too, or a faster version that produces byte-identical output.
 
-- **Power cap**: if the raw frame's channel sum exceeds the budget, scale every channel by `budget / sum`. The default budget is 13% of full white (`n * 765 * 13 // 100`), the original firmware's `MAX_POWER`.
+- **Power cap**: a current limit. If the raw frame's channel sum exceeds the budget, every channel is scaled by `budget / sum`. The strip is 12 V WS2811 bullets on a single feed, which binds at about 1.5 A, so the default is `LIMIT_A = 1.5`. `budget_for_current(limit_a, ma_per_channel)` converts amps to the channel-sum budget `Output(budget=...)` takes: 47,812 at the defaults. `Output(n)` with no budget uses that. `budget_for(n, percent)`, the original firmware's 13% of full white, remains for compatibility.
 - **Brightness**: 0-255, applied after the cap. Brightness 255 means "as bright as the budget allows" and lower values dim proportionally; previously the cap clipped dense effects above about 13-40% brightness (review H7).
 - **Gamma**: off by default (linear, as before). `Output(n, gamma=2.2)` enables it.
 - **Colour order**: `Output(n, order="RGB")` emits channels in the given order. The renderer and viewer use RGB. The firmware passes what its driver needs. Per review M8, the 12V WS2811 string is wired RGB, and the old code only worked because two GRB swaps cancelled out.
 - `Output.process(src, dst, brightness)` is integer-only, does not allocate, and sets `raw_total`, `capped` and `factor` (cap factor in 1/4096) for telemetry.
-- Current estimate: `_output.current_ma(channel_sum)` assumes 20 mA per channel at 255 (60 mA per pixel at full white). The default budget is about 3.9 A.
+- Current estimate: `_output.current_a(channel_sum, ma_per_channel)` assumes `MA_PER_CHANNEL = 8` mA per channel at 255 for a 12 V WS2811 bullet. The 20 mA used previously is a 5 V WS2812 figure. The firmware and the renderer estimate a frame's current the same way: `current_a(raw_total * factor // 4096 * brightness // 255)`.
 
 ## Coordinates
 
@@ -119,7 +119,7 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 
 | Command | Purpose |
 |---|---|
-| `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --budget-percent --gamma --view raw --mp4 --watch`. |
+| `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
 | `./render.py all` | Every effect, plus `renders/overview.png` and `renders/summary.json`. |
 | `micropython tools/mp_check.py` | Allocation check under MicroPython. |
 

@@ -91,8 +91,8 @@ def build_params(module, overrides):
 
 
 def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0,
-               budget_percent=_output.BUDGET_PERCENT, gamma=None, coords=None,
-               n=LED_COUNT, keep_raw=False):
+               limit_a=_output.LIMIT_A, ma_per_channel=_output.MA_PER_CHANNEL, gamma=None,
+               coords=None, n=LED_COUNT, keep_raw=False):
     """Render an effect headlessly. Returns a dict with output frames
     (uint8 array frames x n x 3, after the output stage) and metrics."""
     module = effects.load(name)
@@ -100,7 +100,9 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
     if getattr(module, "NEEDS_COORDS", False) and not any(coords or []):
         warnings.append("effect needs coordinates but none are loaded")
     ctx = effects.Ctx(n, coords, params, random.Random(seed))
-    budget = _output.budget_for(n, budget_percent)
+    if float(ma_per_channel).is_integer():
+        ma_per_channel = int(ma_per_channel)
+    budget = int(_output.budget_for_current(limit_a, ma_per_channel))
     stage = _output.Output(n, budget=budget, gamma=gamma)
     bri = max(0, min(255, round(brightness * 255)))
     count = max(1, round(seconds * fps))
@@ -109,7 +111,7 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
     outs = np.zeros((count, n, 3), np.uint8)
     raws = np.zeros((count, n, 3), np.uint8) if keep_raw else None
     capped = np.zeros(count, bool)
-    factor = np.ones(count)
+    factor = np.full(count, 4096, np.int64)
     raw_totals = np.zeros(count, np.int64)
     exceptions = []
     render_s = []
@@ -139,7 +141,7 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
         if keep_raw:
             raws[f] = np.frombuffer(raw, np.uint8).reshape(n, 3)
         capped[f] = stage.capped
-        factor[f] = stage.factor / 4096
+        factor[f] = stage.factor
         raw_totals[f] = stage.raw_total
         done += 1
     outs = outs[:done]
@@ -148,8 +150,12 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
 
     out_totals = outs.reshape(done, -1).sum(axis=1).astype(np.int64) if done else np.zeros(0)
     lit = (outs.max(axis=2) > 0).mean(axis=1) if done else np.zeros(0)
-    current = out_totals * _output.MA_PER_CHANNEL / 255
-    uncapped = raw_totals[:done] * bri / 255 * _output.MA_PER_CHANNEL / 255
+    # Estimated current per frame, computed as the firmware does from the
+    # stage telemetry: raw_total * factor // 4096 * brightness // 255.
+    current = np.array([_output.current_a(int(raw_totals[f]) * int(factor[f]) // 4096 * bri // 255,
+                                          ma_per_channel) for f in range(done)])
+    uncapped = np.array([_output.current_a(int(raw_totals[f]) * bri // 255, ma_per_channel)
+                         for f in range(done)])
 
     def stat(a, digits=3):
         a = np.asarray(a, float)
@@ -171,15 +177,18 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
         "led_count": n,
         "coords_loaded": sum(1 for c in (coords or []) if c is not None),
         "power": {
-            "budget_percent": budget_percent,
+            "limit_a": limit_a,
+            "ma_per_channel": ma_per_channel,
             "budget_channel_sum": budget,
-            "budget_ma": _output.current_ma(budget),
+            "capped": bool(capped[:done].any()),
             "cap_engaged_rate": round(float(capped[:done].mean()), 4) if done else None,
-            "cap_factor": stat(factor[:done]),
-            "current_ma": {"mean": round(float(current.mean()), 1) if done else None,
-                           "peak": round(float(current.max()), 1) if done else None},
-            "uncapped_peak_ma": round(float(uncapped.max()), 1) if done else None,
+            "cap_factor": stat(factor[:done] / 4096),
+            "current_a": {"mean": round(float(current.mean()), 3) if done else None,
+                          "peak": round(float(current.max()), 3) if done else None},
+            "uncapped_peak_a": round(float(uncapped.max()), 3) if done else None,
             "over_budget_frames": int((out_totals > budget).sum()),
+            "per_frame": {"current_a": [round(float(c), 3) for c in current],
+                          "capped": [bool(c) for c in capped[:done]]},
         },
         "lit_fraction": stat(lit),
         "all_black": bool(done and int(out_totals.max()) == 0),
@@ -304,9 +313,9 @@ def _font(size):
 def frame_header(result, f):
     m = result["metrics"]
     t = f / result["fps"]
-    out_sum = int(result["frames"][f].astype(np.int64).sum())
+    amps = m["power"]["per_frame"]["current_a"][f] if f < len(m["power"]["per_frame"]["current_a"]) else 0
     cap = "CAP" if result["capped"][f] else "   "
-    return (f"{m['effect']}  t={t:5.2f}s  {cap}  ~{out_sum * _output.MA_PER_CHANNEL / 255 / 1000:.2f} A"
+    return (f"{m['effect']}  t={t:5.2f}s  {cap}  ~{amps:.2f} A"
             f"  bri={m['brightness']:.2f}")
 
 
@@ -343,8 +352,8 @@ def contact_sheet(result, views, cells=12, cols=3, scale=0.6):
     d.text((6, 4), f"{m['effect']}  {m['frames']} frames @ {m['fps']} fps  seed={m['seed']}  "
                    f"params={json.dumps(m['params'])}", fill=(230, 230, 230), font=_font(13))
     d.text((6, 22), f"cap engaged {100 * (p['cap_engaged_rate'] or 0):.0f}% of frames  "
-                    f"current mean {p['current_ma']['mean']} mA / peak {p['current_ma']['peak']} mA "
-                    f"(budget {p['budget_ma']} mA)  lit {lf.get('mean', 0):.0%}  "
+                    f"current mean {p['current_a']['mean']:.2f} A / peak {p['current_a']['peak']:.2f} A "
+                    f"(limit {p['limit_a']} A at {p['ma_per_channel']} mA/channel)  lit {lf.get('mean', 0):.0%}  "
                     f"exceptions {len(m['exceptions'])}", fill=(170, 180, 200), font=_font(12))
     for k, t in enumerate(thumbs):
         r, c = divmod(k, cols)
@@ -396,7 +405,7 @@ def render_one(name, args, coords, coords_src, overrides, out_root):
     out_dir = out_root / name
     out_dir.mkdir(parents=True, exist_ok=True)
     result = run_effect(name, args.seconds, args.fps, args.seed, overrides, args.brightness,
-                        args.budget_percent, args.gamma, coords, keep_raw=args.view == "raw")
+                        args.limit_a, args.ma_per_channel, args.gamma, coords, keep_raw=args.view == "raw")
     if args.view == "raw" and result["raw"] is not None:
         result["frames"] = result["raw"]
     result["metrics"]["coords_source"] = coords_src
@@ -428,7 +437,7 @@ def overview(results, coords, path, per_row=5):
         m = res["metrics"]
         d.text((6, 6), name, fill=(230, 230, 230), font=_font(13))
         cap = m["power"]["cap_engaged_rate"]
-        d.text((6, 26), f"cap {100 * (cap or 0):.0f}%\npeak {m['power']['current_ma']['peak']} mA\n"
+        d.text((6, 26), f"cap {100 * (cap or 0):.0f}%\npeak {m['power']['current_a']['peak']:.2f} A\n"
                         f"lit {(m['lit_fraction'] or {}).get('mean', 0):.0%}"
                         + ("\nEXCEPTION" if m["exceptions"] else ""),
                fill=(160, 170, 190) if not m["exceptions"] else (255, 90, 90), font=_font(11))
@@ -447,7 +456,7 @@ def summary_line(m):
     p = m["power"]
     status = "FAIL" if m["exceptions"] else "ok"
     return (f"{m['effect']:<15} {status:<4} frames={m['frames']:<4} cap={100 * (p['cap_engaged_rate'] or 0):3.0f}% "
-            f"mean={p['current_ma']['mean']}mA peak={p['current_ma']['peak']}mA "
+            f"mean={p['current_a']['mean']:.2f}A peak={p['current_a']['peak']:.2f}A "
             f"lit={(m['lit_fraction'] or {}).get('mean', 0):.0%}")
 
 
@@ -460,8 +469,10 @@ def parse_args(argv=None):
     ap.add_argument("--param", action="append", default=[], metavar="K=V",
                     help="override an effect param (repeatable)")
     ap.add_argument("--brightness", type=float, default=1.0, help="0-1 (default 1)")
-    ap.add_argument("--budget-percent", type=int, default=_output.BUDGET_PERCENT,
-                    help=f"power cap as %% of full white (default {_output.BUDGET_PERCENT})")
+    ap.add_argument("--limit-a", type=float, default=_output.LIMIT_A,
+                    help=f"power cap in amps at 12 V (default {_output.LIMIT_A})")
+    ap.add_argument("--ma-per-channel", type=float, default=_output.MA_PER_CHANNEL,
+                    help=f"current of one channel at 255, mA (default {_output.MA_PER_CHANNEL})")
     ap.add_argument("--gamma", type=float, default=None, help="output gamma (default: linear)")
     ap.add_argument("--coords", help="coordinates file (default: coordinates/coords.txt, "
                                      "else the legacy coordinates/coords_compact.txt)")
@@ -517,7 +528,7 @@ def main(argv=None):
         overrides[k] = parse_value(v)
     coords, src = (None, None) if args.no_coords else find_coords(args.coords)
     out_root = Path(args.out)
-    print(f"coords: {src or 'none'}; brightness {args.brightness}; budget {args.budget_percent}%")
+    print(f"coords: {src or 'none'}; brightness {args.brightness}; cap {args.limit_a:g} A at {args.ma_per_channel:g} mA/channel")
     results = []
     failed = False
     for name in names:
