@@ -33,8 +33,11 @@ Christmas tree LED controller for 500 WS2811 12V LEDs on a 6ft tree. Inspired by
 ./flash.py --ota --host tree.local --rollback
 ./flash.py --ota --host tree.local --coords
 
-# Build the bundle only (dist/tree-firmware.bin, dist/manifest.json)
+# Build the bundle only (dist/tree-firmware.bin, dist/manifest.json; firmware/app + effects/)
 tools/build_firmware.py
+
+# Hot-push effect modules to a running tree (no firmware update, no reboot)
+./push_effect.py <name> --host tree.local --activate
 
 # Offline firmware tests: MicroPython unix port, mocked hardware, local mosquitto
 uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware
@@ -66,8 +69,17 @@ Firmware lives in `firmware/`:
   - `httpd.py` + `api.py`: HTTP API with token auth; `updates.py`: bundle uploads and GitHub Releases self-update; `calib.py`: calibration lock and sequence player (docs/calibration-protocol.md), with the vendored `seqfile.py` codec.
 - `tools/build_firmware.py` builds the bundle (mpy-cross compiles `firmware/app` and `effects/`, adds `data/effects.json` metadata, legacy coordinates and the default calibration sequence, signs with `FIRMWARE_SIGNING_KEY`).
 - `flash.py` — uv script (PEP 723) to install over USB (mpremote) or OTA.
-- `tests/firmware/` — the firmware on the MicroPython unix port: `mocks/` (machine, rp2, network), `devsim.py` (simulated resets and watchdog), unit tests in `mp/`, and device tests for updates, faults, MQTT and calibration.
+- `tests/firmware/` — the firmware on the MicroPython unix port: `mocks/` (machine, rp2, network), `devsim.py` (simulated resets and watchdog), unit tests in `mp/`, and device tests for updates, faults, MQTT and calibration. Device tests use the deliberately small `fixtures/effects/` package (fast and predictable); `test_real_effects.py` and the heap campaign build the repo's `effects/` the way `flash.py` does.
 - `config.py` — WiFi, token, MQTT, signing key (gitignored; see `config.example.py`)
+
+Effects, previews and tooling:
+
+- `effects/` - Pure effect modules plus the shared output stage (`_output.py`) and coordinate loading (`_coords.py`); see `docs/effect-api.md`. `EFFECTS` is the auto-cycle order; modules in `DISABLED` are kept in the tree but not bundled.
+- `viewer/` - Browser viewer: three.js tree running `effects/` in Pyodide; `serve.py` serves it locally (with hot reload)
+- `render.py` - Headless effect renderer (GIF, contact sheet, metrics)
+- `smoke.py` - Validates every effect (CI: `.github/workflows/effects.yml`)
+- `new_effect.py` / `push_effect.py` - Scaffold an effect; hot-push effect files to the tree (`PUT /effects/<name>`)
+- `tools/` - `build_firmware.py` (above), `mp_check.py` (MicroPython allocation check), `mock_tree.py` (local stand-in for the firmware's effects API)
 
 Flash layout on the device: recovery files and `config.py` at `/`, slots in `/fw/a` and `/fw/b`, staging in `/fw/new`, the recovery reserve `/fw/reserve.bin`, hot-pushed effects in `/fx`, plus `/boot.json`, `/config.good.json`, `/state.json`, `/coords.txt`.
 
@@ -128,42 +140,32 @@ Discovery puts every entity under one device (identifier `xmas_tree_pico`, so th
 
 **Power limiting:** each frame is scaled so the estimated strip current at 12 V is at most `POWER_LIMIT_A` (default 1.5 A = 18 W, about 12% of full white), using `LED_MA_PER_CHANNEL` (default 8 mA per colour channel at full duty, ~0.3 W per pixel at white; to be measured). The strip is fed once, at its data-input end, so the binding limits are the first JST-SM connector (~3 A) and voltage drop along ~50 m of thin strand wire, not the 20 A PSU: raise `POWER_LIMIT_A` only after fused power-injection runs are installed and the far end has been checked for dimming. The cap applies to the raw frame before brightness, so brightness 100% means "as bright as the limit allows" and the slider always dims. `GET /` → `power` and the HA sensors "LED current (estimated, 12 V)" (A) and "Power cap engaged" report it. `POWER_BUDGET_PERCENT` is a deprecated alias. `LED_MA_PER_CHANNEL` must be positive, and `GAMMA` (applied after the cap) must be ≥ 1, so no accepted setting can push the wire frame above the limit; the reported current is computed from the bytes actually sent.
 
-## Simulator
+## Viewer
 
-Preview animations in the browser without hardware:
+Preview effects in 3D in the browser without hardware:
 
 ```bash
-./serve.py  # Opens http://localhost:8000/simulator.html
+./serve.py  # Opens http://localhost:8000/viewer/
 ```
 
-Uses Pyodide to run the actual `main.py` Python code in WebAssembly. The simulator mocks `machine`, `neopixel`, and `time` modules to render to a canvas.
+`viewer/` loads `effects/` into Pyodide in a Web Worker and calls it through the effect API, running frames through the same output stage (`effects/_output.py`) as the device. It has an effect picker, param sliders, brightness, a current limit in amps, a power-cap indicator showing estimated amps and front/side/top/orbit views. Saving a file in `effects/` reloads it in place. `?effect=<name>` selects an effect from the URL.
 
-## Adding Animations
+## Effects
 
-Add new animation functions to `main.py` and register them in the `ANIMATIONS` list as `(name, lambda)` tuples:
+Effects live in `effects/`, one module per effect, written against the pure API in `docs/effect-api.md`: `Effect(ctx).render(t_ms, frame)` fills a raw RGB bytearray, and the runtime owns timing, brightness, the power cap and the hardware. The same files run on the Pico, under CPython and in Pyodide. Every firmware bundle (`flash.py`, `tools/build_firmware.py`, CI) compiles the registered effects from this directory, plus `data/effects.json` with their metadata; modules in `DISABLED` stay in the repo but aren't shipped. Changing coordinates (`PUT /files/coords.txt`) gives effects a new coordinates list, since `_util` caches per-LED tables per list (`tests/firmware/test_real_effects.py`).
 
-```python
-ANIMATIONS = [
-    ("auto", None),  # Special: cycles through all effects
-    ("my_animation", lambda: my_animation(param1, param2)),
-    ...
-]
+To add an effect, create `effects/<name>.py` with `NAME`, `DURATION_MS`, `PARAMS`, `NEEDS_COORDS` and an `Effect` class, then add the name to `EFFECTS` in `effects/__init__.py`. `render()` must not allocate on MicroPython, so use integer maths over tables precomputed in `__init__` (see `effects/_util.py`).
+
+Scaffold one with `./new_effect.py <name>` (add `--flat` for a template that doesn't need coordinates). Check changes headlessly:
+
+```bash
+./render.py <effect>            # renders/<effect>/{sheet.png,anim.gif,metrics.json}
+./render.py all                 # every effect + renders/overview.png
+./render.py <effect> --watch    # re-render on save
+micropython tools/mp_check.py   # every render() is allocation-free on MicroPython
+./smoke.py                      # all checks CI runs (.github/workflows/effects.yml)
 ```
 
-Each animation function should:
-- Use `scale(color)` to apply brightness (also handles GRB color order)
-- Call `safe_write()` instead of `strip.write()` for automatic power limiting
-- Call `check_interrupt()` periodically and return early if True (for responsive HA control)
-- Accept duration/cycle parameters to control length
+Attach `sheet.png` (and the GIF) to PRs that change an effect.
 
-Example:
-```python
-def my_animation(wait_ms=50, cycles=10):
-    for _ in range(cycles):
-        if check_interrupt():
-            return
-        for i in range(LED_COUNT):
-            strip[i] = scale((255, 0, 0))
-        safe_write()
-        time.sleep_ms(wait_ms)
-```
+To try an effect on the tree without a firmware update, use `./push_effect.py <name> --host <ip> --activate`. It reads `HTTP_TOKEN` and `UPDATE_KEY` from `config.py` (like `flash.py`), signs each push, and needs the firmware's effects API; see "Pushing one effect over OTA" in `docs/effect-api.md`.

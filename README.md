@@ -16,14 +16,21 @@ RGB LED strip controller for a 6ft Christmas tree with 500 WS2811 LEDs, inspired
 cp config.example.py config.py   # fill in Wi-Fi, HTTP_TOKEN, MQTT
 ./flash.py --all
 
-# Update over Wi-Fi from a local build (waits for the device to confirm it)
+# Update over Wi-Fi from a local build (waits for the device to confirm it).
+# The bundle holds the firmware and every effect registered in effects/.
 ./flash.py --ota --host tree.local
 
 # ...or from the latest GitHub Release
 ./flash.py --ota --host tree.local --github
 
-# Preview animations in browser
+# Preview effects in the browser (3D viewer with hot reload)
 ./serve.py
+
+# Render an effect headlessly (GIF, contact sheet, metrics)
+./render.py rainbow_cycle
+
+# Try an edited effect on the tree without a firmware update (hot-push)
+./push_effect.py rainbow_cycle --host tree.local --activate
 ```
 
 uv automatically handles dependencies.
@@ -52,18 +59,20 @@ The tree remembers its power, brightness and effect across reboots and network o
 
 ### Power Limiting (HDR)
 
-The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. Sparse animations (sparkle) can be brighter than dense ones (rainbow).
+The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
 
 ## Animations
 
 - **auto** - Cycles through all effects
 - Rainbow cycle
 - Christmas (red/green theater chase)
-- White sparkle
 - Candy cane stripes
 - Multicolor twinkle
 - Warm white (solid)
 - **Plane sweep** - Horizontal plane moves up/down tree (uses 3D coordinates)
+- **Lighthouse** - Warm beam sweeping round the tree (3D)
+- **Raindrops** - Coloured spherical ripples spreading through the tree (3D)
+- **Snowfall** - Flakes drifting down through the cone, some settling on branches (3D)
 
 ## 3D Coordinate Mapping
 
