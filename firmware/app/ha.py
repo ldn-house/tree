@@ -37,11 +37,20 @@ EFFECT_MIN_MS = 1000
 REDISCOVER_DELAY_MS = 3000
 ONLINE_AGAIN_MS = 1500  # re-assert "online" this long after connecting
 RETAINED_WAIT_MS = 1000  # for the broker to replay our retained availability
+# Retained topics the old single-file firmware published that nothing reads
+# any more (its light attributes, with last year's IP and RSSI). Cleared with
+# an empty retained message on each discovery pass: harmless when already gone.
+LEGACY_RETAINED = ("attributes",)
 
 
 def _title(name):
     name = name.replace("_", " ")
     return name[:1].upper() + name[1:]  # no str.capitalize() in MicroPython
+
+
+def _param_template(eff, pname):
+    return ("{%% set p = value_json.params %%}"
+            "{{ p[%r][%r] if %r in p and %r in p[%r] else 'None' }}" % (eff, pname, eff, pname, eff))
 
 
 def _step(lo, hi):
@@ -228,6 +237,11 @@ class HA:
             "brightness_scale": 255,
             "effect": True,
             "effect_list": ["auto"] + names,
+            # The firmware before this one pointed the light's attributes at
+            # xmas_tree/attributes, and HA keeps a key a newer config omits;
+            # name the topic (and how to parse it) explicitly.
+            "json_attributes_topic": self.t_effect_attr,
+            "json_attributes_template": "{{ value }}",
         }
         yield "number", "speed", {
             "name": "Speed",
@@ -260,7 +274,10 @@ class HA:
                     "name": "%s %s" % (_title(eff), pname.replace("_", " ")),
                     "command_topic": "%s%s/%s/%s" % (self.t_cmd, "param", eff, pname),
                     "state_topic": self.t_settings,
-                    "value_template": "{{ value_json.params.%s.%s }}" % (eff, pname),
+                    # "None" (HA's reset payload: unknown) rather than an error
+                    # when a settings payload lacks the param, e.g. the
+                    # previous firmware's retained one right after an update.
+                    "value_template": _param_template(eff, pname),
                     "min": spec[1],
                     "max": spec[2],
                     "step": _step(spec[1], spec[2]),
@@ -270,7 +287,12 @@ class HA:
         yield "sensor", "effect_running", {
             "name": "Running effect",
             "state_topic": self.t_effect,
+            # Explicit: this entity used to read {{ value_json.effect }} from
+            # diag, and HA keeps a template a newer config omits, failing on
+            # every plain-text payload until the integration is reloaded.
+            "value_template": "{{ value }}",
             "json_attributes_topic": self.t_effect_attr,
+            "json_attributes_template": "{{ value }}",
             "icon": "mdi:animation-play",
         }
         sensors = (
@@ -376,6 +398,15 @@ class HA:
         if not force and digest == self.discovered:
             return False
         self.discovered = None  # until this pass completes
+        # Current settings first, so new param entities never start from
+        # the previous firmware's retained payload (which lacks their param).
+        if not await self.mqtt.publish(self.t_settings, json.dumps(self.settings_payload()), retain=True):
+            log("ha: discovery interrupted; will retry on reconnect")
+            return False
+        for name in LEGACY_RETAINED:
+            if not await self.mqtt.publish(self.p + "/" + name, b"", retain=True):
+                log("ha: discovery interrupted; will retry on reconnect")
+                return False
         params = []
         n = 0
         for topic, js, obj in self._configs():

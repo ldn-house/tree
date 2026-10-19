@@ -161,6 +161,7 @@ try:
 
     bus = Bus()
     h = ha.HA(Rt(), bus)
+    h.settings_payload = lambda: {}  # later versions publish settings first
     configs = [("homeassistant/sensor/xmas_tree/e%d/config" % i, "{}", "e%d" % i) for i in range(4)]
     h._configs = lambda: iter(configs)
     asyncio.run(h.publish_discovery())
