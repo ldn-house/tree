@@ -29,11 +29,16 @@ cp config.example.py config.py   # fill in Wi-Fi, HTTP_TOKEN, MQTT
 # Render an effect headlessly (GIF, contact sheet, metrics)
 ./render.py rainbow_cycle
 
+# Export deterministic loops for website playback (no Python in the browser)
+./export_web.py --out renders/web --archive renders/tree-effects.tar.gz
+
 # Try an edited effect on the tree without a firmware update (hot-push)
 ./push_effect.py rainbow_cycle --host tree.local --activate
 ```
 
 uv automatically handles dependencies.
+
+The [web export contract](docs/web-export.md) documents the manifest, binary playback, decoded preview, and public rolling release download.
 
 ### Updates that can't brick the tree
 
