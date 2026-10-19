@@ -90,12 +90,14 @@ raw RGB frame -> power cap (on the raw frame) -> brightness -> white balance (op
 
 `effects/_output.py` is the reference implementation, used unchanged by the renderer, the viewer and the firmware (which also vendors a byte-identical copy as `firmware/app/_output_fallback.py`).
 
-`Output(n, budget=None, gamma=None, order="RGB", dither=True, white=None)`:
+`Output(n, budget=None, gamma=None, order="RGB", dither="spatial", white=None)`:
 
 - **Power cap**: a current limit. If the raw frame's channel sum exceeds the budget, every channel is scaled by `budget / sum`. The strip is 12 V WS2811 bullets on a single feed, which binds at about 1.5 A, so the default is `LIMIT_A = 1.5`. `budget_for_current(limit_a, ma_per_channel)` converts amps to the channel-sum budget `Output(budget=...)` takes: 47,812 at the defaults. `Output(n)` with no budget uses that. `budget_for(n, percent)`, the original firmware's 13% of full white, remains for compatibility. The cap holds on every frame: when rounding or dithering could take a frame over the budget (only near the cap at high brightness), the excess is trimmed off lit channels in rotation.
 - **Brightness**: 0-255, applied after the cap. Brightness 255 means "as bright as the budget allows" and lower values dim proportionally (review H7).
 - **Precision**: each channel is computed in 8.8 fixed point from a cap x brightness scale kept in 1/65536, and rounded to nearest. Previously it was floored to whole levels, so dim colours lost their smaller channels first and collapsed to red (warm white at 3% was sent as (1, 0, 0)).
-- **Temporal dithering** (`dither=True`, firmware `LED_DITHER`, default on): the sub-LSB remainder of each channel is carried to the next frame, so a target of 0.6 is sent as 1 on 60% of frames and averages exactly. Each channel starts at a hashed phase, so LEDs with equal targets don't toggle in step and the tree's total stays steady. A whole-number target never changes. Calibration frames use `dither=False` (rounded, steady levels for the camera).
+- **Spatial dithering** (`dither="spatial"`, the default; `True` means the same; firmware `LED_DITHER`): each LED channel has a fixed rounding threshold. The thresholds are spread evenly along the string by a different low-discrepancy sequence per channel (additive recurrences with golden-ratio and plastic-constant steps). A target of 0.6 is therefore sent as 1 on about 60% of LEDs and as 0 on the rest. Every LED stays within 1 of its exact value, and the tree-wide average matches the target, so dim colours keep their hue. A static frame produces identical bytes on every frame, so nothing flickers. The thresholds cover 0-255 evenly, so the average is unbiased; a dead zone for small fractions would shift hues at 1-2% by up to 20%.
+- **Temporal dithering** (`dither="temporal"`, opt-in): carries each channel's remainder to the next frame instead, so every LED averages exactly over time. At the tree's 35-40 fps this flickers visibly at low levels (seen on the tree), so it is off by default.
+- **No dithering** (`dither=False`): rounds to nearest. Calibration frames use this, for steady camera levels.
 - **White balance** (`white=(r, g, b)`, firmware `WHITE_BALANCE`, default off): per-source-channel scale, each 0..1, applied with brightness. It only ever lowers channels, so the cap still holds.
 - **Gamma**: off by default (linear). `Output(n, gamma=2.2)` applies `out = 255 * (lin / 255) ** gamma` through a 2041-entry table (1/8-level input steps); dithering keeps the low end usable. Gamma >= 1 never raises a channel above its linear value.
 - **Colour order**: `Output(n, order="RGB")` emits channels in the given order. The renderer and viewer use RGB. Per review M8, the 12V WS2811 string is wired RGB.
@@ -127,7 +129,7 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 
 | Command | Purpose |
 |---|---|
-| `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --no-dither --white R,G,B --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
+| `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --dither spatial|temporal|none --white R,G,B --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
 | `./render.py all` | Every effect, plus `renders/overview.png` and `renders/summary.json`. |
 | `micropython tools/mp_check.py` | Allocation check under MicroPython. |
 | `micropython tools/output_check.py` | Output stage: native vs Python parity, allocation, timing. |

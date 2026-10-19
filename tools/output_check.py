@@ -4,9 +4,9 @@
     python3 tools/output_check.py
 
 - parity: where the native (viper) kernels are available, they must produce
-  exactly the same output bytes and dither remainders as the plain-Python
-  ones, for every combination of dither, gamma, white balance, colour order,
-  brightness and cap;
+  exactly the same output bytes and dither state as the plain-Python ones,
+  for every combination of dither mode (spatial, temporal, off), gamma,
+  white balance, colour order, brightness and cap;
 - allocation: process() must not allocate (MicroPython only);
 - timing: ms per process() call for 500 LEDs, both kernels.
 
@@ -47,7 +47,7 @@ def frames(count, seed):
 
 
 CONFIGS = []
-for dither in (True, False):
+for dither in ("spatial", "temporal", False):
     for gamma in (None, 2.2):
         for white in (None, (1.0, 0.85, 0.7)):
             for order in ("RGB", "GRB"):
@@ -124,7 +124,8 @@ def main():
             failed += used != 0
             print("alloc  %-48s %d bytes%s" % (repr(cfg), used, "" if used == 0 else "  FAIL"))
     raw = raws[0]
-    for cfg in (CONFIGS[0], (True, 2.2, (1.0, 0.85, 0.7), "RGB"), (False, None, None, "RGB")):
+    for cfg in (CONFIGS[0], ("spatial", 2.2, (1.0, 0.85, 0.7), "RGB"), ("temporal", None, None, "RGB"),
+                (False, None, None, "RGB")):
         line = "timing %-48s python %.3f ms" % (repr(cfg), timing(py, cfg, raw))
         if native:
             line += "  native %.3f ms" % timing(native, cfg, raw)

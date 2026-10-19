@@ -6,7 +6,7 @@
 """Headless renderer for tree effects.
 
 Runs an effect from effects/ under CPython through the same output stage as
-the firmware (power cap -> brightness -> white balance -> gamma -> dither)
+the firmware (power cap -> brightness -> white balance -> gamma -> dithering)
 and writes, per effect:
 
     renders/<effect>/anim.gif    front | side | top views of the real coordinates
@@ -93,7 +93,7 @@ def build_params(module, overrides):
 
 def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0,
                limit_a=_output.LIMIT_A, ma_per_channel=_output.MA_PER_CHANNEL, gamma=None,
-               coords=None, n=LED_COUNT, keep_raw=False, dither=True, white=None):
+               coords=None, n=LED_COUNT, keep_raw=False, dither="spatial", white=None):
     """Render an effect headlessly. Returns a dict with output frames
     (uint8 array frames x n x 3, after the output stage) and metrics."""
     module = effects.load(name)
@@ -177,7 +177,7 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
         "params": params,
         "brightness": round(bri / 255, 4),
         "gamma": gamma,
-        "dither": bool(dither),
+        "dither": dither or None,
         "white": list(white) if white else None,
         "led_count": n,
         "coords_loaded": sum(1 for c in (coords or []) if c is not None),
@@ -413,7 +413,7 @@ def render_one(name, args, coords, coords_src, overrides, out_root):
     out_dir.mkdir(parents=True, exist_ok=True)
     result = run_effect(name, args.seconds, args.fps, args.seed, overrides, args.brightness,
                         args.limit_a, args.ma_per_channel, args.gamma, coords, keep_raw=args.view == "raw",
-                        dither=not args.no_dither, white=args.white)
+                        dither=None if args.dither == "none" else args.dither, white=args.white)
     if args.view == "raw" and result["raw"] is not None:
         result["frames"] = result["raw"]
     result["metrics"]["coords_source"] = coords_src
@@ -482,7 +482,8 @@ def parse_args(argv=None):
     ap.add_argument("--ma-per-channel", type=float, default=_output.MA_PER_CHANNEL,
                     help=f"current of one channel at 255, mA (default {_output.MA_PER_CHANNEL})")
     ap.add_argument("--gamma", type=float, default=None, help="output gamma (default: linear)")
-    ap.add_argument("--no-dither", action="store_true", help="round each frame instead of dithering over time")
+    ap.add_argument("--dither", choices=["spatial", "temporal", "none"], default="spatial",
+                    help="output dithering (default spatial: fixed per LED, no flicker)")
     ap.add_argument("--white", type=lambda v: tuple(float(x) for x in v.split(",")), default=None,
                     metavar="R,G,B", help="per-channel white balance, e.g. 1,0.85,0.7")
     ap.add_argument("--coords", help="coordinates file (default: coordinates/coords.txt, "

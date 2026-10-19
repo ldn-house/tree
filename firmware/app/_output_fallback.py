@@ -16,12 +16,18 @@ at a few percent brightness the wire values are only 0-2. Three things keep
 dim colours from collapsing to red:
 - every channel is computed in 8.8 fixed point and rounded to nearest, not
   floored;
-- with dither=True (the default), the fraction left over in each channel is
-  carried to the next frame (temporal error diffusion), so a target of 0.6
-  averages 0.6 over a few frames. Each pixel starts at a different phase, so
-  the tree as a whole doesn't flicker in step. A channel that rounds exactly
-  never changes, and each channel is at most 1 above its exact target. When
-  that could take a frame over the budget (only near the cap, at high
+- with dither="spatial" (the default), each LED has a fixed rounding
+  threshold, spread evenly along the string by a low-discrepancy sequence
+  and shared by its three channels, so a target of 0.6 is sent as 1 on
+  about 60% of LEDs and 0 on the rest, and a dim LED never shows a stray
+  primary (a warm white LED is dark, red, amber or white-ish). Every LED stays within 1 of its exact
+  value, the tree-wide average keeps the hue, and a static frame gives the
+  same bytes every time (no flicker). The thresholds cover 0..255 evenly,
+  so the average is unbiased (a dead zone for small fractions would shift
+  dim hues by up to 20%). dither="temporal" (opt-in) instead carries each
+  channel's remainder to the next frame; at the tree's ~40 fps that
+  flickers visibly at low levels. dither=False rounds to nearest. When
+  rounding could take a frame over the budget (only near the cap, at high
   brightness), the excess is trimmed off, so the cap holds on every frame;
 - optional gamma and per-channel white balance.
 
@@ -44,6 +50,8 @@ BUDGET_PERCENT = 13
 
 # Fixed-point precision of the combined cap x brightness scale.
 _Q = 12
+# Spatial dithering: additive-recurrence step in 1/65536 (golden ratio).
+_ALPHA = 40503
 # Gamma table steps per output level (input resolution 1/_GSTEPS).
 _GSTEPS = 8
 _GSIZE = 255 * _GSTEPS + 1
@@ -60,8 +68,12 @@ def _lut_py(lut, s, gtab, use_gamma):
             lut[v] = (v * s + 128) >> 8
 
 
-def _apply_py(src, dst, res, l0, l1, l2, n3, o0, o1, o2, dither):
-    if dither:
+def _apply_py(src, dst, res, l0, l1, l2, n3, o0, o1, o2, temporal):
+    """temporal: res holds remainders carried between frames (updated).
+    Otherwise res holds fixed per-channel rounding thresholds (128 everywhere
+    is round-to-nearest; varied per LED is spatial dithering) and is only
+    read, so a static frame gives identical bytes every time."""
+    if temporal:
         for k in range(0, n3, 3):
             a = l0[src[k + o0]] + res[k]
             dst[k] = a >> 8
@@ -74,9 +86,9 @@ def _apply_py(src, dst, res, l0, l1, l2, n3, o0, o1, o2, dither):
             res[k + 2] = a & 255
     else:
         for k in range(0, n3, 3):
-            dst[k] = (l0[src[k + o0]] + 128) >> 8
-            dst[k + 1] = (l1[src[k + o1]] + 128) >> 8
-            dst[k + 2] = (l2[src[k + o2]] + 128) >> 8
+            dst[k] = (l0[src[k + o0]] + res[k]) >> 8
+            dst[k + 1] = (l1[src[k + o1]] + res[k + 1]) >> 8
+            dst[k + 2] = (l2[src[k + o2]] + res[k + 2]) >> 8
 
 
 def _trim_py(dst, n3, excess, k):
@@ -106,9 +118,9 @@ def _lut_v(lut: ptr16, s: int, gtab: ptr16, use_gamma: int):
 
 @micropython.viper
 def _apply_v(src: ptr8, dst: ptr8, res: ptr8, l0: ptr16, l1: ptr16, l2: ptr16,
-             n3: int, o0: int, o1: int, o2: int, dither: int):
+             n3: int, o0: int, o1: int, o2: int, temporal: int):
     k = 0
-    if dither:
+    if temporal:
         while k < n3:
             a = l0[src[k + o0]] + res[k]
             dst[k] = a >> 8
@@ -122,9 +134,9 @@ def _apply_v(src: ptr8, dst: ptr8, res: ptr8, l0: ptr16, l1: ptr16, l2: ptr16,
             k += 3
     else:
         while k < n3:
-            dst[k] = (l0[src[k + o0]] + 128) >> 8
-            dst[k + 1] = (l1[src[k + o1]] + 128) >> 8
-            dst[k + 2] = (l2[src[k + o2]] + 128) >> 8
+            dst[k] = (l0[src[k + o0]] + res[k]) >> 8
+            dst[k + 1] = (l1[src[k + o1]] + res[k + 1]) >> 8
+            dst[k + 2] = (l2[src[k + o2]] + res[k + 2]) >> 8
             k += 3
 
 
@@ -185,8 +197,9 @@ class Output:
     budget_for_current() (LIMIT_A at MA_PER_CHANNEL).
     - gamma: None (linear) or an exponent >= 1, applied after the cap and
       brightness, so it never raises a channel above its linear value.
-    - dither: carry each channel's sub-LSB remainder to the next frame
-      (default True). Calibration frames should use dither=False.
+    - dither: "spatial" (default; True means the same), "temporal" (carry
+      remainders across frames; flickers at low levels) or False/None
+      (round to nearest). Calibration frames should use False.
     - white: optional per-channel balance (r, g, b), each 0..1, applied to
       the source channels with brightness (e.g. (1.0, 0.85, 0.7)).
 
@@ -196,11 +209,18 @@ class Output:
     - factor: cap factor in 1/4096 units (4096 = not capped)
     """
 
-    def __init__(self, n, budget=None, gamma=None, order="RGB", dither=True, white=None):
+    def __init__(self, n, budget=None, gamma=None, order="RGB", dither="spatial", white=None):
         self.n = n
         self.budget = budget_for_current() if budget is None else int(budget)
         self.order = bytes(["RGB".index(c) for c in order])
-        self.dither = 1 if dither else 0
+        if dither is True:
+            dither = "spatial"
+        if not dither:
+            dither = None
+        if dither not in (None, "spatial", "temporal"):
+            raise ValueError("dither must be 'spatial', 'temporal' or False")
+        self.dither = dither
+        self.temporal = 1 if dither == "temporal" else 0
         self.luts = [array("H", bytes(512))]
         self.white = None
         if white is not None:
@@ -218,12 +238,30 @@ class Output:
                 g[i] = int(top * (i / (_GSIZE - 1)) ** gamma + 0.5)
             self.gamma = gamma
             self.gtab = g
-        # Per-channel remainder, 1/256 LSB. Each starts at a different
-        # (hashed) phase so equal targets don't toggle in step.
+        # Per channel: temporal remainders (1/256 LSB, updated each frame)
+        # or fixed rounding thresholds (read only).
         self.res = bytearray(3 * n)
-        for k in range(3 * n):
-            self.res[k] = ((k * 2654435761) >> 16) & 255
-        self.trim_at = 0
+        if dither == "temporal":
+            # Each channel starts at a different (hashed) phase.
+            for k in range(3 * n):
+                self.res[k] = ((k * 2654435761) >> 16) & 255
+        elif dither == "spatial":
+            # One threshold per LED, shared by its three channels, from an
+            # additive recurrence (fractional parts of i * golden ratio):
+            # evenly spread along any run of the string, neighbours far
+            # apart. Sharing it means a dim LED's channels round up in
+            # nested order, so a warm target only ever shows dark, red,
+            # amber or white-ish LEDs, never stray greens or blues.
+            # Thresholds use all of 0..255 evenly, so a fraction f rounds up
+            # on f/256 of the LEDs: unbiased, which keeps the hue at 1-2%.
+            for i in range(n):
+                t = ((i * _ALPHA) & 0xFFFF) >> 8
+                self.res[3 * i] = t
+                self.res[3 * i + 1] = t
+                self.res[3 * i + 2] = t
+        else:
+            for k in range(3 * n):
+                self.res[k] = 128
         self.raw_total = 0
         self.capped = False
         self.factor = 1 << _Q
@@ -263,11 +301,12 @@ class Output:
             l2 = luts[o[2]]
         o = self.order
         n3 = 3 * self.n
-        _apply(src, dst, self.res, l0, l1, l2, n3, o[0], o[1], o[2], self.dither)
+        _apply(src, dst, self.res, l0, l1, l2, n3, o[0], o[1], o[2], self.temporal)
         # Rounding and dithering add under 1 per channel to the exact
         # target, about total * s / 65536 (an upper bound here, kept within
         # small ints). If that could cross the budget, enforce it exactly.
         if (((total >> 4) + 1) * ((s >> 4) + 1) >> 8) + n3 > self.budget:
             out = sum(dst)
             if out > self.budget:
-                self.trim_at = _trim(dst, n3, out - self.budget, self.trim_at)
+                # Always from the same place, so a static frame stays static.
+                _trim(dst, n3, out - self.budget, 0)
