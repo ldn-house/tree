@@ -29,7 +29,7 @@ def old(tmp_path_factory):
     """52cda75's recovery layer and its app (built with today's tool:
     effects/ and tools/ are unchanged since, and it declared API 2)."""
     tmp = tmp_path_factory.mktemp("old")
-    fw = devsim.git_tree(OLD, tmp / "src")
+    fw = devsim.history_tree(OLD, tmp / "src")
     src = (fw / "bootmgr.py").read_text()
     assert "\nAPI = 2 " in src and "def scratch_set" not in src
     bundle = devsim.build_bundle(tmp / "bundle", version="old", generation=1500, app=fw / "app", recovery_api=2)
