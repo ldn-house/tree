@@ -167,6 +167,8 @@ jobs:
       # Never share firmware's queue: a new pending job can cancel an older
       # pending job even with cancel-in-progress disabled.
       group: publish-tree-web
+      # Keep newer main uploads if an older run finishes prerequisites later.
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@v4
