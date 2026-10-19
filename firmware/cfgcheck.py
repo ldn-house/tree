@@ -38,10 +38,14 @@ def _int(lo, hi):
     return lambda v: _num(v, lo, hi, integer=True)
 
 
-def _bool(v):
-    if not isinstance(v, bool):
-        raise ConfigError("must be True or False")
-    return v
+def _dither(v):
+    # "spatial" (fixed per LED, the default), "temporal" (flickers at low
+    # levels at ~40 fps), or False. True is accepted and means "spatial".
+    if v is True:
+        return "spatial"
+    if v is False or v in ("spatial", "temporal"):
+        return v
+    raise ConfigError("must be 'spatial', 'temporal' or False")
 
 
 def _white(v):
@@ -184,7 +188,7 @@ SCHEMA = {
     "LED_MA_PER_CHANNEL": _number(0.5, 100),
     "POWER_BUDGET_PERCENT": _optional(_number(0, 100)),
     "GAMMA": _gamma,
-    "LED_DITHER": _bool,
+    "LED_DITHER": _dither,
     "WHITE_BALANCE": _white,
     "FPS": _int(1, 100),
     "TRIAL_HEALTHY_S": _int(1, 3600),

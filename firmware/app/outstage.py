@@ -35,7 +35,7 @@ def estimated_a(channel_sum, ma_per_channel):
     return channel_sum * ma_per_channel / 255000
 
 
-def create(n, budget, gamma, order, dither=True, white=None):
-    """dither: carry sub-LSB remainders across frames (calibration frames
+def create(n, budget, gamma, order, dither="spatial", white=None):
+    """dither: "spatial" (default), "temporal" or False (calibration frames
     pass False). white: optional (r, g, b) balance, each 0..1."""
     return Output(n, budget, gamma, order, dither, white)
