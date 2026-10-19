@@ -1190,19 +1190,22 @@ def r3m3_interrupted_discovery_is_retried():
             return True
 
     rt = Rt()
-    bus = Bus(fail_at=2)
+    lead = ["xmas_tree/settings", "xmas_tree/attributes"]  # current settings, then the legacy topic cleared
+    bus = Bus(fail_at=len(lead) + 2)
     h = ha.HA(rt, bus)
+    h.settings_payload = lambda: {}
     configs = [("homeassistant/sensor/xmas_tree/e%d/config" % i, "{}", "param_e%d" % i) for i in range(4)]
     h._configs = lambda: iter(configs)
     assert asyncio.run(h.publish_discovery()) is False  # interrupted on the third config
-    assert len(bus.sent) == 2 and h.discovered is None and h.discoveries == 0
+    assert bus.sent == lead + [t for t, _j, _o in configs[:2]] and h.discovered is None and h.discoveries == 0
     assert rt.state.params == ["param_old_gone"]  # cleanup record untouched
     # Reconnect, with the broker's retained availability replayed (force=False):
     bus.fail_at = None
     bus.sent = []
     assert asyncio.run(h.publish_discovery()) is True
-    assert bus.sent[:4] == [t for t, _j, _o in configs]
-    assert bus.sent[4:] == ["homeassistant/number/xmas_tree/param_old_gone/config"]  # stale param removed
+    assert bus.sent[:2] == lead
+    assert bus.sent[2:6] == [t for t, _j, _o in configs]
+    assert bus.sent[6:] == ["homeassistant/number/xmas_tree/param_old_gone/config"]  # stale param removed
     assert h.discoveries == 1 and rt.state.params == ["param_e%d" % i for i in range(4)]
     # Complete and unchanged: nothing more to send.
     bus.sent = []
@@ -1210,7 +1213,7 @@ def r3m3_interrupted_discovery_is_retried():
     # Interrupted during the cleanup of a removed param: retried too.
     rt.state.params = ["param_e0", "param_e1", "param_e2", "param_e3", "param_gone2"]
     configs.pop()
-    bus.fail_at = 3
+    bus.fail_at = len(lead) + 3
     bus.sent = []
     assert asyncio.run(h.publish_discovery()) is False  # dropped at the removal publish
     assert rt.state.params[-1] == "param_gone2"

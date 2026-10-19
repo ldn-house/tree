@@ -61,7 +61,15 @@ def test_discovery_payloads(mdev, bus):
     assert want <= have, want - have
     num = cfgs["homeassistant/number/xmas_tree/param_chase_speed/config"]
     assert (num["min"], num["max"], num["step"]) == (0.1, 5.0, 0.1)
-    assert num["value_template"] == "{{ value_json.params.chase.speed }}"
+    assert num["value_template"] == ("{% set p = value_json.params %}"
+                                     "{{ p['chase']['speed'] if 'chase' in p and 'speed' in p['chase'] else 'None' }}")
+    # Parsing keys are explicit wherever an earlier firmware's config had
+    # them (HA keeps a key a newer config omits).
+    eff = cfgs["homeassistant/sensor/xmas_tree/effect_running/config"]
+    assert eff["value_template"] == "{{ value }}" and eff["json_attributes_template"] == "{{ value }}"
+    light = cfgs["homeassistant/light/xmas_tree/config"]
+    assert light["json_attributes_topic"] == P + "/effect_running/attributes"  # not the old xmas_tree/attributes
+    assert light["json_attributes_template"] == "{{ value }}"
     upd = cfgs["homeassistant/update/xmas_tree/firmware/config"]
     assert "command_topic" not in upd  # no UPDATE_KEY, so no install button
 
@@ -363,3 +371,35 @@ def test_retained_running_effect_tracks_the_latest(mdev, broker, bus):
         time.sleep(0.3)
         assert retained(broker, P + "/effect_running") == shown
         assert json.loads(retained(broker, P + "/effect_running/attributes"))["mode"] == "auto"
+
+
+def test_first_connect_after_an_update_clears_legacy_state(make_device, bundles, broker, bus):
+    """After an OTA the broker still holds the previous firmware's retained
+    settings, which lack the new firmware's params, and the old single-file
+    firmware's light attributes (xmas_tree/attributes). The discovery pass
+    publishes current settings before any param entity's config, so a new
+    entity never starts from a payload without its param, and clears the
+    legacy topic."""
+    bus.pub(P + "/attributes", json.dumps({"ip": "192.0.2.10", "wifi_rssi": -60}), retain=True)
+    bus.pub(P + "/settings", json.dumps({"speed": 1.0, "auto_s": 0, "params": {}}), retain=True)
+    assert retained(broker, P + "/attributes")
+    t0 = time.time()
+    d = make_device(bundles["v1"], MQTT_BROKER="127.0.0.1", MQTT_PORT=broker.port, MQTT_KEEPALIVE=5)
+    d.wait_http(30)
+    bus.wait(AVAIL, lambda p: p == b"online", 30, after=t0)
+    wait_for(lambda: status(d)["ha"]["discoveries"] == 1, 20, what="discovery")
+    msgs = bus.since(t0)
+    topics = [t for t, _p in msgs]
+    first_param = min(i for i, t in enumerate(topics) if "/number/xmas_tree/param_" in t)
+    settings = [i for i, t in enumerate(topics) if t == P + "/settings"]
+    assert settings and settings[0] < first_param, (settings, first_param)
+    params = json.loads(msgs[settings[0]][1])["params"]
+    for t in topics[first_param:]:
+        if "/number/xmas_tree/param_" in t:
+            eff, pname = t.split("/")[3][len("param_"):].split("_", 1)
+            assert pname in params.get(eff, {}), (t, params)
+    assert retained(broker, P + "/attributes") is None  # cleared (empty retained message)
+    # Idempotent: a later pass (HA's birth message) clears it again, harmlessly.
+    bus.pub("homeassistant/status", "online")
+    wait_for(lambda: status(d)["ha"]["discoveries"] == 2, 20, what="re-discovery")
+    assert retained(broker, P + "/attributes") is None
