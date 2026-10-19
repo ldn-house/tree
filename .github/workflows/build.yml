@@ -88,6 +88,34 @@ jobs:
           export MICROPYTHON32="$HOME/micropython-bin/micropython32"
           uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware -q
 
+  web-export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Test web export and renderer parity
+        run: |
+          if ! git check-ignore -q .scratch; then
+            printf '\n.scratch/\n' >> "$(git rev-parse --git-path info/exclude)"
+          fi
+          mkdir -p .scratch
+          uv run --python 3.12 --with pytest --with numpy --with pillow \
+            python -m pytest tests/test_web_export.py --basetemp=.scratch/web-export-tests -q
+
+      - name: Export web loops and decode their contact sheet
+        run: |
+          uv run --python 3.12 export_web.py --out renders/web \
+            --archive renders/tree-effects.tar.gz --sheet renders/web-sheet.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tree-web
+          path: |
+            renders/tree-effects.tar.gz
+            renders/web-sheet.png
+          retention-days: 14
+
   publish:
     needs: [build, test]
     if: github.repository == 'ldn-house/tree' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
@@ -126,3 +154,36 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/tree-firmware.bin dist/manifest.json \
             --title "Firmware $GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  # Independent of firmware publication: a web export/test/upload failure
+  # must never prevent the firmware assets above from shipping.
+  publish-web:
+    needs: [web-export, publish]
+    if: github.repository == 'ldn-house/tree' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      # Never share firmware's queue: a new pending job can cancel an older
+      # pending job even with cancel-in-progress disabled.
+      group: publish-tree-web
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tree-web
+          path: web-dist
+      - name: Add the web archive to the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Serialize web uploads separately (they touch only this asset).
+          # Skip stale queued runs; source.commit identifies the web build
+          # independently of firmware's moving release tag.
+          main_sha=$(gh api repos/ldn-house/tree/git/ref/heads/main --jq .object.sha)
+          if [ "$main_sha" = "$GITHUB_SHA" ]; then
+            gh release upload firmware-main web-dist/tree-effects.tar.gz --clobber
+          else
+            echo "Skipping web upload: main now points to $main_sha"
+          fi
