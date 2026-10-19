@@ -76,21 +76,28 @@ The tree limits total power draw per frame to prevent PSU brownouts. The limit i
 
 ## 3D Coordinate Mapping
 
-The tree supports volumetric 3D animations using camera-calibrated LED positions:
+The tree supports volumetric 3D animations using camera-calibrated LED positions, made with `calibrate.py`. [docs/calibrate-the-tree.md](docs/calibrate-the-tree.md) is the step-by-step guide (no technical knowledge needed to film), and [docs/calibration-findings.md](docs/calibration-findings.md) has the method and benchmark numbers.
+
+**Video (recommended).** Press **Play calibration sequence** in Home Assistant: the tree loops a short coded blinking pattern ([docs/calibration-protocol.md](docs/calibration-protocol.md)). Film it for about 12 s from each of 4–6 angles, walking round the tree or turning it in front of a fixed phone, front first. Then:
 
 ```bash
-# 1. Capture LED positions from multiple angles
-TREE_TOKEN=... ./capture.py --angle front --host 192.168.2.149
-
-# 2. Analyze images to extract 2D positions
-./analyze.py --angle front --validate
-
-# 3. Triangulate 3D coordinates from two orthogonal views
-./triangulate.py --angles front,side
-
-# 4. Upload coordinates to Pico
-./flash.py --ota --host tree.local --coords
+./calibrate.py decode-video clips/* --out positions/tonight              # clips in parallel
+./calibrate.py solve positions/tonight/*_detections.json --out coordinates
+./calibrate.py export-legacy coordinates/coords.txt                      # refresh the legacy files
+./flash.py --ota --host tree.local --coords                              # install (live, no reboot)
 ```
+
+**Still captures (one LED per frame, with a webcam).**
+
+```bash
+TREE_TOKEN=... ./capture.py --angle front --host tree.local      # repeat for 4+ angles, front first
+./calibrate.py detect --views front,right,back,left               # captures before capture_version 2: --lag 1
+./calibrate.py solve positions/{front,right,back,left}_detections.json --out coordinates
+```
+
+`coordinates/coords.txt` has one `x,y,z` (or `null`) line per LED: y from 0 (lowest LED) to 1 (highest), x and z in the same units, origin on the trunk, +x towards the front view. It's what the firmware, `render.py`, `smoke.py` and the viewer load first; [coordinates/README.md](coordinates/README.md) describes the other files. The older `analyze.py` and `triangulate.py` still run but are superseded; their output would overwrite the calibrated files.
+
+The synthetic benchmark (`./calibrate.py simulate`, `simulate-video`, `bench-stills`, `bench-video`) renders captures with known ground truth, so any pipeline can be scored.
 
 ## Roadmap
 

@@ -92,10 +92,15 @@ Flash layout on the device: recovery files and `config.py` at `/`, slots in `/fw
 
 ### Calibration Tools (for 3D coordinate mapping)
 
-- `capture.py` - Camera capture script for LED position detection
-- `analyze.py` - Image analysis with local contrast detection and wire constraint validation
-- `triangulate.py` - 3D position calculation from multiple camera angles
-- `coordinates/` - Generated 3D LED coordinates (CSV, JSON, compact formats)
+- `calibrate.py` - uv script with subcommands: `sequence`, `simulate`, `simulate-video`, `detect`, `decode-video`, `solve`, `export-legacy`, `quality`, `bench-stills`, `bench-video`, `explainer`
+- `calib/` - library behind it: `.tcal` sequence format (`seqfile.py`, MicroPython-compatible; vendored unchanged as `firmware/app/seqfile.py`), codes and sequences, camera simulator (`render.py`, `synth.py`, `video.py`), detectors (`detect.py`), bundle adjustment (`ba.py`, `solve.py`), scoring (`metrics.py`, `bench.py`), coordinate output (`output.py`)
+- `capture.py` - Webcam capture of one LED per frame via `/calibrate/*` (capture_version 2 fixes the stale-frame lag)
+- `analyze.py`, `triangulate.py` - Older pipeline (orthographic 0/90/180/270 views), superseded by `calibrate.py`
+- `sequences/default.tcal` - Calibration sequence the firmware plays (bundled as `data/calib_default.tcal`); `docs/calibration-protocol.md` is the firmware contract
+- `docs/calibrate-the-tree.md` - How to calibrate (filming guide, then the commands); `docs/calibration-findings.md` - method, benchmark results and the first real calibration
+- `coordinates/` - Calibrated coordinates: `coords.txt` (contract frame, loaded first everywhere), `coords_metres.csv`, `calibration_report.json`; `coords_compact.txt` and `coords.json` are generated from `coords.txt` by `export-legacy` (see `coordinates/README.md`)
+
+Calibration tests: `uv run --with pytest --with numpy --with scipy --with opencv-python pytest tests/test_seqfile.py tests/test_solve.py`.
 
 ## HTTP API
 
