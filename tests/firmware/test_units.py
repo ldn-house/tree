@@ -9,22 +9,11 @@ HERE = Path(__file__).resolve().parent
 
 
 def _calib_vector(tmp_path):
-    """The calibration thread's test vector: in-tree once its branch lands,
-    otherwise straight from that branch if this checkout has it."""
+    """The calibration thread's test vector (tests/data/)."""
     tcal = devsim.ROOT / "tests" / "data" / "calib-default.tcal"
     sha = devsim.ROOT / "tests" / "data" / "calib-default.expanded.sha256"
-    if tcal.exists() and sha.exists():
-        return [str(tcal), str(sha)]
-    out = []
-    for name in ("calib-default.tcal", "calib-default.expanded.sha256"):
-        r = subprocess.run(["git", "show", f"origin/calibration/video-pipeline:tests/data/{name}"],
-                           cwd=devsim.ROOT, capture_output=True)
-        if r.returncode != 0:
-            return []
-        p = tmp_path / name
-        p.write_bytes(r.stdout)
-        out.append(str(p))
-    return out
+    assert tcal.exists() and sha.exists(), "missing the calibration test vector in tests/data/"
+    return [str(tcal), str(sha)]
 
 
 def test_micropython_units(tmp_path):
@@ -53,14 +42,7 @@ def test_review_round1_reproductions_are_fixed(tmp_path):
 def test_review_round1_reproductions_fail_on_the_reviewed_commit(tmp_path):
     """The same script against 57c4ce1 (the commit the review covered) must
     still fail, or it is not testing anything."""
-    old = tmp_path / "old"
-    old.mkdir()
-    a = subprocess.run(["git", "archive", "57c4ce1", "firmware"], cwd=devsim.ROOT, capture_output=True)
-    if a.returncode:
-        import pytest
-
-        pytest.skip("reviewed commit not in this checkout")
-    subprocess.run(["tar", "-x", "-C", str(old)], input=a.stdout, check=True)
+    old = devsim.history_tree("57c4ce1", tmp_path / "old").parent
     r = _run_regressions(old / "firmware", tmp_path)
     print(r.stdout)
     for finding in ("B1", "H2", "H3 rejected", "H3 dry-run", "H5"):
@@ -132,14 +114,7 @@ def test_review_round2_reproductions_are_fixed(tmp_path):
 
 def test_review_round2_reproductions_fail_on_the_reviewed_commit(tmp_path):
     """The same script against 1d0b869 (the commit round 2 reviewed)."""
-    old = tmp_path / "old"
-    old.mkdir()
-    a = subprocess.run(["git", "archive", "1d0b869", "firmware"], cwd=devsim.ROOT, capture_output=True)
-    if a.returncode:
-        import pytest
-
-        pytest.skip("reviewed commit not in this checkout")
-    subprocess.run(["tar", "-x", "-C", str(old)], input=a.stdout, check=True)
+    old = devsim.history_tree("1d0b869", tmp_path / "old").parent
     r = _run_regressions2(old / "firmware", tmp_path)
     print(r.stdout)
     for finding in ("R2-H1 config with HTTP_PORT null", "R2-H1 unconfirmed", "R2-H2", "R2-H3", "R2-M4 floor after",
@@ -165,14 +140,7 @@ def test_review_round3_reproductions_are_fixed(tmp_path):
 
 def test_review_round3_reproductions_fail_on_the_reviewed_commit(tmp_path):
     """The same script against 183d9b8 (the commit round 3 reviewed)."""
-    old = tmp_path / "old"
-    old.mkdir()
-    a = subprocess.run(["git", "archive", "183d9b8", "firmware"], cwd=devsim.ROOT, capture_output=True)
-    if a.returncode:
-        import pytest
-
-        pytest.skip("reviewed commit not in this checkout")
-    subprocess.run(["tar", "-x", "-C", str(old)], input=a.stdout, check=True)
+    old = devsim.history_tree("183d9b8", tmp_path / "old").parent
     r = _run_regressions3(old / "firmware", tmp_path)
     print(r.stdout)
     for finding in ("R3-H1", "R3-M2", "R3-M3", "R3-M4"):
