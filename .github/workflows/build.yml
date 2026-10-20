@@ -18,6 +18,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes its running checks. Pushes to main
+# and tags (which publish releases) get a group of their own and never cancel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   MICROPYTHON_VERSION: v1.27.0
 
@@ -51,9 +57,39 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read  # to list a pull request's changed files
     steps:
       - uses: actions/checkout@v4  # shallow: older firmware the tests compare with is vendored (tests/firmware/fixtures/history)
       - uses: astral-sh/setup-uv@v6
+
+      - name: Choose the firmware tests
+        # A pull request that changes only effects/ (plus renders and docs)
+        # can only break the tests that bundle the repo's effects; anything
+        # else, and every push, tag or manual run, gets the full suite.
+        # Decided here rather than with workflow-level `paths`, so this
+        # required check always reports.
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          tests=tests/firmware
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > "$RUNNER_TEMP/changed.txt"
+            echo "Changed files:"; cat "$RUNNER_TEMP/changed.txt"
+            # The API lists at most 3000 files; at that size, run everything.
+            if [ "$(wc -l < "$RUNNER_TEMP/changed.txt")" -lt 3000 ] &&
+               ! grep -Ev '^(effects/|renders/|docs/)|^[^/]+\.md$' "$RUNNER_TEMP/changed.txt" >/dev/null; then
+              # The bundle built from effects/ (every effect on the device,
+              # the board-sized heap campaign) and the firmware's copy of
+              # the output stage.
+              tests="tests/firmware/test_real_effects.py tests/firmware/test_heap.py tests/firmware/test_output_copy.py"
+            fi
+          fi
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "Firmware tests: \`$tests\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install mosquitto
         run: sudo apt-get update && sudo apt-get install -y mosquitto && sudo systemctl stop mosquitto || true
@@ -83,10 +119,11 @@ jobs:
       - name: Firmware tests (unix port, simulated hardware, local broker)
         env:
           MOSQUITTO: /usr/sbin/mosquitto
+          TESTS: ${{ steps.scope.outputs.tests }}
         run: |
           export MICROPYTHON="$HOME/micropython-bin/micropython"
           export MICROPYTHON32="$HOME/micropython-bin/micropython32"
-          uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest tests/firmware -q
+          uv run --with pytest --with paho-mqtt --with mpy-cross==1.27.0.post2 pytest $TESTS -q
 
   web-export:
     runs-on: ubuntu-latest
