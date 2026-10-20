@@ -84,7 +84,9 @@ def test_resets_are_classified_on_old_recovery_layer(make_device, bundles, old):
     wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
     import time
 
-    time.sleep(3)  # saved; scratch 0 names solid
+    # Saved (debounced) and past solid's probe window: scratch 0 names it.
+    wait_for(lambda: d.saved_state().get("effect") == "solid" and not (d.root / "fx_probe.txt").exists(), 15,
+             what="solid saved and past its probe window")
     d.post("/reboot")
     wait_for(lambda: len(d.boots) >= 1, 20, what="reset")
     st = d.wait_http(30)

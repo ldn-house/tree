@@ -281,7 +281,10 @@ class Runtime:
     async def _saver(self):
         while True:
             await asyncio.sleep_ms(500)
-            if self.state.due():
+            # Not during calibration playback: a flash write can stall
+            # everything on the Pico, and the frames are timed to the
+            # millisecond. The change is saved as soon as playback ends.
+            if self.state.due() and not self.calib.playing():
                 self.state.save_now()
 
     async def main(self):
