@@ -53,10 +53,15 @@ ORANGE = (255, 100, 0)
 BOX = (255, 225, 190)
 STREAK = (255, 240, 220)
 FLASH = (255, 235, 210)
-PORTAL = 170  # /256 portal glow; the swirl adds up to SWIRL_AMP
-SWIRL_AMP = 86
+PORTAL = 110  # /256 portal glow; the swirl adds up to SWIRL_AMP
+SWIRL_AMP = 70
 SWIRL_MS = 2400  # one turn of the swirl
-PEAK_SHARE = 1.1  # flash peak: just over the power budget
+STREAK_LV = 90  # /256 streak once fully smeared
+STREAK_GROW = 70  # added through the blur phase
+SWELL = 40  # portals brighten by this (/256) through the blur phase
+DIP_MS = 350  # portals and streak dip this long before the flash
+DIP = 90  # /256 they dip to
+PEAK_SHARE = 0.95  # flash peak: about the power budget
 YBINS = 32
 RBINS = 16  # radius profile bins
 
@@ -169,11 +174,14 @@ class Effect:
         ft = t - self.flash_t
         if t < OPEN_MS:
             master = 256 * t // OPEN_MS
-        elif ft < 0:
+        elif ft < -DIP_MS:
             master = 256
+        elif ft < 0:
+            # Implosion: dip just before the flash, for contrast.
+            master = 256 - (256 - DIP) * (ft + DIP_MS) // DIP_MS
         elif ft < FADE_MS:
             q = (FADE_MS - ft) * 256 // FADE_MS
-            master = q * q >> 8
+            master = DIP * (q * q >> 8) >> 8
         else:
             master = 0
         # Find the current fall (if any) and how smeared it is.
@@ -195,13 +203,13 @@ class Effect:
         streak = 0
         swell = 0
         if blur:
-            streak = blur * 150 >> 8
+            streak = blur * STREAK_LV >> 8
             if t >= self.falls_end:
                 e = t - self.falls_end
                 if e > BLUR_MS:
                     e = BLUR_MS
-                streak += 106 * e // BLUR_MS
-                swell = 60 * e // BLUR_MS
+                streak += STREAK_GROW * e // BLUR_MS
+                swell = SWELL * e // BLUR_MS
             streak = streak * master >> 8
 
         # Portals with a slow swirl, blue turning one way, orange the other.
