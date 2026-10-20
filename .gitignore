@@ -4,3 +4,4 @@ __pycache__/
 captures/
 positions/
 renders/
+.scratch/
