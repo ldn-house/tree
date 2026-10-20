@@ -20,6 +20,9 @@ EFFECTS = [
     "lighthouse",
     "raindrops",
     "snowfall",
+    "level_up",
+    "beacon",
+    "tetris",
 ]
 
 DISABLED = [
