@@ -20,6 +20,8 @@ EFFECTS = [
     "lighthouse",
     "raindrops",
     "snowfall",
+    "pong",
+    "space_invaders",
     "portal",
 ]
 
