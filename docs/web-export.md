@@ -81,9 +81,9 @@ Measured with the calibrated 500-LED coordinates, 20 fps, seed 0. Gzip bytes are
 | lighthouse | 100 | 5 | 150,000 | 23,067 |
 | raindrops | 160 | 8 | 240,000 | 62,638 |
 | snowfall | 160 | 8 | 240,000 | 21,150 |
-| portal | 380 | 19 | 570,000 | 73,371 |
+| portal | 380 | 19 | 570,000 | 50,293 |
 
-The complete archive is approximately **416 KB** (416,153 bytes with the 12 effects of this change, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
+The complete archive is approximately **393 KB** (393,165 bytes with the 12 effects of this change, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
 
 ## Build-time download
 
