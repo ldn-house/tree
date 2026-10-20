@@ -30,7 +30,8 @@ AMBIENT = (0, 3, 9)
 FRONT0 = 0.03  # leading half-width at the star, tree heights
 FRONT1 = 0.07  # added by the time it reaches the bottom
 TRAIL = 3  # the trailing edge fades over TRAIL x the leading half-width
-FADE = 200  # /256 of the ring's brightness lost by the bottom
+FADE = 150  # /256 of the ring's brightness lost on the way down, linearly
+TAIL = 128  # over the last TAIL/256 of the trip it also fades out to nothing
 
 # Hazard.
 HAZARD_MS = 2200  # one double-flash per period at speed 1
@@ -66,7 +67,9 @@ class Effect:
                     dmax = d
         self.front0 = int(FRONT0 * ONE)
         self.front1 = int(FRONT1 * ONE)
-        self.dmax = dmax + self.front0
+        # Travel past the lowest LED by the final trailing width, so the
+        # ring's tail has left the tree by the end of the trip.
+        self.dmax = dmax + (self.front0 + self.front1) * TRAIL
         # Hazard brightness by height: LOW at the bottom up to 256 at the top.
         self.grad = array("H", bytes(2 * n))
         for i in range(n):
@@ -97,6 +100,11 @@ class Effect:
             front = self.dmax * ease >> 8
             wf = self.front0 + (self.front1 * a >> 8)
             amp = 256 - (FADE * a >> 8)
+            if a > 256 - TAIL:
+                # Ease out to zero, so the ring dissolves instead of
+                # cutting to the ambient glow.
+                q = (256 - a) * 256 // TAIL
+                amp = amp * (q * q >> 8) >> 8
         else:
             amp = 0
             front = 0
