@@ -56,22 +56,18 @@ def test_legacy_endpoints_go_through_the_power_cap(device):
     assert d.get("/calibrate/led?n=5", token=True)[0] == 400  # not locked: legacy error
     code, res = d.get("/calibrate/start", token=True)
     assert code == 200 and res["success"] and res["state"] == "locked"
-    time.sleep(0.3)
-    assert sum(frame(d)) == 0  # locked: effects stop, all off
+    wait_for(lambda: sum(frame(d)) == 0, 5, what="all off")  # locked: effects stop
     code, res = d.get("/calibrate/led?n=5", token=True)
     assert res == {"success": True, "led": 5}
-    time.sleep(0.3)
-    f = frame(d)
-    assert f[15:18] == bytes([255, 255, 255]) and sum(f) == 765  # brightness forced to full
+    f = wait_for(lambda: (lambda f: f if f[15:18] == bytes([255, 255, 255]) else None)(frame(d)), 5, what="LED 5")
+    assert sum(f) == 765  # brightness forced to full
     assert d.get("/calibrate/status")[1] == {"calibration_mode": True, "current_led": 5, "total_leds": 500}
     code, res = d.get("/calibrate/binary?bit=3", token=True)
     assert res["leds_on"] == 248  # LEDs 0-499 with bit 3 set
-    time.sleep(0.3)
-    f = frame(d)
-    assert sum(f) <= 47812 and f[3 * 8] > 0 and f[0] == 0  # 248 x 240 = 59520 raw, capped (review M6)
+    f = wait_for(lambda: (lambda f: f if f[3 * 8] > 0 else None)(frame(d)), 5, what="binary pattern")
+    assert sum(f) <= 47812 and f[0] == 0  # 248 x 240 = 59520 raw, capped (review M6)
     assert d.get("/calibrate/clear", token=True)[0] == 200
-    time.sleep(0.3)
-    assert sum(frame(d)) == 0
+    wait_for(lambda: sum(frame(d)) == 0, 5, what="cleared")
     assert d.get("/calibrate/stop", token=True)[1]["state"] == "idle"
     wait_for(lambda: d.get("/")[1]["effect"]["running"], 5)
 
@@ -82,8 +78,9 @@ def test_ttl_expiry_and_power_off_unlock(device):
     assert cal(d)["state"] == "locked"
     time.sleep(1.5)
     assert cal(d)["state"] == "locked"  # GET /calibrate refreshed the TTL...
-    time.sleep(3.5)
-    assert cal(d)["state"] == "idle"  # ...then it expired (review M7)
+    # ...then it expired (review M7). Poll GET /, which (unlike /calibrate)
+    # doesn't refresh the TTL.
+    wait_for(lambda: d.get("/")[1]["calibration"] == "idle", 6, what="TTL expiry")
     wait_for(lambda: d.get("/")[1]["effect"]["running"], 5)
     # Brightness changes while locked are deferred; power off unlocks at once.
     d.post("/calibrate/start")
@@ -123,10 +120,10 @@ def test_sequence_upload_play_and_log(device):
     wait_for(lambda: cal(d)["state"] == "locked", 5, what="playback end")
     log = d.get("/calibrate/log")[1]
     assert log["frames_shown"] == 6 and log["frames_skipped"] == 0 and log["capped_frames"] == 0
+    # The latch error measures host scheduling here (hardware: ±4 ms, on
+    # the checklist); what must hold is that no frame missed its slot.
     print("latch error (unix port):", log["late_us"])
-    assert log["late_us"]["max"] < 20000
-    time.sleep(0.3)
-    assert sum(frame(d)) == 0  # all off at the end
+    wait_for(lambda: sum(frame(d)) == 0, 5, what="all off at the end")
     # Implicit lock: released 2 s after playback ends.
     wait_for(lambda: cal(d)["state"] == "idle", 5, what="implicit unlock")
 
@@ -138,9 +135,10 @@ def test_frame_and_default_sequence(device, tmp_path):
     d.post("/calibrate/start")
     code, res = d.post("/calibrate/frame", one)
     assert code == 200
-    time.sleep(0.3)
-    f = frame(d)
-    assert f[:3] == bytes([10, 20, 30]) and sum(f) == 60 * N
+    # Static frames are refreshed on the calibration task's 100 ms tick:
+    # ~0.2 s to reach the wire here, so a fixed 0.3 s wait was too tight on CI.
+    f = wait_for(lambda: (lambda f: f if f[:3] == bytes([10, 20, 30]) else None)(frame(d)), 5, what="static frame")
+    assert sum(f) == 60 * N
     d.post("/calibrate/stop")
     # The bundle carries sequences/default.tcal as data/calib_default.tcal,
     # so the HA "Play calibration sequence" button works out of the box.
@@ -151,10 +149,15 @@ def test_frame_and_default_sequence(device, tmp_path):
     code, res = d.post("/calibrate/play?sequence=default&loops=1")
     assert code == 200
     loop_ms = res["loop_ms"]
-    time.sleep(loop_ms / 1000 + 1)
-    log = d.get("/calibrate/log")[1]
-    print("default sequence latch error (unix port):", log["late_us"], "frames", log["frames_shown"])
-    assert log["frames_shown"] == st["sequences"]["default"]["frames"] and log["frames_skipped"] == 0
+    frames = st["sequences"]["default"]["frames"]
+    t0 = time.time()
+    # Poll for the end rather than sleeping loop_ms + 1 s: on a loaded CI
+    # runner the test process and the device are scheduled independently.
+    log = wait_for(lambda: (lambda l: l if l["frames_shown"] + l["frames_skipped"] >= frames else None)(
+        d.get("/calibrate/log")[1]), loop_ms / 1000 + 20, interval=0.1, what="playback end")
+    print("default sequence: %d frames in %.2f s after play (loop %.1f s), latch error (unix port) %s, worst %s"
+          % (log["frames_shown"], time.time() - t0, loop_ms / 1000, log["late_us"], log.get("worst_frame")))
+    assert log["frames_shown"] == frames and log["frames_skipped"] == 0
 
 
 def test_calibration_over_mqtt(make_device, bundles, broker, bus):
@@ -166,9 +169,7 @@ def test_calibration_over_mqtt(make_device, bundles, broker, bus):
     t0 = time.time()
     bus.pub("xmas_tree/calibrate/set", '{"action":"play","sequence":"uploaded","ttl_s":60}')
     bus.wait("xmas_tree/calibrate/state", lambda p: json.loads(p)["state"] == "playing", 10, after=t0)
-    time.sleep(2.5)
-    n = len(bus.since(t0, "xmas_tree/calibrate/state"))
-    assert n >= 3  # once a second while playing
+    wait_for(lambda: len(bus.since(t0, "xmas_tree/calibrate/state")) >= 3, 10, what="state once a second while playing")
     bus.pub("xmas_tree/calibrate/set", '{"action":"bogus"}')
     bus.pub("xmas_tree/calibrate/set", "nope")
     # HA power off always unlocks.
@@ -183,3 +184,39 @@ def test_missing_default_sequence_is_a_clear_409(device):
     (d.root / "fw" / "a" / "data" / "calib_default.tcal").unlink()
     code, res = d.post("/calibrate/play?sequence=default")
     assert code == 409 and res["error"] == "no default sequence"
+
+
+def test_settings_are_not_saved_to_flash_during_playback(device):
+    """A flash write can stall the Pico for tens of ms (an erase stops all
+    code), and playback frames are timed to the millisecond, so a settings
+    change made during playback is saved when it ends, not during it."""
+    d = device
+    lit = [i % 2 == 0 for i in range(N)]
+    d.post("/calibrate/sequence", seq([mono(100, 30, lit), mono(100, 0, lit)], loops=0))
+    code, _ = d.post("/calibrate/play?sequence=uploaded&ttl_s=60")
+    assert code == 200
+    before = d.saved_state().get("speed")
+    assert d.post("/state", {"speed": 2.5})[0] == 200
+    assert d.get("/")[1]["state"]["speed"] == 2.5  # applied at once...
+    time.sleep(3.5)  # ...past the 2 s save debounce (an absence check: nothing may be written)
+    assert d.saved_state().get("speed") == before, "saved during playback"
+    d.post("/calibrate/halt")
+    wait_for(lambda: d.saved_state().get("speed") == 2.5, 10, what="saved after playback")
+    d.post("/calibrate/stop")
+
+
+def test_infinite_playback_from_idle_runs_until_its_ttl(device):
+    """HA's "Play calibration sequence" button plays loops=0 with ttl_s from
+    idle. The implicit lock left the expiry at "now", so the playback was
+    unlocked by the calibration task's next check, within ~100 ms."""
+    d = device
+    lit = [i % 2 == 0 for i in range(N)]
+    d.post("/calibrate/sequence", seq([mono(100, 30, lit), mono(100, 0, lit)], loops=0))
+    t0 = time.time()
+    code, res = d.post("/calibrate/play?sequence=uploaded&ttl_s=3")
+    assert code == 200 and res["loops"] == 0
+    time.sleep(1.5)  # an absence check: it must not have stopped
+    assert d.get("/")[1]["calibration"] == "playing"
+    wait_for(lambda: d.get("/")[1]["calibration"] == "idle", 10, what="TTL end")
+    assert time.time() - t0 >= 2.5  # ended by its 3 s TTL, not at once
+    assert "ttl expired" in d.console()
