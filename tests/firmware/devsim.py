@@ -115,6 +115,13 @@ class Device:
         if r.returncode != 0:
             raise RuntimeError(f"USB install failed:\n{r.stdout}\n{r.stderr}")
 
+    def saved_state(self):
+        """/state.json as the firmware last saved it (debounced), or {}."""
+        try:
+            return json.loads((self.root / "state.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
     def boot_state(self):
         try:
             return json.loads((self.root / "boot.json").read_text())

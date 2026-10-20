@@ -156,11 +156,21 @@ try:
     checkpoint("floor_and_mqtt_after_update")
     if args.calib:
         (d.root / "fw" / "b" / "data" / "calib_default.tcal").write_bytes(Path(args.calib).read_bytes())
+        frames = d.get("/calibrate")[1]["sequences"]["default"]["frames"]
         code, res = d.post("/calibrate/play?sequence=default&loops=1")
-        track(res["loop_ms"] / 1000 + 3 if code == 200 else 1)
-        log = d.get("/calibrate/log")[1]
-        result["steps"]["calibration_default"] = code == 200 and log["frames_shown"] > 0 and log["frames_skipped"] == 0
-        result["calib_log"] = log["late_us"]
+        # Track until every frame is accounted for (not a fixed loop_ms + 3 s:
+        # the campaign and the device are scheduled independently).
+        log = {"frames_shown": 0, "frames_skipped": 0}
+        end = time.time() + (res["loop_ms"] / 1000 + 60 if code == 200 else 1)
+        while code == 200 and log["frames_shown"] + log["frames_skipped"] < frames and time.time() < end:
+            track(0.5)
+            log = d.get("/calibrate/log")[1]
+        # This campaign is about memory: the whole sequence must play on the
+        # board-sized heap. Skips and latch error measure the host here (the
+        # 32-bit build on a shared runner) and are reported, not asserted;
+        # test_calibration asserts no skips, and the hardware checklist ±4 ms.
+        result["steps"]["calibration_default"] = code == 200 and log["frames_shown"] + log["frames_skipped"] == frames
+        result["calib_log"] = {k: log.get(k) for k in ("frames_shown", "frames_skipped", "late_us", "worst_frame")}
 finally:
     d.stop()
     srv.shutdown()

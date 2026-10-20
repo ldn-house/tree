@@ -129,6 +129,13 @@ class Supervisor:
 
     async def _reserve(self):
         for _ in bootmgr.reserve_steps():
+            # Each step writes a 4 KB block. On the Pico a flash erase stops
+            # all code for tens of ms (up to ~400 ms), which would make
+            # calibration frames late: a build that is already running waits
+            # out any playback (one that hasn't started yet isn't begun, see
+            # _maintain).
+            while self.rt.calib.playing():
+                await asyncio.sleep_ms(200)
             await asyncio.sleep_ms(5)
             trace.at(trace.RESERVE)
 
