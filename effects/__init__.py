@@ -20,6 +20,7 @@ EFFECTS = [
     "lighthouse",
     "raindrops",
     "snowfall",
+    "portal",
 ]
 
 DISABLED = [
