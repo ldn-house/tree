@@ -84,7 +84,9 @@ def test_r2h3_invalid_power_settings_never_reach_the_output(make_device, bundles
     assert p["estimated_a"] <= p["limit_a"] == 1.5, p  # computed from the wire bytes
 
 
-def test_r2m6_reserve_is_built_after_a_healthy_boot(device):
+def test_r2m6_reserve_is_built_after_a_healthy_boot(make_device, bundles):
+    device = make_device(bundles["quick"])  # first reserve check 6 s after boot instead of 30
+    device.wait_http(40, pred=lambda s: not s["boot"]["trial"])
     st = wait_for(lambda: (lambda s: s if s["reserve"]["complete"] else None)(status(device)), 60,
                   what="reserve built")
     assert st["reserve"]["bytes"] == 256 * 1024

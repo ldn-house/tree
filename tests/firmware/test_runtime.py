@@ -145,8 +145,10 @@ def test_throwing_effect_is_skipped(device):
     wait_for(lambda: status(d)["effect"]["running"] == "boom", 10)
 
 
-def test_hanging_effect_is_quarantined_after_watchdog(device):
-    d = device
+def test_hanging_effect_is_quarantined_after_watchdog(make_device, bundles):
+    # Normal-boot health after 12 s instead of 30 (still past the 8 s watchdog).
+    d = make_device(bundles["quick"])
+    d.wait_http(40, pred=lambda s: not s["boot"]["trial"])
     code, res = _put(d, "hang", HANG, "")
     assert code == 200
     # The user locked the tree to this effect earlier (persisted), so it
@@ -169,7 +171,7 @@ def test_hanging_effect_is_quarantined_after_watchdog(device):
     # (no soft-timer IRQs on the unix port, so no stall seconds here).
     assert st["boot"]["hang"] == {"phase": "effect render", "stalled_s": 0, "timer": False}, st["boot"]
     assert st["boot"]["reset_reason"] == "hung in effect render"
-    # Healthy (boot counter reset) after 30 s, with no further resets.
+    # Healthy (boot counter reset) after HEALTHY_S, with no further resets.
     wait_for(lambda: status(d)["supervisor"]["healthy"], 45, what="healthy")
     assert len(d.boots) == 1  # no reboot loop
     assert d.boot_state()["boots"] == 0

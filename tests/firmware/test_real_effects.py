@@ -40,11 +40,15 @@ def test_default_build_bundles_the_registered_effects_only(bundle):
 
 
 def test_every_effect_runs_on_the_device(make_device, bundle):
-    d = make_device(bundle / "tree-firmware.bin")
+    d = make_device(bundle / "tree-firmware.bin", start=False)
+    # Saved state, so the first effect also gets 2 s (set over HTTP, it would
+    # keep the deadline it started with: its own DURATION_MS).
+    (d.root / "state.json").write_text(json.dumps({"power": True, "effect": "auto", "auto_s": 2, "brightness": 255}))
+    d.start()
     st = d.wait_http(40, pred=lambda s: not s["boot"]["trial"])
     assert st["effects"] == effects.EFFECTS
     assert st["coords"] > 0  # the bundled legacy coordinates
-    d.post("/state", {"effect": "auto", "auto_s": 2, "brightness": 255})
+    assert st["state"]["auto_s"] == 2 and st["state"]["effect"] == "auto"
     seen = set()
 
     def all_seen():

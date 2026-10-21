@@ -62,8 +62,9 @@ def test_b1_unwritable_boot_state_goes_to_safe_mode_and_recovers(make_device, bu
 # -- H3: rejected uploads and dry-runs keep the fallback ---------------------------
 
 
-def test_h3_fallback_survives_rejected_upload_and_trial_dry_run(device, bundles, tmp_path):
-    d = device
+def test_h3_fallback_survives_rejected_upload_and_trial_dry_run(make_device, bundles, tmp_path):
+    d = make_device(bundles["v1"], TRIAL_HEALTHY_S=5)  # time to act during v2's trial
+    d.wait_http(40, pred=lambda s: not s["boot"]["trial"])
     code, _ = push(d, bundles["v2"])
     assert code == 200
     st = running(d, "v2")
