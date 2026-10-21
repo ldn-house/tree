@@ -99,9 +99,36 @@ def test_power_cap_applies_before_brightness(device):
     st = status(d)
     assert st["effect"]["power_capped"] and st["effect"]["cap_factor"] == 12
     d.post("/state", {"brightness": 128})
-    wait_for(lambda: abs(frame_sum(d)[0] - full * 128 / 255) < 1500, 5, what="half brightness")  # the slider still dims (review H7)
+    # The slider still dims (review H7): 128 is 8% + 92% x 125/252 above the
+    # brightness floor.
+    wait_for(lambda: abs(frame_sum(d)[0] - full * (0.08 + 0.92 * 125 / 252)) < 1500, 5, what="half brightness")
     d.post("/state", {"power": False})
     wait_for(lambda: frame_sum(d)[0] == 0, 5, what="power off")
+
+
+def test_brightness_floor(device):
+    """Brightness 1..3 (Home Assistant's 1%) gives the floor (8% by default)
+    of the capped frame, 0 is still dark, the floor is a persisted state
+    setting, and 0 turns it off."""
+    d = device
+    budget = status(d)["power_budget"]
+    assert status(d)["state"]["floor"] == 8
+    d.post("/state", {"effect": "solid", "brightness": 3})
+    wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
+    wait_for(lambda: abs(frame_sum(d)[0] - budget * 0.08) < 600, 5, what="floor")
+    _, f = frame_sum(d)
+    assert min(f) >= 2 and max(f) <= 3  # 8% of the capped 31.9: every channel 2-3, none dark
+    code, res = d.post("/state", {"floor": 0})
+    assert code == 200 and res["changed"] == {"floor": 0}
+    wait_for(lambda: abs(frame_sum(d)[0] - budget * 3 / 255) < 600, 5, what="no floor")
+    code, res = d.post("/state", {"floor": 99})
+    assert code == 200 and res["state"]["floor"] == 25
+    assert d.post("/state", {"floor": "x"})[0] == 400
+    d.post("/state", {"floor": 12.5, "brightness": 1})
+    wait_for(lambda: abs(frame_sum(d)[0] - budget * 0.125) < 600, 5, what="12.5% floor")
+    d.post("/state", {"brightness": 0})
+    wait_for(lambda: frame_sum(d)[0] == 0, 5, what="brightness 0 is dark")
+    wait_for(lambda: d.saved_state().get("floor") == 12.5, 10, what="floor saved")
 
 
 def test_state_persists_across_power_cut(device):
@@ -292,8 +319,9 @@ def test_led_timing_and_power_budget_config(make_device, bundles):
                  what="capped at 3 A")
     assert frame_sum(d)[0] <= 3000 * 255 // 10, p
     d.post("/state", {"brightness": 128})
-    # The estimate follows brightness after the cap.
-    wait_for(lambda: 1.4 <= status(d)["power"]["estimated_a"] <= 1.6, 5, what="estimate at half brightness")
+    # The estimate follows brightness after the cap (128 is 53.6% above the
+    # 8% floor).
+    wait_for(lambda: 1.53 <= status(d)["power"]["estimated_a"] <= 1.69, 5, what="estimate at half brightness")
     # A bad timing falls back to the default instead of breaking the driver.
     d2 = make_device(bundles["v1"], LED_TIMING_NS=(400, 850, 800, 100))
     st = d2.wait_http(30)

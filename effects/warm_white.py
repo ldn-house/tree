@@ -1,8 +1,13 @@
 """Solid warm white glow.
 
 The tone param picks one of several warm whites, for comparing on the real
-LEDs (an A/B for the colour, from Home Assistant's "tone" number):
-- 0: (255, 140, 50), the original colour picked on a screen;
+LEDs (an A/B for the colour, from Home Assistant's "tone" number). The
+default is 1: on the tree it is the first tone that looks warm, and it
+keeps individual LEDs closer to one colour than tone 2 does (at the
+tree's few wire levels, tone 2's tiny green and blue make neighbouring
+LEDs differ more visibly):
+- 0: (255, 140, 50), the original colour picked on a screen (looks cool and
+  yellow-white on the LEDs);
 - 1: 0 white-balanced by (1.0, 0.85, 0.7), less green and blue;
 - 2: 0 through gamma 1.8, which is what a screen shows for 0 in linear
   light (the LEDs' PWM is linear);
@@ -14,7 +19,7 @@ global GAMMA setting would, at any brightness.
 NAME = "warm_white"
 DURATION_MS = 10000
 PARAMS = {
-    "tone": (0, 0, 3),
+    "tone": (1, 0, 3),
 }
 NEEDS_COORDS = False
 
@@ -32,9 +37,9 @@ class Effect:
         self.params = ctx.params
 
     def render(self, t_ms, frame):
-        tone = int(self.params.get("tone", 0))
+        tone = int(self.params.get("tone", 1))
         if tone < 0 or tone >= len(TONES):
-            tone = 0
+            tone = 1
         r, g, b = TONES[tone]
         for k in range(0, 3 * self.n, 3):
             frame[k] = r

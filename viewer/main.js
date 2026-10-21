@@ -132,7 +132,7 @@ resize();
 // ─── State and UI ─────────────────────────────────────────────────────────────
 
 const state = {
-  effect: null, t0: performance.now(), brightness: 255, showRaw: false, spin: false,
+  effect: null, t0: performance.now(), brightness: 255, floorPct: 0, showRaw: false, spin: false,
   frames: 0, fpsT: performance.now(), fps: 0, ready: false, busy: false,
 };
 window.viewer = state; // handy for automation: viewer.last holds the latest frame stats
@@ -192,9 +192,18 @@ $("spin").addEventListener("click", (e) => {
   e.target.classList.toggle("on", state.spin);
 });
 for (const b of document.querySelectorAll("[data-view]")) b.addEventListener("click", () => setView(b.dataset.view));
+// Non-zero brightness maps onto floor..100% in the output stage
+// (effects/_output.py), as on the tree; show both.
+function showBrightness() {
+  const b = state.brightness;
+  const f = state.floorPct;
+  // 3 is Home Assistant's 1%: it and below give the floor.
+  const level = b <= 0 ? 0 : f === 0 ? (b * 100) / 255 : b <= 3 ? f : f + ((b - 3) * (100 - f)) / 252;
+  $("bri-out").textContent = `${b} (${Math.round((b / 255) * 100)}%; ${level.toFixed(1)}% after the ${state.floorPct}% floor)`;
+}
 $("bri").addEventListener("input", (e) => {
   state.brightness = parseInt(e.target.value, 10);
-  $("bri-out").textContent = `${state.brightness} (${Math.round((state.brightness / 255) * 100)}%)`;
+  showBrightness();
 });
 $("limit").addEventListener("input", async (e) => {
   $("limit-out").textContent = `${parseFloat(e.target.value).toFixed(1)} A`;
@@ -280,7 +289,9 @@ function fillPicker(names) {
 
 (async () => {
   try {
-    const { names, coordsPath, positions: pos, limitA, maPerChannel } = await call("init", { n: N });
+    const { names, coordsPath, positions: pos, limitA, maPerChannel, floorPct } = await call("init", { n: N });
+    state.floorPct = floorPct;
+    showBrightness();
     $("limit").value = limitA;
     $("limit-out").textContent = `${limitA.toFixed(1)} A`;
     $("limit").title = `Estimated at ${maPerChannel} mA per channel (effects/_output.py)`;

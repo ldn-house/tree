@@ -19,6 +19,13 @@ N = 500
 WARM = (255, 140, 50)
 
 
+def stage(**kw):
+    """An output stage without the brightness floor, for testing rounding
+    and dithering at raw brightness levels (the floor has its own tests)."""
+    kw.setdefault("floor", 0)
+    return _output.Output(N, **kw)
+
+
 def solid(color, n=N):
     return bytearray(color * n)
 
@@ -44,7 +51,7 @@ def test_warm_white_keeps_its_hue_when_dim(percent):
     dithering a single frame's tree-wide average keeps every channel, in the
     right ratio to red."""
     b = round(percent * 255 / 100)
-    o = _output.Output(N)
+    o = stage()
     (frame,) = frames_of(o, solid(WARM), b, 1)
     avg = [sum(frame[c::3]) / N for c in range(3)]
     want = [exact(o, c, b) for c in WARM]
@@ -61,7 +68,7 @@ def test_static_frame_is_identical_every_frame(percent):
     same bytes on every frame, so nothing flickers."""
     b = round(percent * 255 / 100)
     for src in (solid(WARM), bytearray((k * 37 + 11) & 255 for k in range(3 * N))):
-        o = _output.Output(N)
+        o = stage()
         frames = frames_of(o, src, b, 40)
         assert all(f == frames[0] for f in frames)
 
@@ -70,7 +77,7 @@ def test_static_frame_is_identical_every_frame(percent):
 def test_each_led_within_one_of_exact(percent):
     b = round(percent * 255 / 100)
     src = bytearray((k * 37 + 11) & 255 for k in range(3 * N))
-    o = _output.Output(N)
+    o = stage()
     (frame,) = frames_of(o, src, b, 1)
     for k in range(3 * N):
         assert abs(frame[k] - exact(o, src[k], b)) < 1, (k, frame[k], exact(o, src[k], b))
@@ -79,7 +86,7 @@ def test_each_led_within_one_of_exact(percent):
 def test_spatial_average_matches_target_for_any_fraction():
     """Across the tree, a uniform target with any fractional part averages
     to that target (the thresholds are unbiased)."""
-    o = _output.Output(N, budget=10**9)
+    o = stage(budget=10**9)
     for b in range(1, 256, 5):
         (frame,) = frames_of(o, solid((255, 128, 40)), b, 1)
         for c, v in enumerate((255, 128, 40)):
@@ -89,7 +96,7 @@ def test_spatial_average_matches_target_for_any_fraction():
 def test_old_floor_collapsed_to_red():
     """The behaviour this replaces, for the record: at 3% the old stage
     sent (1, 0, 0) for warm white."""
-    o = _output.Output(N, dither=False)
+    o = stage(dither=False)
     dst = bytearray(3 * N)
     o.process(solid(WARM), dst, 8)
     floored = tuple(int(exact(o, c, 8)) for c in WARM)
@@ -98,7 +105,7 @@ def test_old_floor_collapsed_to_red():
 
 
 def test_rounds_to_nearest_without_dither():
-    o = _output.Output(N, budget=10**9, dither=False)
+    o = stage(budget=10**9, dither=False)
     src = bytearray(range(256)) + bytearray(3 * N - 256)
     dst = bytearray(3 * N)
     for b in (1, 3, 7, 40, 128, 200, 255):
@@ -109,16 +116,16 @@ def test_rounds_to_nearest_without_dither():
 
 def test_dither_modes():
     assert _output.Output(N).dither == "spatial"
-    assert _output.Output(N, dither=True).dither == "spatial"
-    assert _output.Output(N, dither=False).dither is None
-    assert _output.Output(N, dither="temporal").dither == "temporal"
+    assert stage(dither=True).dither == "spatial"
+    assert stage(dither=False).dither is None
+    assert stage(dither="temporal").dither == "temporal"
     with pytest.raises(ValueError):
-        _output.Output(N, dither="bayer")
+        stage(dither="bayer")
 
 
 def test_temporal_opt_in_averages_over_time():
     """The opt-in temporal mode still averages exactly per LED over time."""
-    o = _output.Output(N, budget=10**9, dither="temporal")
+    o = stage(budget=10**9, dither="temporal")
     src = bytearray((k * 37) & 255 for k in range(3 * N))
     for b in (2, 9, 77):
         frames = frames_of(o, src, b, 256)
@@ -129,7 +136,7 @@ def test_temporal_opt_in_averages_over_time():
 @pytest.mark.parametrize("dither", ["spatial", "temporal", False])
 def test_whole_levels_do_not_change(dither):
     """A channel whose target is a whole number is sent unchanged."""
-    o = _output.Output(N, budget=10**9, dither=dither)
+    o = stage(budget=10**9, dither=dither)
     src = bytearray((k * 13) & 255 for k in range(3 * N))
     dst = bytearray(3 * N)
     for _ in range(10):
@@ -142,7 +149,7 @@ def test_whole_levels_do_not_change(dither):
 def test_power_cap_holds(brightness, dither):
     """Dense frames, capped: no frame is over the budget (rounding and
     dithering are trimmed at the cap), and the average stays at the target."""
-    o = _output.Output(N, dither=dither)
+    o = stage(dither=dither)
     src = bytearray((k * 101 + 7) & 255 for k in range(3 * N))
     frames = frames_of(o, src, brightness, 16)
     totals = [sum(f) for f in frames]
@@ -158,8 +165,8 @@ def test_power_cap_holds(brightness, dither):
 
 
 def test_gamma_never_above_linear():
-    lin = _output.Output(N, budget=10**9, dither=False)
-    gam = _output.Output(N, budget=10**9, dither=False, gamma=2.2)
+    lin = stage(budget=10**9, dither=False)
+    gam = stage(budget=10**9, dither=False, gamma=2.2)
     src = bytearray(k & 255 for k in range(3 * N))
     a = bytearray(3 * N)
     b = bytearray(3 * N)
@@ -172,25 +179,133 @@ def test_gamma_never_above_linear():
 
 
 def test_white_balance_scales_source_channels():
-    o = _output.Output(N, budget=10**9, dither=False, white=(1.0, 0.5, 0.25))
+    o = stage(budget=10**9, dither=False, white=(1.0, 0.5, 0.25))
     dst = bytearray(3 * N)
     o.process(solid((200, 200, 200)), dst, 255)
     assert tuple(dst[:3]) == (200, 100, 50)
-    g = _output.Output(N, budget=10**9, dither=False, white=(1.0, 0.5, 0.25), order="GRB")
+    g = stage(budget=10**9, dither=False, white=(1.0, 0.5, 0.25), order="GRB")
     g.process(solid((200, 200, 200)), dst, 255)
     assert tuple(dst[:3]) == (100, 200, 50)
 
 
 def test_colour_order():
-    o = _output.Output(N, budget=10**9, order="GRB")
+    o = stage(budget=10**9, order="GRB")
     dst = bytearray(3 * N)
     o.process(solid((10, 20, 30)), dst, 255)
     assert tuple(dst[:3]) == (20, 10, 30)
 
 
 def test_brightness_zero_is_dark():
-    o = _output.Output(N)
+    o = stage()
     dst = bytearray(3 * N)
     for _ in range(5):
         o.process(solid(WARM), dst, 0)
         assert not any(dst)
+
+
+# -- brightness floor --
+#
+# These pin the wire bytes. They can't show how an LED looks: at 1-5 LSB a
+# WS2811's three dies aren't in their linear proportions (at 1/255 they look
+# about equally bright), and the eye blends neighbouring LEDs differently
+# depending on how densely they sit in the tree. That needs the real tree.
+
+TONE1 = (255, 119, 35)  # warm_white's default
+
+
+def test_floor_default():
+    o = _output.Output(N)
+    assert o.floor == _output.FLOOR_PCT == 8
+
+
+def hass(pct):
+    """Home Assistant's brightness for a slider percentage (brightness_scale 255)."""
+    return round(pct * 255 / 100)
+
+
+def test_floor_mapping():
+    """0 stays off, HA's 1% lands on the floor, 100% is unchanged, and
+    every HA step between is strictly brighter (no dead zone)."""
+    o = _output.Output(N)
+    levels = [o.level(b) for b in range(256)]
+    assert levels[0] == 0
+    assert levels[255] == 65280
+    assert all(b >= a for a, b in zip(levels, levels[1:]))
+    floor_q = round(8 * 65280 / 100)
+    assert levels[1] == levels[2] == levels[hass(1)] == floor_q
+    assert all(b > a for a, b in zip(levels[3:], levels[4:]))
+    pct = [o.level(hass(p)) / 652.8 for p in range(1, 101)]
+    assert all(b > a for a, b in zip(pct, pct[1:]))
+    # Linear in between: halfway along HA's slider is halfway between the
+    # floor and full.
+    assert o.level(129) / 652.8 == pytest.approx(8 + 92 * 126 / 252, abs=0.01)
+
+
+def test_no_floor_is_identity():
+    o = stage()
+    assert [o.level(b) for b in range(256)] == [b * 256 for b in range(256)]
+
+
+def test_set_floor():
+    o = _output.Output(N)
+    o.set_floor(0)
+    assert o.level(1) == 256
+    o.set_floor(50)
+    assert o.level(3) == 65280 // 2
+    o.set_floor(-5)
+    assert o.floor == 0
+    o.set_floor(500)
+    assert o.floor == 100 and o.level(1) == 65280
+
+
+def test_floor_dims_smoothly_on_the_wire():
+    """Whole-tree warm white, capped: the output total rises with every
+    step from HA's 1% (brightness 3) to 255."""
+    o = _output.Output(N)
+    dst = bytearray(3 * N)
+    totals = []
+    for b in range(3, 256):
+        o.process(solid(TONE1), dst, b)
+        assert o.capped
+        totals.append(sum(dst))
+    assert all(b > a for a, b in zip(totals, totals[1:]))
+
+
+@pytest.mark.parametrize("dither", ["spatial", "temporal", False])
+@pytest.mark.parametrize("brightness", [1, 3, 8])
+def test_power_cap_holds_at_the_floor(brightness, dither):
+    o = _output.Output(N, dither=dither)
+    for src in (solid((255, 255, 255)), bytearray((k * 101 + 7) & 255 for k in range(3 * N))):
+        for f in frames_of(o, src, brightness, 8):
+            assert sum(f) <= o.budget * o.level(brightness) // 65280 + 3 * N
+            assert sum(f) <= o.budget
+
+
+def test_full_brightness_unchanged_by_floor():
+    """Brightness 255 (what calibration frames use) is the same with or
+    without a floor, so calibration frames are byte-identical."""
+    src = bytearray((k * 13) & 255 for k in range(3 * N))
+    a = bytearray(3 * N)
+    b = bytearray(3 * N)
+    stage(dither=False).process(src, a, 255)
+    _output.Output(N, dither=False).process(src, b, 255)
+    assert a == b
+
+
+@pytest.mark.parametrize("brightness", [1, 3])
+def test_warm_white_per_led_hue_at_the_floor(brightness):
+    """At the bottom of the slider, every LED of warm_white tone 1 has red of
+    at least 4 and no lit blue unless red is at least 4x it, so there are no
+    red-only or cold "white" (1, 1, 1) LEDs; green stays near its 0.47 ratio
+    to red. Without the floor, HA's 1% gave dark, red-only and (1, 1, 1)
+    LEDs."""
+    dst = bytearray(3 * N)
+    _output.Output(N).process(solid(TONE1), dst, brightness)
+    for i in range(N):
+        r, g, b = dst[3 * i:3 * i + 3]
+        assert r >= 4, (i, r, g, b)
+        assert b <= 1 and r >= 4 * b, (i, r, g, b)
+        assert 0.35 <= g / r <= 0.65, (i, r, g, b)
+    stage().process(solid(TONE1), dst, 3)
+    leds = {tuple(dst[3 * i:3 * i + 3]) for i in range(N)}
+    assert (0, 0, 0) in leds and (1, 0, 0) in leds and (1, 1, 1) in leds

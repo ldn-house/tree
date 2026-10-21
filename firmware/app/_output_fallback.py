@@ -4,8 +4,9 @@ This is the reference implementation of the contract's output stage and is
 shared by the firmware runtime, the headless renderer and the browser viewer,
 so all three cap and dim a frame identically:
 
-    raw RGB frame -> power cap (on the raw frame) -> brightness -> gamma
-    -> colour order -> driver
+    raw RGB frame -> power cap (on the raw frame) -> brightness (above the
+    floor) -> white balance -> gamma -> rounding/dithering -> colour order
+    -> driver
 
 The cap is computed on the unscaled frame, so brightness 255 means "as bright
 as the power budget allows" and lower values dim proportionally (review H7).
@@ -31,6 +32,16 @@ dim colours from collapsing to red:
   brightness), the excess is trimmed off, so the cap holds on every frame;
 - optional gamma and per-channel white balance.
 
+Brightness floor. Below a few percent a channel can only be 0 or 1, so an
+LED can't show the colour at all (warm white at 1% is dark, red, amber or
+cold "white" LEDs). The floor (floor=, percent of full brightness, default
+FLOOR_PCT) maps brightness linearly onto floor..100% from Home Assistant's
+1% (brightness 3; 1 and 2, which HA's slider can't pick, give the floor too)
+to 255, so the slider still dims smoothly over its whole range and 0 stays
+off. At the default 8% under the 1.5 A cap, warm white (tone 1) is
+(4-5, 2-3, 0-1) on every LED. Calibration frames use floor=0 (and
+brightness 255, which the floor never changes).
+
 On MicroPython the per-frame loops run as viper code compiled at import
 (it is kept as source because mpy-cross can't emit native code without
 -march); everywhere else, and if that fails, the plain-Python versions run.
@@ -47,6 +58,11 @@ LIMIT_A = 1.5        # default cap, amps at 12 V
 
 # The original firmware's cap (13% of full white), kept for compatibility.
 BUDGET_PERCENT = 13
+
+# Default brightness floor, percent of full brightness (see the docstring).
+FLOOR_PCT = 8
+# The brightness that lands on the floor: Home Assistant's 1%.
+_FLOOR_AT = 3
 
 # Fixed-point precision of the combined cap x brightness scale.
 _Q = 12
@@ -202,6 +218,9 @@ class Output:
       (round to nearest). Calibration frames should use False.
     - white: optional per-channel balance (r, g, b), each 0..1, applied to
       the source channels with brightness (e.g. (1.0, 0.85, 0.7)).
+    - floor: brightness floor, percent of full (0 = none); brightness
+      3..255 (HA's 1..100%) maps linearly onto floor..100%, 1 and 2 give
+      the floor, 0 stays dark. set_floor() changes it.
 
     After each process() call:
     - raw_total: channel sum of the raw frame
@@ -209,8 +228,10 @@ class Output:
     - factor: cap factor in 1/4096 units (4096 = not capped)
     """
 
-    def __init__(self, n, budget=None, gamma=None, order="RGB", dither="spatial", white=None):
+    def __init__(self, n, budget=None, gamma=None, order="RGB", dither="spatial", white=None,
+                 floor=FLOOR_PCT):
         self.n = n
+        self.set_floor(floor)
         self.budget = budget_for_current() if budget is None else int(budget)
         self.order = bytes(["RGB".index(c) for c in order])
         if dither is True:
@@ -266,9 +287,29 @@ class Output:
         self.capped = False
         self.factor = 1 << _Q
 
+    def set_floor(self, floor):
+        """floor: percent of full brightness, 0..100."""
+        floor = min(100, max(0, floor))
+        self.floor = floor
+        # In 1/256 brightness units (65280 = 255).
+        self._fq = int(floor * 652.8 + 0.5)
+
+    def level(self, brightness):
+        """Effective brightness after the floor, in 1/256 units (0..65280)."""
+        if brightness <= 0:
+            return 0
+        if brightness >= 255:
+            return 65280
+        fq = self._fq
+        if fq == 0:
+            return brightness << 8
+        if brightness <= _FLOOR_AT:
+            return fq
+        return fq + ((brightness - _FLOOR_AT) * (65280 - fq) + 126) // (255 - _FLOOR_AT)
+
     def process(self, src, dst, brightness):
         """src: raw frame (RGB). dst: output buffer, same length.
-        brightness: 0-255."""
+        brightness: 0-255 (0 is dark; 1..255 map onto floor..100%)."""
         total = sum(src)
         self.raw_total = total
         one = 1 << _Q
@@ -280,8 +321,9 @@ class Output:
             self.capped = False
         self.factor = f
         # Combined cap x brightness scale in 1/65536, rounded: at low
-        # brightness a coarser scale would bias every channel low.
-        s = (f * brightness * 16 + 127) // 255
+        # brightness a coarser scale would bias every channel low. With no
+        # floor this is exactly (f * brightness * 16 + 127) // 255.
+        s = (f * self.level(brightness) + 2032) // 4080
         luts = self.luts
         use_gamma = 0 if self.gamma is None else 1
         w = self.white

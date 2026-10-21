@@ -830,7 +830,13 @@ def output_cap_applies_before_brightness():
     full = sum(dst)
     out.process(src, dst, 128)
     half = sum(dst)
-    assert abs(half - full * 128 // 255) <= 3 * n, (full, half)  # brightness still dims when capped
+    # Brightness still dims when capped: 128 is 8% + 92% x 125/252 above the
+    # default floor, and exactly 128/255 without one.
+    assert abs(half - full * (8 + 92 * 125 / 252) / 100) <= 3 * n, (full, half)
+    out.set_floor(0)
+    out.process(src, dst, 128)
+    assert abs(sum(dst) - full * 128 // 255) <= 3 * n, (full, sum(dst))
+    out.set_floor(outstage.FLOOR_PCT)
     sparse = bytearray(3 * n)
     for i in range(0, 3 * n, 30):
         sparse[i] = 255

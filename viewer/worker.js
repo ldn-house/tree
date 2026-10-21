@@ -47,7 +47,7 @@ class Host:
         self.params[key] = value
 
     def limits(self):
-        return [_output.LIMIT_A, _output.MA_PER_CHANNEL]
+        return [_output.LIMIT_A, _output.MA_PER_CHANNEL, self.stage.floor]
 
     def set_limit(self, limit_a):
         self.stage.budget = _output.budget_for_current(limit_a)
@@ -131,7 +131,7 @@ const handlers = {
     py.globals.set("H", host);
     const pos = py.runPython("None if H.coords is None else [list(c) if c else None for c in H.coords]");
     const limits = host.limits().toJs();
-    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1] };
+    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1], floorPct: limits[2] };
   },
   async select({ name, seed, params }) {
     const proxy = host.select(name, seed, py.toPy(params || {}));

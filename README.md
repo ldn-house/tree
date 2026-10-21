@@ -48,7 +48,7 @@ The firmware has two slots. An update is staged, verified (sizes, SHA-256 hashes
 
 The tree integrates with Home Assistant via MQTT discovery, as one device with:
 - A light: power, brightness (with automatic power limiting) and effect (auto-cycle or lock to one effect)
-- Settings: speed, auto-cycle duration and each effect's parameters
+- Settings: speed, auto-cycle duration, brightness floor and each effect's parameters
 - A firmware update entity, plus reboot and calibration buttons
 - Diagnostics: Wi-Fi signal, free memory, uptime, frame rate, power cap, last reset cause, boot status
 - Availability: shown unavailable as soon as the tree drops off (MQTT last will)
@@ -64,7 +64,7 @@ The tree remembers its power, brightness and effect across reboots and network o
 
 ### Power Limiting (HDR)
 
-The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
+The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. The light's 1% is a brightness floor (8% by default, the "Brightness floor" setting): below about that, single LEDs can't show a colour, so the slider maps 1-100% onto floor-100% and still dims smoothly. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
 
 ## Animations
 

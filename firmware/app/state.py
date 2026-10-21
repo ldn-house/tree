@@ -1,7 +1,7 @@
 """User-facing state, persisted to flash and authoritative at boot.
 
-Power, brightness, effect, speed, auto-cycle duration and effect params are
-saved (debounced, atomically) to /state.json and restored at boot, whatever
+Power, brightness, the brightness floor, effect, speed, auto-cycle duration
+and effect params are saved (debounced, atomically) to /state.json and restored at boot, whatever
 the network is doing. MQTT and HTTP only ever send changes through update();
 retained MQTT messages never override what is restored here (review M4).
 """
@@ -11,7 +11,7 @@ import time
 
 import bootmgr
 
-from app import trace
+from app import outstage, trace
 from app.log import log
 
 FILE = "state.json"
@@ -20,12 +20,17 @@ SAVE_DELAY_MS = 2000
 SPEED_MIN = 0.1
 SPEED_MAX = 5.0
 AUTO_MAX_S = 3600
+# Brightness floor, percent (effects/_output.py): non-zero brightness maps
+# onto floor..100%. A state setting rather than a config key, so it works
+# (and can be tuned from Home Assistant) on any recovery layer.
+FLOOR_MAX = 25
 
 
 def defaults():
     return {
         "power": True,
         "brightness": 128,
+        "floor": outstage.FLOOR_PCT,
         "effect": "auto",
         "speed": 1.0,
         "auto_s": 0,  # 0: use each effect's DURATION_MS
@@ -93,6 +98,9 @@ class State:
         if "brightness" in changes:
             v = _num(changes["brightness"])
             applied["brightness"] = int(clamp(v, 0, 255))
+        if "floor" in changes:
+            v = float(clamp(_num(changes["floor"]), 0, FLOOR_MAX))
+            applied["floor"] = int(v) if v == int(v) else v
         if "effect" in changes:
             v = changes["effect"]
             if not isinstance(v, str) or not v or len(v) > 32:

@@ -40,7 +40,7 @@ def test_manifest_and_binaries(exported):
     assert manifest["encoding"] == "rgb8"
     assert manifest["frame_stage"] == "raw"
     assert manifest["output"] == {"applied": False, "brightness": 255, "limit_a": 1.5,
-                                   "ma_per_channel": 8, "gamma": None}
+                                   "ma_per_channel": 8, "gamma": None, "brightness_floor_pct": 8}
     coords = export_web.calibrated_coords()
     assert manifest["coords"] == [None if c is None else [round(v, 4) for v in c] for c in coords]
     assert len(manifest["coords"]) == manifest["leds"]

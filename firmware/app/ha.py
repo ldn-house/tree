@@ -8,7 +8,8 @@ Topics (prefix cfg.MQTT_PREFIX, default "xmas_tree"):
 
     <p>/availability         online/offline (retained; last will = offline)
     <p>/state, <p>/set       the light (JSON schema), as before
-    <p>/settings             speed, auto-cycle duration, effect params (JSON)
+    <p>/settings             speed, auto-cycle duration, brightness floor,
+                             effect params (JSON)
     <p>/diag                 diagnostics (JSON, every 30 s)
     <p>/effect_running       what the strip shows: effect name, "off" or
                              "calibration" (retained, on change, <= 1/s)
@@ -112,7 +113,7 @@ class HA:
     def _on_state(self, changed, source):
         if "power" in changed or "brightness" in changed or "effect" in changed:
             self.dirty["light"] = True
-        if "speed" in changed or "auto_s" in changed or "params" in changed:
+        if "speed" in changed or "auto_s" in changed or "floor" in changed or "params" in changed:
             self.dirty["settings"] = True
 
     def mark(self, what):
@@ -187,6 +188,8 @@ class HA:
         text = payload.decode().strip()
         if name == "speed":
             self.rt.apply({"speed": float(text)}, "mqtt")
+        elif name == "brightness_floor":
+            self.rt.apply({"floor": float(text)}, "mqtt")
         elif name == "auto_cycle":
             self.rt.apply({"auto_s": int(float(text))}, "mqtt")
         elif name.startswith("param/"):
@@ -253,6 +256,19 @@ class HA:
             "step": 0.1,
             "mode": "slider",
             "icon": "mdi:speedometer",
+            "entity_category": "config",
+        }
+        yield "number", "brightness_floor", {
+            "name": "Brightness floor",
+            "command_topic": self.t_cmd + "brightness_floor",
+            "state_topic": self.t_settings,
+            "value_template": "{{ value_json.floor }}",
+            "min": 0,
+            "max": 25,
+            "step": 0.5,
+            "unit_of_measurement": "%",
+            "mode": "slider",
+            "icon": "mdi:brightness-percent",
             "entity_category": "config",
         }
         yield "number", "auto_cycle", {
@@ -447,7 +463,7 @@ class HA:
             spec = self.rt.fx.meta(eff)["params"]
             if spec:
                 params[eff] = {k: st.param(eff, k, v[0]) for k, v in spec.items()}
-        return {"speed": st.get("speed"), "auto_s": st.get("auto_s"), "params": params}
+        return {"speed": st.get("speed"), "auto_s": st.get("auto_s"), "floor": st.get("floor"), "params": params}
 
     def diag_payload(self):
         return self.rt.diag()

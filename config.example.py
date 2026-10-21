@@ -49,7 +49,9 @@ MQTT_PASSWORD = "your_ha_password"
 # WHITE_BALANCE = None        # e.g. (1.0, 0.85, 0.7): per-channel scale, each 0..1
 #   (LED_DITHER and WHITE_BALANCE are validated by cfgcheck.py, part of the
 #   recovery layer: a board whose recovery layer predates them ignores both
-#   until it is updated over USB, and uses the defaults.)
+#   until it is updated over USB, and uses the defaults. The brightness floor
+#   is therefore not a config key: it is a persisted state setting, 8% by
+#   default, set from Home Assistant's "Brightness floor" or POST /state.)
 
 # Power cap, in amps at the strip's 12 V supply. Every frame is scaled so
 # the estimated strip current stays at or below POWER_LIMIT_A.
