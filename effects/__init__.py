@@ -26,6 +26,7 @@ EFFECTS = [
     "tetris",
     "fire",
     "lightning",
+    "storm",
 ]
 
 DISABLED = [

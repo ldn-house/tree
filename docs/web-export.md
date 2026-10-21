@@ -86,9 +86,10 @@ Measured with the calibrated 500-LED coordinates, 20 fps, seed 0. Gzip bytes are
 | beacon | 204 | 10.2 | 306,000 | 92,672 |
 | tetris | 160 | 8 | 240,000 | 4,498 |
 | fire | 200 | 10 | 300,000 | 105,169 |
-| lightning | 160 | 8 | 240,000 | 9,057 |
+| lightning | 160 | 8 | 240,000 | 4,175 |
+| storm | 160 | 8 | 240,000 | 19,243 |
 
-The complete archive is approximately **578 KB** (577,964 bytes with the 17 current effects, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
+The complete archive is approximately **593 KB** (592,878 bytes with the 18 current effects, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
 
 ## Build-time download
 
