@@ -101,8 +101,8 @@ def test_bad_hash_is_rejected(device, bundles, tmp_path):
     assert d.boot_state()["active"] == "a" and not (d.root / "fw" / "b" / "manifest.json").exists()
 
 
-def test_valid_update_is_confirmed_and_keeps_previous(device, bundles):
-    d = device
+def test_valid_update_is_confirmed_and_keeps_previous(make_device, bundles):
+    d = make_device(bundles["v1"], TRIAL_HEALTHY_S=5)  # time to act during v2's trial
     running(d, "v1", confirmed=True)
     code, body = push(d, bundles["v2"])
     assert code == 200 and body["installed"] == "v2" and body["rebooting"], body

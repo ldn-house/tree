@@ -280,23 +280,44 @@ def test_busy_publisher_keeps_its_session(mdev, bus):
     assert [p for _t, p in bus.since(t0, AVAIL) if p != b"online"] == [], "availability flapped"
 
 
-def retained(broker, topic, timeout=5):
+def retained(broker, topic, timeout=10):
     """What a fresh subscriber gets for topic: the retained value, or None."""
+    import uuid
+
     import paho.mqtt.client as mqtt
 
-    got = []
+    # After subscribing, publish a sentinel to ourselves: the broker sends a
+    # connection's messages in order, so any retained message for topic
+    # (queued when the subscription was made) arrives before the sentinel.
+    # Its arrival proves "nothing retained" without waiting out a timeout.
+    sentinel = "tree-test/sentinel/" + uuid.uuid4().hex
+    got, done, failed = [], [], []
+
+    def on_message(c, u, m):
+        (done if m.topic == sentinel else got).append(m.payload)
+
+    def on_subscribe(c, u, mid, rcs, p=None):
+        if any(rc.is_failure for rc in rcs):
+            failed.append(rcs)  # raised below: an assert here would end only paho's thread
+        else:
+            c.publish(sentinel, b"1")
+
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    c.on_message = lambda c, u, m: got.append(m.payload)
-    c.on_connect = lambda c, u, f, rc, p=None: c.subscribe(topic)
+    c.on_message = on_message
+    c.on_connect = lambda c, u, f, rc, p=None: c.subscribe([(topic, 0), (sentinel, 0)])
+    c.on_subscribe = on_subscribe
     c.connect("127.0.0.1", broker.port)
     c.loop_start()
     try:
         end = time.time() + timeout
-        while not got and time.time() < end:
-            time.sleep(0.1)
+        while not done and not failed and time.time() < end:
+            time.sleep(0.02)
     finally:
-        c.loop_stop()
         c.disconnect()
+        c.loop_stop()
+    assert not failed, failed
+    if not done:
+        raise TimeoutError("no answer from the broker about " + topic)
     return got[0] if got else None
 
 

@@ -21,7 +21,6 @@ EFFECTS = [
     "raindrops",
     "snowfall",
     "pong",
-    "space_invaders",
     "level_up",
     "beacon",
     "tetris",
@@ -31,6 +30,7 @@ EFFECTS = [
 
 DISABLED = [
     "sparkle",  # rapid white flashing; disabled 2026-10-18 at the user's request
+    "space_invaders",  # disabled 2026-10-21 at the user's request
 ]
 
 

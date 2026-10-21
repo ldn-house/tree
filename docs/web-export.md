@@ -82,14 +82,13 @@ Measured with the calibrated 500-LED coordinates, 20 fps, seed 0. Gzip bytes are
 | raindrops | 160 | 8 | 240,000 | 62,638 |
 | snowfall | 160 | 8 | 240,000 | 21,150 |
 | pong | 160 | 8 | 240,000 | 16,558 |
-| space_invaders | 160 | 8 | 240,000 | 8,801 |
 | level_up | 160 | 8 | 240,000 | 4,356 |
 | beacon | 204 | 10.2 | 306,000 | 92,672 |
 | tetris | 160 | 8 | 240,000 | 4,498 |
 | fire | 200 | 10 | 300,000 | 105,169 |
 | lightning | 160 | 8 | 240,000 | 9,057 |
 
-The complete archive is approximately **587 KB** (587,216 bytes with the 18 current effects, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
+The complete archive is approximately **578 KB** (577,964 bytes with the 17 current effects, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
 
 ## Build-time download
 
