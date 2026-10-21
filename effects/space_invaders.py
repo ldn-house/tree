@@ -1,3 +1,4 @@
+# DISABLED: not in effects.EFFECTS. To re-enable, move "space_invaders" from DISABLED back into EFFECTS in effects/__init__.py.
 """Space Invaders on the cone: a block of invaders marches round the tree.
 
 The tree's surface is a coarse cylindrical grid, ROWS height bands by COLS
