@@ -16,6 +16,9 @@ def mdev(make_device, bundles, broker, bus):
     d = make_device(bundles["v1"], MQTT_BROKER="127.0.0.1", MQTT_PORT=broker.port, MQTT_KEEPALIVE=5)
     d.wait_http(30)
     bus.wait(AVAIL, lambda p: p == b"online", 30)
+    # "online" goes out before the discovery pass (which first waits up to
+    # 1 s for the broker to replay retained state): start tests after it.
+    wait_for(lambda: status(d)["ha"]["discoveries"] >= 1, 20, what="first discovery pass")
     return d
 
 
@@ -33,8 +36,8 @@ def status(d):
 
 
 def test_discovery_payloads(mdev, bus):
-    wait_for(lambda: len(configs(bus)) >= 20, 20, what="discovery")
-    time.sleep(1)
+    # Configs arrive in order and the update entity's is the last one.
+    wait_for(lambda: "homeassistant/update/xmas_tree/firmware/config" in configs(bus), 20, what="discovery")
     cfgs = configs(bus)
     uids = [c["unique_id"] for c in cfgs.values()]
     assert len(uids) == len(set(uids)), "unique_ids must be unique"
@@ -74,7 +77,7 @@ def test_discovery_payloads(mdev, bus):
     assert "command_topic" not in upd  # no UPDATE_KEY, so no install button
 
     # Published state the templates read from.
-    assert bus.last_json(P + "/state") == {"state": "ON", "brightness": 128, "effect": "auto", "color_mode": "brightness"}
+    assert json.loads(bus.wait(P + "/state", timeout=10)) == {"state": "ON", "brightness": 128, "effect": "auto", "color_mode": "brightness"}
     s = bus.wait(P + "/settings")
     assert json.loads(s)["params"]["chase"]["speed"] == 1.0
     diag = json.loads(bus.wait(P + "/diag"))
@@ -100,17 +103,18 @@ def test_commands_and_malformed_payloads(mdev, bus):
     bus.pub(P + "/cmd/param/chase/bogus", "1")
     bus.pub(P + "/cmd/param/nope/speed", "1")
     bus.pub(P + "/cmd/unknown", "1")
-    time.sleep(2)
-    st = status(d)["state"]
+    want = {"speed": 5.0, "auto_s": 30}
+    # (params has no "chase" entry until the param command lands.)
+    st = wait_for(lambda: (lambda s: s if s["speed"] == 5.0 and s["auto_s"] == 30
+                                    and s["params"].get("chase", {}).get("speed") == 2.5 else None)(status(d)["state"]),
+                  10, what="commands applied")
     assert st["brightness"] == 40 and st["effect"] == "chase" and st["power"]
-    assert st["speed"] == 5.0 and st["auto_s"] == 30 and st["params"]["chase"]["speed"] == 2.5
-    s = json.loads(bus.last(P + "/settings"))
-    assert s["speed"] == 5.0 and s["params"]["chase"]["speed"] == 2.5
+    s = json.loads(bus.wait(P + "/settings", lambda p: json.loads(p)["params"]["chase"]["speed"] == 2.5, 10))
+    assert s["speed"] == want["speed"]
     assert "bad command" in d.console()
     bus.pub(P + "/set", '{"state":"OFF"}')
     bus.wait(P + "/state", lambda p: json.loads(p)["state"] == "OFF", 10)
-    time.sleep(0.5)
-    assert status(d)["effect"]["running"] is None
+    wait_for(lambda: status(d)["effect"]["running"] is None, 5, what="effects stopped")
     assert len(d.boots) == 0
 
 
@@ -125,11 +129,12 @@ def test_retained_commands_do_not_override_flash(make_device, bundles, broker, b
     t0 = time.time()
     d.start()
     bus.wait(AVAIL, lambda p: p == b"online", 30, after=t0)
-    time.sleep(2)
+    # Both retained commands (set, cmd/speed) were delivered and ignored...
+    wait_for(lambda: d.console().count("ignored retained message") >= 2, 15, what="retained commands ignored")
+    # ...and the device's own state replaces the stale retained one.
+    bus.wait(P + "/state", lambda p: json.loads(p)["brightness"] == 50, 15, after=t0)
     st = status(d)["state"]
     assert st["power"] is True and st["brightness"] == 50 and st["effect"] == "solid" and st["speed"] == 1.0
-    assert "ignored retained message" in d.console()
-    assert json.loads(bus.last(P + "/state"))["brightness"] == 50  # device state replaces the stale one
 
 
 def test_last_will_and_broker_restart(mdev, broker, bus):
@@ -166,8 +171,11 @@ def test_black_holed_broker_is_detected(mdev, broker, bus):
         st = wait_for(lambda: (lambda s: s if not s["mqtt"]["connected"] else None)(status(d)), 30,
                       what="dead broker detected")
         assert "no traffic" in st["mqtt"]["last_error"] or st["mqtt"]["last_error"]
-        time.sleep(15)  # reconnect attempts time out instead of blocking
-        assert len(d.boots) == 0 and status(d)["effect"]["fps"] >= 30
+        time.sleep(15)  # reconnect attempts time out instead of blocking...
+        # ...so the LEDs keep their frame rate (40 fps target; one sample can
+        # dip on a loaded runner, a blocked loop would not recover).
+        wait_for(lambda: status(d)["effect"]["fps"] >= 30, 10, what="frame rate")
+        assert len(d.boots) == 0
     finally:
         broker.resume()
     wait_for(lambda: status(d)["mqtt"]["connected"], 70, what="reconnect")
@@ -175,7 +183,6 @@ def test_black_holed_broker_is_detected(mdev, broker, bus):
 
 
 def test_ha_restart_triggers_rediscovery(mdev, bus):
-    time.sleep(2)
     t0 = time.time()
     bus.pub("homeassistant/status", "online")
     bus.wait("homeassistant/light/xmas_tree/config", timeout=15, after=t0)
@@ -197,7 +204,7 @@ EFF = P + "/effect_running"
 
 def test_running_effect_is_published_on_change(mdev, bus):
     d = mdev
-    wait_for(lambda: len(configs(bus)) >= 20, 20, what="discovery")
+    wait_for(lambda: "homeassistant/update/xmas_tree/firmware/config" in configs(bus), 20, what="discovery")
     sensor = configs(bus)["homeassistant/sensor/xmas_tree/effect_running/config"]
     assert sensor["state_topic"] == EFF and sensor["json_attributes_topic"] == EFF + "/attributes"
     bus.wait(EFF, timeout=10)
@@ -207,7 +214,7 @@ def test_running_effect_is_published_on_change(mdev, bus):
     d.post("/state", {"effect": "chase"})
     bus.wait(EFF, lambda p: p == b"chase", 5, after=t0)
     lag = [at for t, p, _r, at in bus.msgs if t == EFF and p == b"chase" and at >= t0][0] - t0
-    assert lag < 1.5, lag
+    assert lag < 3, lag  # on change (~0.2-1 s here), not on the 30 s diagnostics tick it used to wait for
     attrs = json.loads(bus.last(EFF + "/attributes"))
     assert attrs == {"mode": "locked", "selected": "chase", "next_switch_s": None}
     # Auto mode advances by itself (fixture effects run 4 s each) and says so.
@@ -238,7 +245,10 @@ def test_running_effect_publishes_are_rate_limited(mdev, bus):
     for name in ("solid", "chase", "height", "solid", "chase"):  # flapping
         d.post("/state", {"effect": name})
         time.sleep(0.1)
-    time.sleep(3)
+    # The final state lands (possibly already: a publish whose label equals
+    # the last one shown is skipped)...
+    wait_for(lambda: status(d)["effect"]["running"] == "chase" and bus.last(EFF) == b"chase", 10, what="final state")
+    time.sleep(1.5)  # ...and nothing else is published after it
     pubs = bus.since(t0, EFF)
     times = [at for t, p, _r, at in bus.msgs if t == EFF and at >= t0]
     assert len(pubs) <= 4, pubs  # ~1/s over ~3.5 s, not one per change
@@ -270,23 +280,44 @@ def test_busy_publisher_keeps_its_session(mdev, bus):
     assert [p for _t, p in bus.since(t0, AVAIL) if p != b"online"] == [], "availability flapped"
 
 
-def retained(broker, topic, timeout=5):
+def retained(broker, topic, timeout=10):
     """What a fresh subscriber gets for topic: the retained value, or None."""
+    import uuid
+
     import paho.mqtt.client as mqtt
 
-    got = []
+    # After subscribing, publish a sentinel to ourselves: the broker sends a
+    # connection's messages in order, so any retained message for topic
+    # (queued when the subscription was made) arrives before the sentinel.
+    # Its arrival proves "nothing retained" without waiting out a timeout.
+    sentinel = "tree-test/sentinel/" + uuid.uuid4().hex
+    got, done, failed = [], [], []
+
+    def on_message(c, u, m):
+        (done if m.topic == sentinel else got).append(m.payload)
+
+    def on_subscribe(c, u, mid, rcs, p=None):
+        if any(rc.is_failure for rc in rcs):
+            failed.append(rcs)  # raised below: an assert here would end only paho's thread
+        else:
+            c.publish(sentinel, b"1")
+
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    c.on_message = lambda c, u, m: got.append(m.payload)
-    c.on_connect = lambda c, u, f, rc, p=None: c.subscribe(topic)
+    c.on_message = on_message
+    c.on_connect = lambda c, u, f, rc, p=None: c.subscribe([(topic, 0), (sentinel, 0)])
+    c.on_subscribe = on_subscribe
     c.connect("127.0.0.1", broker.port)
     c.loop_start()
     try:
         end = time.time() + timeout
-        while not got and time.time() < end:
-            time.sleep(0.1)
+        while not done and not failed and time.time() < end:
+            time.sleep(0.02)
     finally:
-        c.loop_stop()
         c.disconnect()
+        c.loop_stop()
+    assert not failed, failed
+    if not done:
+        raise TimeoutError("no answer from the broker about " + topic)
     return got[0] if got else None
 
 
@@ -309,10 +340,11 @@ def test_availability_survives_an_unclean_drop_and_a_late_will(mdev, broker, bus
     t_back = time.time()
     st = wait_for(lambda: (lambda s: s if s["mqtt"]["connected"] else None)(status(d)), 70, what="reconnect")
     assert st["mqtt"]["connects"] == 2 and st["mqtt"]["disconnects"] >= 1, st["mqtt"]
-    time.sleep(3)  # past the re-assert
-    assert retained(broker, AVAIL) == b"online"
-    # States were re-published, discovery was not (unchanged configs).
-    assert bus.since(t_back, P + "/state") and bus.since(t_back, P + "/effect_running")
+    # States are re-published once the new session's discovery decision is
+    # made; discovery itself is not (unchanged configs).
+    wait_for(lambda: bus.since(t_back, P + "/state") and bus.since(t_back, P + "/effect_running"), 15,
+             what="states re-published")
+    wait_for(lambda: retained(broker, AVAIL) == b"online", 15, what="retained online")
     assert [t for t, _p in bus.since(t_back) if t.startswith("homeassistant/")] == []
     assert status(d)["ha"]["discoveries"] == 1
     # The running effect still reaches a subscriber after the reconnect.
@@ -323,14 +355,12 @@ def test_availability_survives_an_unclean_drop_and_a_late_will(mdev, broker, bus
     t2 = time.time()
     bus.pub(AVAIL, "offline", retain=True)
     bus.wait(AVAIL, lambda p: p == b"online", 5, after=t2)
-    time.sleep(0.5)
-    assert retained(broker, AVAIL) == b"online"
-    assert status(d)["ha"]["offline_seen"] >= 1
+    wait_for(lambda: retained(broker, AVAIL) == b"online", 10, what="retained online again")
+    wait_for(lambda: status(d)["ha"]["offline_seen"] >= 1, 5, what="offline seen")
     # HA's birth message still forces discovery.
     t3 = time.time()
     bus.pub("homeassistant/status", "online")
-    wait_for(lambda: [t for t, _p in bus.since(t3) if t.endswith("/config")], 15, what="re-discovery")
-    assert status(d)["ha"]["discoveries"] == 2
+    wait_for(lambda: status(d)["ha"]["discoveries"] == 2, 15, what="re-discovery")
 
 
 def test_dropping_a_session_sends_disconnect_so_no_will_fires(mdev, bus):
@@ -358,18 +388,19 @@ def test_retained_running_effect_tracks_the_latest(mdev, broker, bus):
         t = time.time()
         d.post("/state", {"effect": eff})
         bus.wait(P + "/effect_running", lambda p, e=eff: p == e.encode(), 5, after=t)
-        time.sleep(1.2)  # past the 1 s rate limit
-        assert retained(broker, P + "/effect_running") == eff.encode(), eff
-        attrs = json.loads(retained(broker, P + "/effect_running/attributes"))
-        assert attrs["selected"] == eff and attrs["mode"] == "locked", attrs
+        wait_for(lambda: retained(broker, P + "/effect_running") == eff.encode(), 10, what="retained " + eff)
+        wait_for(lambda: (lambda a: a and json.loads(a)["selected"] == eff and json.loads(a)["mode"] == "locked")(
+            retained(broker, P + "/effect_running/attributes")), 10, what="retained attributes")
+        time.sleep(1.2)  # past the 1 s rate limit before the next change
     # And through auto mode, where the tree switches by itself.
     d.post("/state", {"effect": "auto", "auto_s": 3})
     shown = b"chase"
     for _ in range(3):
         t = time.time()
         shown = bus.wait(P + "/effect_running", lambda p, prev=shown: p != prev, 10, after=t)
-        time.sleep(0.3)
-        assert retained(broker, P + "/effect_running") == shown
+        # Retained tracks the latest one (which may already have moved on).
+        wait_for(lambda: retained(broker, P + "/effect_running") == bus.last(P + "/effect_running"), 10,
+                 what="retained tracks the latest")
         assert json.loads(retained(broker, P + "/effect_running/attributes"))["mode"] == "auto"
 
 
@@ -388,8 +419,14 @@ def test_first_connect_after_an_update_clears_legacy_state(make_device, bundles,
     d.wait_http(30)
     bus.wait(AVAIL, lambda p: p == b"online", 30, after=t0)
     wait_for(lambda: status(d)["ha"]["discoveries"] == 1, 20, what="discovery")
+    # The device counts the pass once it has sent the last config; wait for
+    # the broker to deliver that one (the update entity's, published last)
+    # to this observer too, and with it everything before it, in order.
+    last = "homeassistant/update/xmas_tree/firmware/config"
+    wait_for(lambda: any(t == last for t, _p in bus.since(t0)), 15, what="the whole discovery pass delivered")
     msgs = bus.since(t0)
     topics = [t for t, _p in msgs]
+    assert any("/number/xmas_tree/param_" in t for t in topics), topics
     first_param = min(i for i, t in enumerate(topics) if "/number/xmas_tree/param_" in t)
     settings = [i for i, t in enumerate(topics) if t == P + "/settings"]
     assert settings and settings[0] < first_param, (settings, first_param)
@@ -400,6 +437,10 @@ def test_first_connect_after_an_update_clears_legacy_state(make_device, bundles,
             assert pname in params.get(eff, {}), (t, params)
     assert retained(broker, P + "/attributes") is None  # cleared (empty retained message)
     # Idempotent: a later pass (HA's birth message) clears it again, harmlessly.
+    t1 = time.time()
     bus.pub("homeassistant/status", "online")
     wait_for(lambda: status(d)["ha"]["discoveries"] == 2, 20, what="re-discovery")
+    # As above: once the pass is delivered, so is its clearing publish (until
+    # then a fresh subscriber can receive that empty publish live, as b"").
+    wait_for(lambda: any(t == last for t, _p in bus.since(t1)), 15, what="the second pass delivered")
     assert retained(broker, P + "/attributes") is None

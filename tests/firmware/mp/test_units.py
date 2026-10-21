@@ -1223,6 +1223,138 @@ def r3m3_interrupted_discovery_is_retried():
     assert "homeassistant/number/xmas_tree/param_gone2/config" in bus.sent
 
 
+@test
+def reserve_build_waits_out_calibration_playback():
+    """Each reserve step is a 4 KB flash write; on the Pico an erase stops
+    all code for tens of ms, so a build already running pauses while
+    calibration plays (one that hasn't started isn't begun then)."""
+    import asyncio
+
+    from app import supervisor
+
+    class Cal:
+        playing_now = False
+
+        def playing(self):
+            return self.playing_now
+
+    class Rt:
+        calib = Cal()
+
+    sup = supervisor.Supervisor(Rt())
+    steps = []
+
+    def fake_steps():
+        for i in range(4):
+            steps.append(i)
+            if i == 0:
+                Rt.calib.playing_now = True  # playback starts after the first block
+            yield
+
+    real = bootmgr.reserve_steps
+    bootmgr.reserve_steps = fake_steps
+    try:
+        async def main():
+            t = asyncio.create_task(sup._reserve())
+            await asyncio.sleep_ms(700)
+            assert steps == [0], steps  # paused for the whole playback
+            Rt.calib.playing_now = False
+            await asyncio.wait_for(t, 3)
+            assert steps == [0, 1, 2, 3], steps
+
+        asyncio.run(main())
+    finally:
+        bootmgr.reserve_steps = real
+
+
+@test
+def startup_periods_keep_their_device_defaults():
+    """The device tests shorten these through config (TRIAL_HEALTHY_S) or a
+    patched bundle (conftest "quick"); the firmware's own values stay."""
+    from app import supervisor
+
+    class Rt:
+        calib = None
+
+    assert supervisor.HEALTHY_S == 30
+    assert supervisor.RESERVE_EVERY_S == 600
+    sup = supervisor.Supervisor(Rt())
+    assert sup._reserve_at + supervisor.RESERVE_EVERY_S == 30  # first reserve check 30 s after boot
+    src = open(bootmgr.__file__.rsplit("/", 1)[0] + "/app/cfg.py").read()
+    assert 'TRIAL_HEALTHY_S = get("TRIAL_HEALTHY_S", 60)' in src and 'TRIAL_DEADLINE_S = get("TRIAL_DEADLINE_S", 300)' in src
+
+
+@test
+def trial_confirmation_waits_for_task_health():
+    """A trial is confirmed only once the supervisor's task checks pass.
+    They start after STARTUP_GRACE_MS, so this uses a TRIAL_HEALTHY_S past
+    it (the device tests confirm at 1 s, inside the grace, as a shortcut;
+    this is the coverage). Runs the real Supervisor.run() on a fake clock."""
+    import asyncio
+
+    from app import supervisor
+
+    assert supervisor.STARTUP_GRACE_MS < 6000
+
+    class Stop(Exception):
+        pass
+
+    def run(failing):
+        clock = [0]
+        marked, promoted = [], []
+
+        class T:
+            @staticmethod
+            def ticks_ms():
+                return clock[0]
+
+            @staticmethod
+            def ticks_diff(a, b):
+                return a - b
+
+        class A:
+            @staticmethod
+            async def sleep_ms(ms):
+                clock[0] += ms
+                if clock[0] > 9000:
+                    raise Stop
+
+        class B:
+            RESERVE_BYTES = 0
+            watchdog = staticmethod(lambda: None)
+            reserve_size = staticmethod(lambda: 0)
+            mark_healthy = staticmethod(lambda slot: marked.append(clock[0]) or True)
+            promote_config = staticmethod(lambda: promoted.append(clock[0]) or True)
+
+        class NS:
+            def __init__(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, v)
+
+        rt = NS(cfg=NS(WIFI_SSID="testnet", TRIAL_HEALTHY_S=6, TRIAL_DEADLINE_S=25),
+                wifi=NS(up=True, using_fallback=False), http=NS(alive=lambda: True), mqtt=None,
+                calib=NS(playing=lambda: False), updates=NS(busy=False), state=NS(save_now=lambda: None),
+                info={"trial": True, "cfg_trial": True}, slot="a", version="v", ha=None, uptime_ms=0, reboot_at=None)
+        saved = supervisor.time, supervisor.asyncio, supervisor.bootmgr, supervisor.write_reason
+        supervisor.time, supervisor.asyncio, supervisor.bootmgr = T, A, B
+        supervisor.write_reason = lambda why: None
+        try:
+            sup = supervisor.Supervisor(rt)
+            sup.watch("tasks", lambda: "calib task exited" if failing else None)
+            try:
+                asyncio.run(sup.run())
+            except Stop:
+                pass
+        finally:
+            supervisor.time, supervisor.asyncio, supervisor.bootmgr, supervisor.write_reason = saved
+        return marked, promoted, rt.info["trial"]
+
+    marked, promoted, trial = run(failing=False)
+    assert marked and 6000 <= marked[0] < 7000 and promoted and not trial, (marked, promoted, trial)
+    marked, promoted, trial = run(failing=True)
+    assert marked == [] and promoted == [] and trial, (marked, promoted, trial)
+
+
 gc.collect()
 print("%d passed, %d failed" % (passed[0], len(failures)))
 if failures:

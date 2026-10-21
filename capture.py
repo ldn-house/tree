@@ -156,8 +156,21 @@ def rotate_frame(frame: np.ndarray, rotation: str) -> np.ndarray:
     return frame
 
 
-def capture_frame(cap: cv2.VideoCapture, settle_frames: int = 3) -> np.ndarray:
-    """Capture a frame after letting the image settle."""
+def capture_frame(cap: cv2.VideoCapture, settle_frames: int = 3, drain_ms: float = 0) -> np.ndarray:
+    """Capture a frame after letting the image settle.
+
+    The camera buffers frames, so after sleeping, the next few reads return
+    images taken before the LEDs changed. Captures made that way show the
+    previous LED, and sometimes the same LED twice (see
+    docs/calibration-findings.md). With drain_ms, keep reading for that long
+    so the buffer is empty and the frame returned was exposed afterwards.
+    """
+    deadline = time.monotonic() + drain_ms / 1000
+    frame = None
+    while frame is None or time.monotonic() < deadline:
+        ret, frame = cap.read()
+        if not ret:
+            raise RuntimeError("Failed to capture frame")
     # Discard frames to let exposure settle
     for _ in range(settle_frames):
         cap.read()
@@ -316,16 +329,18 @@ def capture_sequential(base_url: str, angle: str, cap: cv2.VideoCapture,
     print("Capturing background...")
     set_led(base_url, -1)
     time.sleep(0.2)
-    bg_frame = rotate_frame(capture_frame(cap), rotation)
+    bg_frame = rotate_frame(capture_frame(cap, drain_ms=settle_ms), rotation)
     cv2.imwrite(str(angle_dir / "background.jpg"), bg_frame)
 
     # Capture each LED
     total = end - start
     for i, led in enumerate(range(start, end)):
         set_led(base_url, led)
-        time.sleep(settle_ms / 1000)
-
-        frame = rotate_frame(capture_frame(cap, settle_frames=2), rotation)
+        # Read (rather than sleep) through the settle time so no stale frames
+        # are left in the camera buffer. The old firmware applied changes on a
+        # 100 ms poll, so settle must exceed that there; the rewrite shows a
+        # static frame within one frame.
+        frame = rotate_frame(capture_frame(cap, settle_frames=2, drain_ms=settle_ms), rotation)
         filename = angle_dir / f"led_{led:04d}.jpg"
         cv2.imwrite(str(filename), frame)
 
@@ -407,9 +422,8 @@ def capture_binary(base_url: str, angle: str, cap: cv2.VideoCapture, settle_ms: 
         print(f"Capturing bit {bit} pattern...")
         result = set_binary_pattern(base_url, bit)
         print(f"  Binary pattern {bit}: {result}")
-        time.sleep(settle_ms / 1000)  # Wait for LEDs to update
-
-        frame = rotate_frame(capture_frame(cap, settle_frames=3), rotation)
+        # Read through the settle time so the frame is not a stale buffered one
+        frame = rotate_frame(capture_frame(cap, settle_frames=3, drain_ms=settle_ms), rotation)
         filename = angle_dir / f"bit_{bit}.jpg"
         cv2.imwrite(str(filename), frame)
 
@@ -434,6 +448,9 @@ def save_capture_metadata(angle: str, mode: str, host: str, start: int, end: int
         "range": {"start": start, "end": end},
         "rotation": rotation,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # 2: frames are read continuously through the settle time (no stale
+        # buffered frames). Version 1 captures show LED i - 1 in led_i.
+        "capture_version": 2,
     }
 
     meta_path = CAPTURE_DIR / angle / "metadata.json"
@@ -452,7 +469,7 @@ def main():
     parser.add_argument("--preview", action="store_true", help="Preview camera only")
     parser.add_argument("--start", type=int, default=0, help="Start LED index")
     parser.add_argument("--end", type=int, default=LED_COUNT, help="End LED index")
-    parser.add_argument("--settle", type=int, default=150, help="Settle time in ms between captures")
+    parser.add_argument("--settle", type=int, default=250, help="Settle time in ms between captures")
     parser.add_argument("--rotate", choices=["none", "cw", "ccw"], default="cw",
                         help="Rotate camera to portrait (cw=clockwise, ccw=counter-clockwise, default=cw)")
     parser.add_argument("--focus", type=int, default=-1,

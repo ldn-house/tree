@@ -15,7 +15,7 @@ import devsim
 HEAP = os.environ.get("HEAPCHECK_HEAP", "400K")  # Pico 2 W: 452,544 bytes free idle, minus Wi-Fi margin
 
 
-@pytest.mark.skipif(not os.environ.get("MICROPYTHON32"), reason="needs a 32-bit MicroPython in $MICROPYTHON32")
+@pytest.mark.skipif(not os.environ.get("MICROPYTHON32") and not os.environ.get("CI"), reason="needs a 32-bit MicroPython in $MICROPYTHON32")
 def test_board_sized_heap_with_real_effects_and_tls(tmp_path):
     fx = devsim.ROOT / "effects"
     key = "heap-signing-key"

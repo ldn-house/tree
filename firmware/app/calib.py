@@ -421,6 +421,11 @@ class Calib:
         delay_ms = max(delay_ms, self.rt.driver.write_us // 1000 + MIN_LEAD_MS)
         t0 = time.ticks_add(time.ticks_us(), delay_ms * 1000)
         self.state = "playing"
+        # The TTL (which bounds infinite loops) is set now that this is a
+        # playback: lock() can't, because refresh() leaves an implicit lock's
+        # expiry alone while it's "locked" (the 2 s hold after playback), so
+        # a loops=0 playback started from idle used to stop at once.
+        self.refresh(ttl_s)
         self.log = Log(name)
         self.play_info = {"sequence": name, "loop": 0, "loops": loops, "frame": 0, "t0_us": t0,
                           "loop_ms": seq.loop_ms, "elapsed_ms": 0}

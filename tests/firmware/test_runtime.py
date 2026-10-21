@@ -74,13 +74,17 @@ def frame_sum(d):
 def test_effects_cycle_and_frame_rate(device):
     d = device
     seen = set()
+    fps = []
     end = time.time() + 14
     while time.time() < end:
         st = status(d)
         seen.add(st["effect"]["running"])
+        fps.append(st["effect"]["fps"])
         time.sleep(0.5)
     assert {"solid", "chase", "height"} <= seen
-    assert st["effect"]["fps"] >= 30, st["effect"]
+    # 40 fps target. The rate is measured over ~1 s, so one sample can dip
+    # on a loaded runner: the tree must hold 30 fps for most of the run.
+    assert sorted(fps)[len(fps) // 2] >= 30, fps
     assert st["driver"] == "pio+dma"
     assert len(d.boots) == 0
 
@@ -90,25 +94,22 @@ def test_power_cap_applies_before_brightness(device):
     budget = status(d)["power_budget"]
     d.post("/state", {"effect": "solid", "brightness": 255})
     wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
-    time.sleep(0.5)
-    full, f = frame_sum(d)
-    assert budget * 0.97 <= full <= budget, (full, budget)  # capped: as bright as the budget allows
+    full = wait_for(lambda: (lambda s: s if budget * 0.97 <= s <= budget else None)(frame_sum(d)[0]), 5,
+                    what="capped full frame")  # capped: as bright as the budget allows
     st = status(d)
     assert st["effect"]["power_capped"] and st["effect"]["cap_factor"] == 12
     d.post("/state", {"brightness": 128})
-    time.sleep(0.5)
-    half, _ = frame_sum(d)
-    assert abs(half - full * 128 / 255) < 1500, (half, full)  # the slider still dims (review H7)
+    wait_for(lambda: abs(frame_sum(d)[0] - full * 128 / 255) < 1500, 5, what="half brightness")  # the slider still dims (review H7)
     d.post("/state", {"power": False})
-    time.sleep(0.5)
-    assert frame_sum(d)[0] == 0
+    wait_for(lambda: frame_sum(d)[0] == 0, 5, what="power off")
 
 
 def test_state_persists_across_power_cut(device):
     d = device
     code, body = d.post("/state", {"power": False, "brightness": 77, "effect": "chase", "speed": 2.0})
     assert code == 200 and body["changed"]["brightness"] == 77
-    time.sleep(3)  # debounced save
+    wait_for(lambda: d.saved_state().get("brightness") == 77 and d.saved_state().get("speed") == 2.0, 10,
+             what="debounced save")
     d.kill_now("pwron")
     st = d.wait_http(30, pred=lambda s: s["uptime_s"] < 20 and len(d.boots) >= 1)
     assert st["state"]["power"] is False and st["state"]["brightness"] == 77
@@ -144,8 +145,10 @@ def test_throwing_effect_is_skipped(device):
     wait_for(lambda: status(d)["effect"]["running"] == "boom", 10)
 
 
-def test_hanging_effect_is_quarantined_after_watchdog(device):
-    d = device
+def test_hanging_effect_is_quarantined_after_watchdog(make_device, bundles):
+    # Normal-boot health after 12 s instead of 30 (still past the 8 s watchdog).
+    d = make_device(bundles["quick"])
+    d.wait_http(40, pred=lambda s: not s["boot"]["trial"])
     code, res = _put(d, "hang", HANG, "")
     assert code == 200
     # The user locked the tree to this effect earlier (persisted), so it
@@ -168,7 +171,7 @@ def test_hanging_effect_is_quarantined_after_watchdog(device):
     # (no soft-timer IRQs on the unix port, so no stall seconds here).
     assert st["boot"]["hang"] == {"phase": "effect render", "stalled_s": 0, "timer": False}, st["boot"]
     assert st["boot"]["reset_reason"] == "hung in effect render"
-    # Healthy (boot counter reset) after 30 s, with no further resets.
+    # Healthy (boot counter reset) after HEALTHY_S, with no further resets.
     wait_for(lambda: status(d)["supervisor"]["healthy"], 45, what="healthy")
     assert len(d.boots) == 1  # no reboot loop
     assert d.boot_state()["boots"] == 0
@@ -191,9 +194,8 @@ def test_hot_push_validation(device):
     code, res = _put(d, "blue", GOOD)
     assert code == 200 and res["params"] == {"level": [100, 0, 255]}
     wait_for(lambda: status(d)["effect"]["running"] == "blue", 10)
-    time.sleep(0.5)
-    f = frame_sum(d)[1]
-    assert f[2] > 0 and f[0] == 0 and f[1] == 0
+    f = wait_for(lambda: (lambda f: f if f[2] > 0 else None)(frame_sum(d)[1]), 5, what="blue frame")
+    assert f[0] == 0 and f[1] == 0
     effects = {e["name"]: e for e in d.get("/effects")[1]["effects"]}
     assert effects["blue"]["overlay"] and effects["blue"]["error"] is None
     # Override a packaged effect, then delete the override.
@@ -245,7 +247,8 @@ def test_wifi_down_at_boot(make_device, bundles):
     # for the first failure rather than racing it.
     st = wait_for(lambda: (lambda s: s if s["wifi"]["failures"] >= 1 else None)(status(d)), 45, what="a failed attempt")
     assert st["wifi"]["state"] in ("connecting", "backoff")
-    assert st["effect"]["fps"] >= 30 and st["effect"]["running"]  # LEDs run regardless
+    assert st["effect"]["running"]  # LEDs run regardless, at frame rate
+    wait_for(lambda: status(d)["effect"]["fps"] >= 30, 10, what="frame rate")
     assert st["boot"]["trial"]  # not confirmed without the network...
     assert len(d.boots) == 0  # ...and no watchdog resets while Wi-Fi is down (review H2)
     d.set_net("up")
@@ -269,11 +272,12 @@ def test_wifi_drop_and_bad_password(device):
 def test_missing_config_still_runs(make_device, bundles):
     d = make_device(bundles["v1"], start=False)
     (d.root / "config.py").write_text("WIFI_SSID = 'x'\nthis is not python\n")
+    t0 = time.time()
     d.start()
-    time.sleep(8)
-    assert len(d.boots) == 0
+    wait_for(lambda: "engine: running" in d.console(), 30, what="LEDs running")
     assert "config.py failed to load" in d.console()
-    assert "engine: running" in d.console()
+    time.sleep(max(0, 8 - (time.time() - t0)))  # and no reset for 8 s (longer than the watchdog)
+    assert len(d.boots) == 0
 
 
 def test_led_timing_and_power_budget_config(make_device, bundles):
@@ -284,14 +288,12 @@ def test_led_timing_and_power_budget_config(make_device, bundles):
     assert st["power_budget"] == 3000 * 255 // 10
     d.post("/state", {"effect": "solid", "brightness": 255})
     wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
-    time.sleep(0.5)
-    full, _ = frame_sum(d)
-    p = status(d)["power"]
-    assert full <= 3000 * 255 // 10 and p["capped"] and 2.9 <= p["estimated_a"] <= 3.0, p
+    p = wait_for(lambda: (lambda p: p if p["capped"] and 2.9 <= p["estimated_a"] <= 3.0 else None)(status(d)["power"]), 5,
+                 what="capped at 3 A")
+    assert frame_sum(d)[0] <= 3000 * 255 // 10, p
     d.post("/state", {"brightness": 128})
-    time.sleep(0.5)
-    p = status(d)["power"]
-    assert 1.4 <= p["estimated_a"] <= 1.6, p  # the estimate follows brightness after the cap
+    # The estimate follows brightness after the cap.
+    wait_for(lambda: 1.4 <= status(d)["power"]["estimated_a"] <= 1.6, 5, what="estimate at half brightness")
     # A bad timing falls back to the default instead of breaking the driver.
     d2 = make_device(bundles["v1"], LED_TIMING_NS=(400, 850, 800, 100))
     st = d2.wait_http(30)

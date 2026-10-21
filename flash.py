@@ -8,7 +8,7 @@
 USB (also installs the recovery layer, which OTA can never change):
     ./flash.py                       build locally, install recovery layer + firmware
     ./flash.py --config              ...and copy config.py
-    ./flash.py --coords              ...and copy coordinates/coords_compact.txt
+    ./flash.py --coords              ...and copy coordinates/coords.txt (else coords_compact.txt)
     ./flash.py --github              install the latest GitHub Release instead of a local build
 
 OTA (needs HTTP_TOKEN, from config.py, $TREE_TOKEN or --token):
@@ -276,7 +276,8 @@ def main():
     ap.add_argument("--bundle", type=Path, help="use this bundle file")
     ap.add_argument("--config", action="store_true", help="USB: also copy config.py")
     ap.add_argument("--all", action="store_true", help="USB: same as --config --coords")
-    ap.add_argument("--coords", action="store_true", help="also install coordinates/coords_compact.txt")
+    ap.add_argument("--coords", action="store_true",
+                    help="also install coordinates/coords.txt (or the legacy coords_compact.txt)")
     ap.add_argument("--status", action="store_true", help="OTA: print device status and exit")
     ap.add_argument("--rollback", action="store_true", help="OTA: boot the previous firmware")
     ap.add_argument("--reboot", action="store_true", help="OTA: reboot the device")
@@ -290,7 +291,12 @@ def main():
     port = args.port or cfg.get("HTTP_PORT") or cfg.get("OTA_PORT") or 8080
     if args.all:
         args.config = args.coords = True
-    coords = ROOT / "coordinates" / "coords_compact.txt"
+    # Prefer the calibrated contract-frame file: the device gives /coords.txt
+    # precedence, so pushing only the legacy file would be ignored once a
+    # coords.txt is installed.
+    coords = ROOT / "coordinates" / "coords.txt"
+    if not coords.exists():
+        coords = ROOT / "coordinates" / "coords_compact.txt"
 
     if args.ota:
         if not args.host:
@@ -311,7 +317,7 @@ def main():
             ota_config(tree, check_config(ROOT / "config.py"), key)
             return
         if args.coords:
-            res = tree.call("PUT", "/files/coords_compact.txt", content=coords.read_bytes())
+            res = tree.call("PUT", f"/files/{coords.name}", content=coords.read_bytes())
             print(f"Coordinates stored: {res['known']} of {res['leds']} LEDs placed.")
             if not (args.github or args.bundle):
                 return
@@ -344,7 +350,7 @@ def main():
                 check_config(ROOT / "config.py")
                 extra.append((ROOT / "config.py", "config.py"))
             if args.coords:
-                extra.append((coords, "coords_compact.txt"))
+                extra.append((coords, coords.name))
             usb(bundle, extra)
 
 

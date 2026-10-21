@@ -6,8 +6,6 @@ post-update reboots). The watchdog REASON register tells them apart: TIMER
 for a genuine expiry, FORCE for a forced reboot. The simulator models that
 (mocks/machine.py: REASON and persistent scratch registers)."""
 
-import time
-
 from devsim import wait_for
 
 
@@ -27,11 +25,18 @@ def status(d):
     return d.get("/")[1]
 
 
+def settled(d, effect):
+    """The effect choice is saved (debounced) and the effect is past its
+    probe window (fx_probe.txt removed): only watchdog scratch 0 names it."""
+    wait_for(lambda: d.saved_state().get("effect") == effect and not (d.root / "fx_probe.txt").exists(), 15,
+             what="%s saved and past its probe window" % effect)
+
+
 def test_mpremote_interrupt_and_reset_does_not_quarantine(device):
     d = device
     d.post("/state", {"effect": "chase"})
     wait_for(lambda: status(d)["effect"]["running"] == "chase", 10)
-    time.sleep(3)  # saved, and past chase's probe window: scratch 0 names it
+    settled(d, "chase")  # scratch 0 names it
     # Switch to an effect that has never run and interrupt at once: it is in
     # its probe window, the state the hardware report hit.
     code, _ = d.request("PUT", "/effects/fresh", body=FRESH)
@@ -53,7 +58,7 @@ def test_reboot_endpoint_reports_a_deliberate_reset(device):
     d = device
     d.post("/state", {"effect": "solid"})
     wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
-    time.sleep(3)
+    settled(d, "solid")
     d.post("/reboot")
     wait_for(lambda: len(d.boots) >= 1, 20, what="reset")
     st = d.wait_http(30)
@@ -80,7 +85,7 @@ def test_genuine_late_hang_is_quarantined_via_scratch(device):
     d = device
     code, _ = d.request("PUT", "/effects/latehang?activate=1", body=LATE_HANG)
     assert code == 200
-    time.sleep(3)  # state saved (debounce), probe cleared after 30 frames
+    settled(d, "latehang")  # saved, and past the 30-frame probe window before it hangs at 4 s
     wait_for(lambda: len(d.boots) >= 1, 40, what="watchdog reset")
     assert d.boots[0] == "watchdog reset"
     st = d.wait_http(30)

@@ -1,0 +1,96 @@
+{
+ "frame": "y up, y=0 lowest LED, y=1 highest LED; x,z same units; origin on trunk axis; +x towards the first (front) view; right-handed",
+ "height_m_assumed": 1.75,
+ "views": [
+  "clip3",
+  "clip1",
+  "clip2",
+  "clip4",
+  "clip5"
+ ],
+ "focal_px": [
+  1641.8687329763666
+ ],
+ "distortion": [
+  [
+   -0.021314173983162817,
+   0.0
+  ]
+ ],
+ "median_reproj_px": 0.6524777680167283,
+ "cameras_tree_frame": [
+  [
+   1.7658842488443234,
+   0.1915350960639466,
+   5.790573344341997e-17
+  ],
+  [
+   -0.9302561735892517,
+   0.17268493099019125,
+   -1.4716015942437848
+  ],
+  [
+   -0.9354768549475032,
+   0.17320159007542293,
+   -1.4868739573808951
+  ],
+  [
+   1.2363335034882772,
+   0.1669565315043881,
+   1.289333239871648
+  ],
+  [
+   -1.1966276911224623,
+   0.19487393789394053,
+   1.280643949371203
+  ]
+ ],
+ "views_per_led": [
+  47,
+  104,
+  149,
+  148,
+  43,
+  9
+ ],
+ "log": [
+  "f0=1152: start pair clip3+clip1 failed (PnP failed for clip5)",
+  "f0=1152: focal [1623.], median reproj 0.80px",
+  "f0=1632: focal [1623.], median reproj 0.80px",
+  "f0=2304: start pair clip3+clip1 failed (PnP failed for clip5)",
+  "f0=2304: focal [1623.], median reproj 0.80px",
+  "f0=3072: start pair clip3+clip1 failed (PnP failed for clip5)",
+  "f0=3072: start pair clip3+clip2 failed (PnP failed for clip5)",
+  "f0=3072: focal [1637.], median reproj 0.99px",
+  "reject round 0: threshold 6.0px, inliers 961",
+  "reject round 1: threshold 6.0px, inliers 956",
+  "reject round 2: threshold 6.0px, inliers 956",
+  "60 LEDs triangulated at under 3 degrees (near-duplicate viewpoints): placed along their rays by the wire prior",
+  "wire prior: pitch 0.0279 units (66.1px), 211 LEDs placed by single view or interpolation"
+ ],
+ "detections": [
+  "clip3_detections.json",
+  "clip1_detections.json",
+  "clip2_detections.json",
+  "clip4_detections.json",
+  "clip5_detections.json"
+ ],
+ "dropped_views": [],
+ "duplicate_viewpoints": [
+  {
+   "views": [
+    "clip1",
+    "clip2"
+   ],
+   "median_shift": 0.010451660360652183,
+   "shared": 221
+  }
+ ],
+ "capture": {
+  "date": "2026-10-18",
+  "method": "tree turned in front of a fixed phone",
+  "camera": "phone main lens at 1x, 1080x1920 portrait, 59 fps, stabilisation on",
+  "clips": 5,
+  "decoder": "calibrate.py decode-video (full resolution, all frames)"
+ }
+}

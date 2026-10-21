@@ -82,7 +82,9 @@ class Device:
             "HTTP_PORT": self.port,
             "HTTP_TOKEN": token,
             "LED_COUNT": 500,
-            "TRIAL_HEALTHY_S": 5,
+            # Healthy for 1 s confirms a trial (the device default is 60 s).
+            # Tests that act during a trial ask for a longer window.
+            "TRIAL_HEALTHY_S": 1,
             "TRIAL_DEADLINE_S": 25,
             "UPDATE_CHECK_HOURS": 0,
         }
@@ -114,6 +116,13 @@ class Device:
         r = mp_exec(self.root, "import bootmgr\nbootmgr.install_file('_usb.bin')\nimport os\nos.remove('_usb.bin')")
         if r.returncode != 0:
             raise RuntimeError(f"USB install failed:\n{r.stdout}\n{r.stderr}")
+
+    def saved_state(self):
+        """/state.json as the firmware last saved it (debounced), or {}."""
+        try:
+            return json.loads((self.root / "state.json").read_text())
+        except (OSError, ValueError):
+            return {}
 
     def boot_state(self):
         try:
