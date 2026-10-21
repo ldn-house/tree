@@ -22,6 +22,9 @@ EFFECTS = [
     "snowfall",
     "pong",
     "space_invaders",
+    "level_up",
+    "beacon",
+    "tetris",
     "fire",
     "lightning",
 ]

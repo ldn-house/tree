@@ -80,9 +80,8 @@ def test_r2h3_invalid_power_settings_never_reach_the_output(make_device, bundles
     assert st["power"]["ma_per_channel"] == 8  # the rejected values are not used
     d.post("/state", {"effect": "solid", "brightness": 255})
     wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
-    time.sleep(0.5)
-    p = status(d)["power"]
-    assert p["capped"] and p["estimated_a"] <= p["limit_a"] == 1.5, p  # computed from the wire bytes
+    p = wait_for(lambda: (lambda p: p if p["capped"] else None)(status(d)["power"]), 5, what="capped")
+    assert p["estimated_a"] <= p["limit_a"] == 1.5, p  # computed from the wire bytes
 
 
 def test_r2m6_reserve_is_built_after_a_healthy_boot(device):

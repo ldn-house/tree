@@ -1223,6 +1223,50 @@ def r3m3_interrupted_discovery_is_retried():
     assert "homeassistant/number/xmas_tree/param_gone2/config" in bus.sent
 
 
+@test
+def reserve_build_waits_out_calibration_playback():
+    """Each reserve step is a 4 KB flash write; on the Pico an erase stops
+    all code for tens of ms, so a build already running pauses while
+    calibration plays (one that hasn't started isn't begun then)."""
+    import asyncio
+
+    from app import supervisor
+
+    class Cal:
+        playing_now = False
+
+        def playing(self):
+            return self.playing_now
+
+    class Rt:
+        calib = Cal()
+
+    sup = supervisor.Supervisor(Rt())
+    steps = []
+
+    def fake_steps():
+        for i in range(4):
+            steps.append(i)
+            if i == 0:
+                Rt.calib.playing_now = True  # playback starts after the first block
+            yield
+
+    real = bootmgr.reserve_steps
+    bootmgr.reserve_steps = fake_steps
+    try:
+        async def main():
+            t = asyncio.create_task(sup._reserve())
+            await asyncio.sleep_ms(700)
+            assert steps == [0], steps  # paused for the whole playback
+            Rt.calib.playing_now = False
+            await asyncio.wait_for(t, 3)
+            assert steps == [0, 1, 2, 3], steps
+
+        asyncio.run(main())
+    finally:
+        bootmgr.reserve_steps = real
+
+
 gc.collect()
 print("%d passed, %d failed" % (passed[0], len(failures)))
 if failures:
