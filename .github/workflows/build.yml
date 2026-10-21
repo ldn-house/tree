@@ -18,6 +18,9 @@ on:
       shards:
         description: "Firmware test shards (1 runs the suite serially, e.g. to time it)"
         default: "4"
+      scope:
+        description: "full, or effects (only the tests an effects-only pull request runs)"
+        default: full
 
 permissions:
   contents: read
@@ -79,8 +82,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           mode=full
+          [ "$SCOPE" = effects ] && mode=effects
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             # One record per changed file; a rename counts its old path too
             # (moving a test out of tests/ is not an effects-only change).

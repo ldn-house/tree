@@ -15,19 +15,20 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-# Seconds per file on a GitHub-hosted ubuntu-latest runner (pytest
-# --durations, summed per file). Re-measure when a file grows a lot.
+# Seconds per file on a GitHub-hosted ubuntu-latest runner (the shards'
+# --durations output, summed per file; measured 2026-10-21). test_heap.py
+# grows by ~24 s per registered effect. Re-measure when a file grows a lot.
 SECONDS = {
-    "test_heap.py": 330,
-    "test_mqtt.py": 185,
-    "test_updates.py": 127,
-    "test_runtime.py": 120,
-    "test_review1.py": 100,
-    "test_recovery_compat.py": 74,
-    "test_calibration.py": 47,
-    "test_real_effects.py": 43,
-    "test_review2.py": 42,
-    "test_resets.py": 40,
+    "test_heap.py": 425,
+    "test_mqtt.py": 130,
+    "test_updates.py": 105,
+    "test_runtime.py": 90,
+    "test_review1.py": 85,
+    "test_recovery_compat.py": 62,
+    "test_real_effects.py": 46,
+    "test_review2.py": 36,
+    "test_calibration.py": 30,
+    "test_resets.py": 30,
     "test_units.py": 3,
     "test_build_cache.py": 1,
     "test_output_copy.py": 1,
@@ -54,12 +55,12 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "full"
     files = sorted(p.name for p in HERE.glob("test_*.py"))
     if mode == "effects":
-        groups = [[f for f in EFFECTS if f in files]]
+        groups = plan([f for f in EFFECTS if f in files], 2)  # the heap campaign alone, then the rest
     elif mode == "full":
         groups = plan(files, int(sys.argv[2]) if len(sys.argv) > 2 else 4)
     else:
         sys.exit("usage: shards.py full [N] | effects")
-    include = [{"shard": "%d/%d" % (i + 1, len(groups)) if mode == "full" else "effects only",
+    include = [{"shard": "%d/%d" % (i + 1, len(groups)) if mode == "full" else "effects %d/%d" % (i + 1, len(groups)),
                 "files": " ".join("tests/firmware/" + f for f in g)} for i, g in enumerate(groups)]
     print(json.dumps({"include": include}))
 
