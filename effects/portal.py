@@ -1,16 +1,20 @@
 """Portal: a box falls through a pair of portals, faster and faster.
 
-A blue portal glows in a ring round the base of the tree and an orange
-one in a ring higher up, each with a slow swirl. A box (a cube of light,
-flat-lit with hard edges) drops out of the orange portal, falls down the
-front of the tree into the blue one and comes straight back out of the
-orange one, keeping its speed: one continuous fall under gravity that
-wraps through the portals, so every pass is quicker than the last (the
-infinite-fall trick). It is clipped at the portal planes, so it sinks
-into one and emerges from the other, and a motion trail grows behind it
-as it speeds up. On its last pass into the blue portal the tree gives
-one flash, everything fades out, and after a moment of dark the portals
-open again.
+A blue portal glows in a ring low on the tree and an orange one in a
+ring higher up, each with a slow swirl. A box (a cube of light, flat-lit
+with hard edges) drops out of the orange portal, falls straight down the
+middle of the tree into the blue one and comes straight back out of the
+orange one, keeping its speed: one continuous fall that wraps through the
+portals, so every pass is quicker than the last (the infinite-fall
+trick). It is clipped at the portal planes, so it sinks into one and
+emerges from the other. As it speeds up it is motion-blurred into a
+streak, and at top speed into a steady beam between the portals. On its
+last pass into the blue portal a wave of light rises up the tree from it,
+everything fades out, and after a moment of dark the portals open again.
+
+The portals and the fall share one vertical axis, fitted to the trunk
+from the coordinates (circle centres of height slices), so the box falls
+through the middle of both rings whatever the calibration's origin.
 
 One build-up, climax and fade fits exactly in PERIOD_MS, which is also
 DURATION_MS: an auto-cycle visit at default speed plays it once, a locked
@@ -18,10 +22,11 @@ effect repeats it with no visible restart, and the web export stores it
 as an exact loop.
 """
 
+import math
 from array import array
 
 from effects._output import budget_for_current
-from effects._util import ONE, SIN, Layout, Param, Phase
+from effects._util import SIN, Param, Phase
 
 NAME = "portal"
 PERIOD_MS = 19000  # one cycle at speed 1
@@ -32,110 +37,248 @@ PARAMS = {
 NEEDS_COORDS = True
 
 # Timeline, ms at speed 1.
-OPEN_MS = 1200  # portals fade in
-FALL_MS = 13000  # the whole accelerating fall
-PASSES = 17  # times through the portals (the last pass is ~0.4 s)
-ATTACK_MS = 150  # flash rise
-FLASH_MS = 1400  # flash settle
-DIP_MS = 350  # portals dim just before the flash, for contrast
-FADE_MS = 1300  # portals fade out after the flash starts
+OPEN_MS = 700  # portals fade in
+FALL_MS = 16200  # the whole accelerating fall
+# Passes per second through the portals at points of the fall (ms into
+# it), interpolated exponentially: most of the time goes to the build, and
+# the last two seconds are much the fastest. Scaled so the fall is a whole
+# number of passes.
+RATE = ((0, 0.8), (4000, 1.05), (8000, 1.45), (11000, 1.95), (13000, 2.45),
+        (14500, 3.0), (15300, 4.0), (15800, 5.5), (FALL_MS, 9.0))
+STEPS = 512  # distance table resolution over the fall
+DIP_MS = 250  # portals dim just before the end of the fall, for contrast
+WAVE_MS = 1000  # the closing wave climbs from the blue portal to the top
+ATTACK_MS = 160  # wave rise
+FADE_MS = 900  # portals fade out after the fall
 
 # Geometry, tree heights.
-BLUE_BAND = 0.1  # blue portal: LEDs below this height
-ORANGE_BAND = (0.68, 0.76)  # orange portal: outer LEDs in this band
-RING_R = 0.5  # portal rings use LEDs beyond this share of the local radius
-Y_TOP = 0.72  # the box emerges from the orange portal here
-Y_BOT = 0.05  # and sinks into the blue one here
-PATH_R = 0.7  # the box falls at this share of the cone's radius, in front
+AXIS_FROM = 0.1  # fit the trunk axis to slices above this (the base is ragged)
+AXIS_SLICE = 0.05
+BLUE_BAND = (0.10, 0.18)  # portal rings: LEDs in this height band...
+ORANGE_BAND = (0.53, 0.61)
+RING_RAD = (0.78, 1.28)  # ...at this share of the band's median radius
+PATH_D = 0.05  # the box falls this far in front of the axis (+z)
 BOX = 0.075  # cube half-size
 EDGE = 0.02  # soft edge outside the cube
-EXPOSURE_MS = 90  # trail length = distance fallen in this long
+WAVE_W = 0.12  # half-width of the closing wave
+
+# Motion blur. The streak behind the cube grows as the pass rate to the
+# fourth and fills the whole column at BEAM_RATE, so from there on every LED
+# between the portals is steadily lit (a beam) instead of blinking at the
+# pass rate. The streak is drawn at 1 - HEAD of the cube's level, and the
+# cube shows on top of it, fading out above HEAD_RATE as
+# (HEAD_RATE / rate)^6: the cube stays visible as it speeds into the beam,
+# no LED is modulated by more than about a tenth above 4 passes a second,
+# and the beam brightens to the cube's level as the cube dissolves into it.
+BEAM_RATE = 3.0
+HEAD = 0.55
+HEAD_RATE = 3.0
 
 BLUE = (0, 110, 255)
 ORANGE = (255, 45, 0)
 CUBE = (215, 222, 235)
-FLASH = (255, 235, 210)
+WAVE = (200, 225, 255)
 PORTAL = 110  # /256 portal glow; the swirl adds up to SWIRL_AMP
 SWIRL_AMP = 70
-SWIRL_MS = 2400  # one turn of the swirl
-TRAIL_LV = 140  # /256 at the head of the trail, fading to nothing
-DIP = 90  # /256 the portals dim to before the flash
-PEAK_SHARE = 0.95  # flash peak: about the power budget
-RBINS = 16  # radius profile bins
+SWIRL_MS = 2400  # one turn of the swirl at rest...
+SWIRL_K = 0.5  # ...and SWIRL_K turns per pass during the fall,
+SWIRL_MAX = 2.0  # up to this many turns a second
+DIP = 110  # /256 the portals dim to at the end of the fall
+SHARE = 0.92  # beam and wave peaks: this share of the power budget
+
+F = 1024  # 1/1024 tree heights, the integer unit of render()
+
+
+def _axis(pts):
+    """Fit the trunk axis: centre x, z = (x0 + kx h, z0 + kz h), from the
+    algebraic circle fit of each height slice, weighted by its LED count."""
+    rows = []
+    h0 = AXIS_FROM
+    while h0 < 1.0:
+        sx = sz = 0.0
+        n = 0
+        sel = []
+        for p in pts:
+            if h0 <= p[1] < h0 + AXIS_SLICE:
+                sel.append(p)
+                sx += p[0]
+                sz += p[2]
+                n += 1
+        if n >= 6:
+            mx = sx / n
+            mz = sz / n
+            a = b = c = d = e = 0.0
+            for p in sel:
+                x = p[0] - mx
+                z = p[2] - mz
+                w = x * x + z * z
+                a += x * x
+                b += x * z
+                c += z * z
+                d += x * w
+                e += z * w
+            det = a * c - b * b
+            if det > 1e-12:
+                # Centre offset solves [a b; b c] [2u 2v] = [d e].
+                u = (d * c - b * e) / det / 2
+                v = (a * e - b * d) / det / 2
+                rows.append((h0 + AXIS_SLICE / 2, mx + u, mz + v, n))
+        h0 += AXIS_SLICE
+    if len(rows) < 2:
+        return 0.0, 0.0, 0.0, 0.0
+    sw = sh = shh = 0.0
+    for h, _, _, n in rows:
+        sw += n
+        sh += n * h
+        shh += n * h * h
+    mh = sh / sw
+    var = shh / sw - mh * mh
+    out = []
+    for k in (1, 2):
+        sv = shv = 0.0
+        for row in rows:
+            sv += row[3] * row[k]
+            shv += row[3] * row[0] * row[k]
+        mv = sv / sw
+        slope = (shv / sw - mh * mv) / var if var > 1e-9 else 0.0
+        out.append(mv - slope * mh)
+        out.append(slope)
+    return out[0], out[1], out[2], out[3]
 
 
 class Effect:
     def __init__(self, ctx):
         n = ctx.n
         self.n = n
-        lay = Layout(ctx)
-        known = lay.known
-        rm = lay.rmax
-        count = lay.count or n
-        # Local cone radius (85th percentile per height bin), tree heights.
-        radii = [[] for _ in range(RBINS)]
+        coords = ctx.coords or []
+        pts = []
+        known = bytearray(n)
+        for i in range(n):
+            c = coords[i] if i < len(coords) else None
+            if c is not None:
+                known[i] = 1
+                pts.append(c)
+        x0, kx, z0, kz = _axis(pts)
+        self.axis = (x0, kx, z0, kz)
+        pts = None
+        # Offsets from the axis at each LED's own height.
+        dxs = [0.0] * n
+        dzs = [0.0] * n
         for i in range(n):
             if known[i]:
-                radii[min(RBINS - 1, lay.h[i] * RBINS >> 12)].append(lay.r[i] * rm / ONE)
-        prof = [0.0] * RBINS
-        last = 0.3
-        for b in range(RBINS):
-            rs = radii[b]
-            if rs:
-                rs.sort()
-                last = rs[int(0.85 * (len(rs) - 1))]
-            prof[b] = last
-        radii = None
-        # Portal rings, with each LED's angle for the swirl (0..255).
-        blue = []
-        orange = []
-        for i in range(n):
-            if not known[i]:
-                continue
-            h = lay.h[i] / ONE
-            r = lay.r[i] * rm / ONE
-            if h < BLUE_BAND:
-                blue.append(i)
-            elif ORANGE_BAND[0] <= h < ORANGE_BAND[1]:
-                if r >= RING_R * prof[min(RBINS - 1, lay.h[i] * RBINS >> 12)]:
-                    orange.append(i)
-        self.rings = (array("H", blue), array("H", orange))
-        blue = orange = None
+                x, y, z = coords[i]
+                dxs[i] = x - (x0 + kx * y)
+                dzs[i] = z - (z0 + kz * y)
+
+        # Portal rings: a height band, and within it the LEDs near the
+        # band's median distance from the axis. Each LED's angle round the
+        # axis (0..255) drives the swirl.
+        rings = []
+        for lo, hi in (BLUE_BAND, ORANGE_BAND):
+            band = []
+            for i in range(n):
+                if known[i] and lo <= coords[i][1] < hi:
+                    band.append((math.sqrt(dxs[i] * dxs[i] + dzs[i] * dzs[i]), i))
+            band.sort()
+            med = band[len(band) // 2][0] if band else 0.0
+            rings.append(array("H", sorted(i for r, i in band
+                                           if RING_RAD[0] * med <= r <= RING_RAD[1] * med)))
+            band = None
+        self.rings = (rings[0], rings[1])
         self.ang = bytearray(n)
         for i in range(n):
-            self.ang[i] = lay.theta[i] >> 4
-        # LEDs within the cube's reach of the fall path (x = 0, z = PATH_R
-        # x the local radius, the front of the tree), with their offsets
-        # from it in 1/1024 tree heights.
-        reach = (BOX + EDGE) * 1024
-        sel = []
+            a = math.atan2(dzs[i], dxs[i]) / (2 * math.pi)
+            self.ang[i] = int(a * 256) & 255
+
+        # The fall runs from the middle of the orange band to the middle of
+        # the blue one, along the axis, PATH_D in front of it. LEDs within
+        # the cube's reach of that line, with their offsets.
+        self.y_top = int((ORANGE_BAND[0] + ORANGE_BAND[1]) / 2 * F)
+        self.y_bot = int((BLUE_BAND[0] + BLUE_BAND[1]) / 2 * F)
+        reach = BOX + EDGE
+        path = []
         for i in range(n):
             if not known[i]:
                 continue
-            y = lay.h[i] >> 2
-            x = lay.x[i] * rm / 4
-            z = lay.z[i] * rm / 4 - PATH_R * prof[min(RBINS - 1, lay.h[i] * RBINS >> 12)] * 1024
-            if -reach < x < reach and -reach < z < reach:
-                sel.append(i)
-                sel.append(y)
-                sel.append(int(x))
-                sel.append(int(z))
-        self.path = array("H", sel[0::4])
-        self.py = array("h", sel[1::4])
-        self.dx = array("h", sel[2::4])
-        self.dz = array("h", sel[3::4])
-        sel = None
-        self.y_top = int(Y_TOP * 1024)
-        self.y_bot = int(Y_BOT * 1024)
-        self.span = self.y_top - self.y_bot  # one pass, 1/1024 tree heights
-        self.total = PASSES * self.span  # distance fallen in FALL_MS
-        # Trail length = speed x EXPOSURE_MS; speed = 2 total t / FALL_MS^2.
-        self.trail_k = 2 * self.total * EXPOSURE_MS // FALL_MS
-        self.box = int(BOX * 1024)
-        self.edge = int(EDGE * 1024)
-        self.flash_t = OPEN_MS + FALL_MS
-        budget = budget_for_current()
-        self.peak_sum = int(PEAK_SHARE * budget / count)
+            y = int(coords[i][1] * F)
+            ox = dxs[i]
+            oz = dzs[i] - PATH_D
+            if self.y_bot <= y <= self.y_top and -reach < ox < reach and -reach < oz < reach:
+                ax = ox if ox >= 0 else -ox
+                az = oz if oz >= 0 else -oz
+                path.append((i, y, int((ax if ax > az else az) * F)))
+        self.path = array("H", [p[0] for p in path])
+        self.py = array("h", [p[1] for p in path])
+        self.pm = array("h", [p[2] for p in path])  # Chebyshev offset
+        dxs = dzs = None
+
+        span = self.y_top - self.y_bot  # one pass, 1/1024 tree heights
+        self.span = span
+        # Distance fallen (and swirl turned, /256 turns) at each of STEPS + 1
+        # points of the fall, from the pass rate keyframes.
+        cum = [0.0] * (STEPS + 1)
+        swc = [0.0] * (STEPS + 1)
+        dt = FALL_MS / STEPS
+        for k in range(STEPS):
+            tm = (k + 0.5) * dt
+            j = 0
+            while RATE[j + 1][0] < tm:
+                j += 1
+            (t0, r0), (t1, r1) = RATE[j], RATE[j + 1]
+            r = r0 * (r1 / r0) ** ((tm - t0) / (t1 - t0))
+            cum[k + 1] = cum[k] + r * dt / 1000
+            sw = SWIRL_K * r
+            sw = 1000 / SWIRL_MS if sw < 1000 / SWIRL_MS else SWIRL_MAX if sw > SWIRL_MAX else sw
+            swc[k + 1] = swc[k] + sw * dt * 256 / 1000
+        passes = max(1, int(cum[STEPS] + 0.5))
+        self.passes = passes
+        scale = 16 * passes * span / cum[STEPS]
+        self.dist = array("i", [int(c * scale + 0.5) for c in cum])  # 1/16 units
+        self.swf = array("H", [int(c + 0.5) for c in swc])
+        cum = swc = None
+        self.sw_open = OPEN_MS * 256 // SWIRL_MS
+        self.sw_end = self.sw_open + self.swf[STEPS]
+        self.v_end = (self.dist[STEPS] - self.dist[STEPS - 1]) * STEPS * 1000 // (16 * FALL_MS)
+        self.v_beam = int(BEAM_RATE * span)  # units/s
+        self.v_head = int(HEAD_RATE * span)
+        self.head = int(HEAD * 256)
+        self.box = int(BOX * F)
+        self.edge = int(EDGE * F)
+        self.s2 = 2 * self.box + self.edge  # integral of the cube's profile
+
+        # Power: the beam lights the whole column (the cube itself, only a
+        # few LEDs, goes to full on top of the streak); cap it, with the portals
+        # at their brightest, at SHARE of the budget. The wave is capped the
+        # same way at its fullest band.
+        budget = budget_for_current() * SHARE
+        portals = (len(rings[0]) * sum(BLUE) + len(rings[1]) * sum(ORANGE)) \
+            * (PORTAL + SWIRL_AMP) // 256
+        col = len(path) * sum(CUBE)
+        self.cube_max = max(0, min(256, int(256 * (budget - portals) / col))) if col else 256
+        path = None
+
+        top = 1.0 - (BLUE_BAND[0] + BLUE_BAND[1]) / 2
+        self.wave_reach = int((top + WAVE_W) * F)
+        self.wd = array("H", bytes(2 * n))  # height distance from the blue portal
+        bins = [0] * 66
+        for i in range(n):
+            if known[i]:
+                d = coords[i][1] * F - self.y_bot
+                d = int(d if d >= 0 else -d)
+                self.wd[i] = d
+                bins[min(65, d >> 4)] += 1
+        ww = int(WAVE_W * F)
+        self.ww = ww
+        worst = 1
+        for rho in range(0, self.wave_reach, 16):
+            s = 0
+            for b in range(66):
+                g = ww - abs(b * 16 + 8 - rho)
+                if g > 0:
+                    s += bins[b] * g
+            worst = max(worst, s // ww)
+        self.wave_max = min(256, int(256 * budget / (worst * sum(WAVE))))
+
         self.zero = bytearray(3 * n)
         self.known = known
         self.frame = None
@@ -151,8 +294,8 @@ class Effect:
             self.view = memoryview(frame)
         self.view[0:len(self.zero)] = self.zero
 
-        # Portal level: open, hold, dip before the flash, fade, dark rest.
-        ft = t - self.flash_t
+        # Portal level: open, hold, dip at the end of the fall, fade, rest.
+        ft = t - OPEN_MS - FALL_MS
         if t < OPEN_MS:
             master = 256 * t // OPEN_MS
         elif ft < -DIP_MS:
@@ -165,7 +308,18 @@ class Effect:
         else:
             master = 0
         if master:
-            sw = t * 256 // SWIRL_MS
+            # Swirl: steady while the portals open and close, speeding up
+            # with the fall in between.
+            tau = t - OPEN_MS
+            if tau < 0:
+                sw = t * 256 // SWIRL_MS
+            elif tau < FALL_MS:
+                n = tau * STEPS
+                k = n // FALL_MS
+                sw = self.swf[k + 1] - self.swf[k]
+                sw = self.sw_open + self.swf[k] + sw * (n - k * FALL_MS) // FALL_MS
+            else:
+                sw = self.sw_end + (tau - FALL_MS) * 256 // SWIRL_MS
             ang = self.ang
             for side in range(2):
                 r, g, b = ORANGE if side else BLUE
@@ -179,92 +333,135 @@ class Effect:
                     frame[k + 1] = g * lv >> 8
                     frame[k + 2] = b * lv >> 8
 
-        # The fall: distance under constant gravity, from rest, wrapping
-        # through the portals, so speed carries over from pass to pass.
+        # The fall, from the distance table, wrapping through the portals,
+        # so speed carries over from pass to pass. After the last pass the
+        # streak drains into the blue portal at the final speed.
         tau = t - OPEN_MS
         if 0 <= tau < FALL_MS:
-            dist = (tau * tau // FALL_MS) * self.total // FALL_MS
-            trail = self.trail_k * tau // FALL_MS
+            n = tau * STEPS
+            k = n // FALL_MS
+            dd = self.dist[k + 1] - self.dist[k]
+            dist = (self.dist[k] + dd * (n - k * FALL_MS) // FALL_MS) >> 4
+            v = dd * (STEPS * 1000 // 16) // FALL_MS  # 1/1024 tree heights a second
             p = dist // self.span  # passes completed
-            yb = self.y_top - (dist - p * self.span)
-            # Draw the box where it is, the part already through the blue
-            # portal (emerging below the orange one), and the part still
-            # coming out of the orange portal (the tail of the last pass).
-            self.cube(yb, trail, frame)
-            if p < PASSES - 1:
-                self.cube(yb + self.span, trail, frame)
-            if p > 0:
-                self.cube(yb - self.span, trail, frame)
+            self.fall(self.y_top - (dist - p * self.span), v, p, p < self.passes - 1, frame)
+        elif 0 <= tau - FALL_MS < 200:
+            yb = self.y_bot - self.v_end * (tau - FALL_MS) // 1000
+            if yb + self.span + self.box + self.edge > self.y_bot:
+                self.fall(yb, self.v_end, self.passes - 1, False, frame)
 
-        # The flash: one, as the box drops into the blue portal for good.
-        if 0 <= ft < ATTACK_MS + FLASH_MS:
+        # The closing wave: climbs from the blue portal as the box drops
+        # into it for good; each LED sees it pass once.
+        if 0 <= ft < WAVE_MS:
+            rho = self.wave_reach * ft // WAVE_MS
             if ft < ATTACK_MS:
-                q = 256 * ft // ATTACK_MS
+                amp = self.wave_max * ft // ATTACK_MS
             else:
-                q = (ATTACK_MS + FLASH_MS - ft) * 256 // FLASH_MS
-                q = q * q >> 8
-            r, g, b = FLASH
-            lv = self.peak_sum * q // (r + g + b)
-            lv = lv if lv < 256 else 256
-            fr = r * lv >> 8
-            fg = g * lv >> 8
-            fb = b * lv >> 8
+                q = (WAVE_MS - ft) * 256 // (WAVE_MS - ATTACK_MS)
+                amp = self.wave_max * (q * q >> 8) >> 8
+            ww = self.ww
+            wd = self.wd
             known = self.known
+            wr, wg, wb = WAVE
             for i in range(self.n):
                 if known[i]:
-                    k = 3 * i
-                    v = frame[k] + fr
-                    frame[k] = v if v < 255 else 255
-                    v = frame[k + 1] + fg
-                    frame[k + 1] = v if v < 255 else 255
-                    v = frame[k + 2] + fb
-                    frame[k + 2] = v if v < 255 else 255
+                    d = wd[i] - rho
+                    d = d if d >= 0 else -d
+                    if d < ww:
+                        lv = amp * (ww - d) // ww
+                        k = 3 * i
+                        v = frame[k] + (wr * lv >> 8)
+                        frame[k] = v if v < 255 else 255
+                        v = frame[k + 1] + (wg * lv >> 8)
+                        frame[k + 1] = v if v < 255 else 255
+                        v = frame[k + 2] + (wb * lv >> 8)
+                        frame[k + 2] = v if v < 255 else 255
 
-    def cube(self, yb, trail, frame):
-        """Draw the cube centred at height yb (1/1024 tree heights), with a
-        trail above it, clipped to the space between the portals."""
-        top = self.y_top
-        bot = self.y_bot
-        if yb + self.box + trail < bot or yb - self.box > top:
-            return
+    def fall(self, yb, v, p, more, frame):
+        """Draw the cube centred at height yb (1/1024 tree heights), falling
+        at v (1/1024 tree heights a second) after p whole passes, with its
+        streak, and its copies one and two passes behind (still sinking into
+        the blue portal) and, if `more`, one ahead (already out of the
+        orange one)."""
         s = self.box
         e = self.edge
         se = s + e
+        s2 = self.s2
+        span = self.span
+        # Streak length: grows as the pass rate to the fourth, the whole
+        # column at BEAM_RATE. Cube weight: HEAD, fading as
+        # (HEAD_RATE / rate)^6.
+        x = v * 256 // self.v_beam
+        if x >= 256:
+            lt = span
+        else:
+            x = x * x >> 8
+            lt = span * (x * x >> 8) >> 8
+        lt = lt if lt > 0 else 1
+        den = lt if lt < s2 else s2
+        w = self.head
+        if v > self.v_head:
+            x = self.v_head * 256 // v
+            x = x * x * x >> 16
+            w = w * x * x >> 16
+        cmax = self.cube_max
+        # Copies at yb - m span: m = -1 is the next pass, m = 1, 2 earlier.
+        m_lo = -1 if more else 0
+        m_hi = p if p < 2 else 2
         cr, cg, cb = CUBE
         path = self.path
         py = self.py
-        dx = self.dx
-        dz = self.dz
+        pm = self.pm
         for j in range(len(path)):
-            y = py[j]
-            if y < bot or y > top:
+            hm = pm[j]
+            if hm >= se:
                 continue
-            # Chebyshev distance: the largest of the axis offsets, so the
-            # lit region is a cube rather than a ball.
-            ax = dx[j]
-            ax = ax if ax >= 0 else -ax
-            az = dz[j]
-            az = az if az >= 0 else -az
-            m = ax if ax > az else az
-            if m >= se:
+            # Streak: (P(d) - P(d - L)) / L, the cube's trapezoid profile
+            # (1 inside s, ramping to 0 over e) averaged over its last L of
+            # travel, normalised to 1 where the streak is solid. Cube: the
+            # profile itself.
+            cov = 0
+            hd = 0
+            d = py[j] - yb + m_lo * span
+            for m in range(m_lo, m_hi + 1):
+                if -se < d < lt + se:
+                    if d >= se and d - lt <= -se:
+                        cov += s2
+                    else:
+                        cov += _prim(d, s, e, se) - _prim(d - lt, s, e, se)
+                    if d < se:
+                        ad = d if d >= 0 else -d
+                        hd += 256 if ad <= s else (se - ad) * 256 // e
+                d += span
+            if cov <= 0:
                 continue
-            d = y - yb
-            ad = d if d >= 0 else -d
-            mm = m if m > ad else ad
-            if mm < s:
-                lv = 256
-            elif mm < se:
-                lv = (se - mm) * 256 // e
-            elif d > 0 and trail > 0 and d < s + trail and m < s:
-                # Motion trail above the cube, fading with distance.
-                lv = (s + trail - d) * TRAIL_LV // trail
-            else:
-                continue
+            cov = cov * 256 // den
+            cov = cov if cov < 256 else 256
+            hd = hd if hd < 256 else 256
+            lv = (cov * (256 - w) * cmax >> 16) + (hd * w >> 8)
+            if hm > s:
+                lv = lv * (se - hm) // e
             i = path[j]
             k = 3 * i
-            v = frame[k] + (cr * lv >> 8)
-            frame[k] = v if v < 255 else 255
-            v = frame[k + 1] + (cg * lv >> 8)
-            frame[k + 1] = v if v < 255 else 255
-            v = frame[k + 2] + (cb * lv >> 8)
-            frame[k + 2] = v if v < 255 else 255
+            c = frame[k] + (cr * lv >> 8)
+            frame[k] = c if c < 255 else 255
+            c = frame[k + 1] + (cg * lv >> 8)
+            frame[k + 1] = c if c < 255 else 255
+            c = frame[k + 2] + (cb * lv >> 8)
+            frame[k + 2] = c if c < 255 else 255
+
+
+def _prim(u, s, e, se):
+    """Integral up to u of the cube's vertical profile: 1 for |u| < s,
+    ramping linearly to 0 at |u| = s + e."""
+    if u <= -se:
+        return 0
+    if u < -s:
+        w = u + se
+        return w * w // (2 * e)
+    if u < s:
+        return (e >> 1) + u + s
+    if u < se:
+        w = se - u
+        return 2 * s + e - w * w // (2 * e)
+    return 2 * s + e

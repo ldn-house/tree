@@ -85,9 +85,9 @@ Measured with the calibrated 500-LED coordinates, 20 fps, seed 0. Gzip bytes are
 | level_up | 160 | 8 | 240,000 | 4,356 |
 | beacon | 204 | 10.2 | 306,000 | 92,672 |
 | tetris | 160 | 8 | 240,000 | 4,498 |
-| portal | 380 | 19 | 570,000 | 50,293 |
+| portal | 380 | 19 | 570,000 | 71,737 |
 
-The complete archive is approximately **514 KB** (513,660 bytes with the 16 current effects, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
+The complete archive is approximately **536 KB** (535,809 bytes with the 16 current effects, including the manifest; 342,686 bytes in the initial run with 11). Its exact size also depends on the recorded source commit. Preview images are CI artifacts/PR attachments, not release assets.
 
 ## Build-time download
 
