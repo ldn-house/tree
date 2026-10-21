@@ -82,7 +82,9 @@ class Device:
             "HTTP_PORT": self.port,
             "HTTP_TOKEN": token,
             "LED_COUNT": 500,
-            "TRIAL_HEALTHY_S": 5,
+            # Healthy for 1 s confirms a trial (the device default is 60 s).
+            # Tests that act during a trial ask for a longer window.
+            "TRIAL_HEALTHY_S": 1,
             "TRIAL_DEADLINE_S": 25,
             "UPDATE_CHECK_HOURS": 0,
         }

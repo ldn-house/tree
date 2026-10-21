@@ -34,6 +34,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,10 +80,27 @@ def recovery_api(app_dir: Path):
 
 
 def mpy_cross(src: Path, name: str, out: Path):
+    # $MPY_CACHE_DIR (the tests set it) reuses output compiled from the same
+    # source, module name and mpy-cross version; builds without it are
+    # unchanged.
+    cache = os.environ.get("MPY_CACHE_DIR")
+    if cache:
+        from importlib.metadata import version
+
+        h = hashlib.sha256(b"\0".join([version("mpy-cross").encode(), b"-s", name.encode(), src.read_bytes()]))
+        hit = Path(cache) / (h.hexdigest() + ".mpy")
+        if hit.exists():
+            shutil.copyfile(hit, out)
+            return
     cmd = [sys.executable, "-m", "mpy_cross", "-s", name, "-o", str(out), str(src)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"mpy-cross failed for {name}:\n{r.stderr or r.stdout}")
+    if cache:
+        hit.parent.mkdir(parents=True, exist_ok=True)
+        tmp = hit.with_suffix(".%d.tmp" % os.getpid())
+        shutil.copyfile(out, tmp)
+        os.replace(tmp, hit)  # atomic: concurrent builds may share the cache
 
 
 def effect_meta(effects_dir: Path):
