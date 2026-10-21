@@ -32,6 +32,10 @@ SIGNING_KEY = "test-signing-key"
 
 
 def pytest_collection_modifyitems(config, items):
+    if os.environ.get("CI"):  # a CI job must never pass by skipping everything
+        for exe in (devsim.MICROPYTHON, os.environ.get("MICROPYTHON32")):
+            if not exe or not shutil.which(exe):
+                raise pytest.UsageError(f"CI: MicroPython not found ({exe!r}); the firmware tests need it")
     if not shutil.which(devsim.MICROPYTHON):
         skip = pytest.mark.skip(reason="micropython (unix port) not installed")
         for item in items:
@@ -39,6 +43,15 @@ def pytest_collection_modifyitems(config, items):
 
 
 # -- bundles -----------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def mpy_cache(tmp_path_factory):
+    """Bundle builds reuse mpy-cross output across the session (and across
+    runs, if MPY_CACHE_DIR is already set): tools/build_firmware.py keys it
+    on the source, module name and mpy-cross version."""
+    if not os.environ.get("MPY_CACHE_DIR"):
+        os.environ["MPY_CACHE_DIR"] = str(tmp_path_factory.mktemp("mpy-cache"))
 
 
 def _patched_app(tmp: Path, name: str, patch) -> Path:
@@ -52,7 +65,7 @@ def _patched_app(tmp: Path, name: str, patch) -> Path:
 def bundles(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("bundles")
 
-    gens = {"v1": 1000, "v2": 2000, "v2-signed": 2000, "crash": 3000, "sick": 3000}
+    gens = {"v1": 1000, "v2": 2000, "v2-signed": 2000, "crash": 3000, "sick": 3000, "quick": 1000}
 
     def build(name, **kw):
         return devsim.build_bundle(tmp / name, version=name, generation=gens[name], **kw)
@@ -65,8 +78,18 @@ def bundles(tmp_path_factory):
         p = d / "cfg.py"
         p.write_text(p.read_text() + "\nMQTT_BROKER = '127.0.0.1'\nMQTT_PORT = 9\n")
 
+    def quick(d):  # shorter hard-coded start-up periods, for the tests that wait them out
+        p = d / "supervisor.py"
+        s = p.read_text()
+        for a, b in (("HEALTHY_S = 30\n", "HEALTHY_S = 12\n"),  # still longer than the 8 s watchdog
+                     ("self._reserve_at = 30 - RESERVE_EVERY_S", "self._reserve_at = 6 - RESERVE_EVERY_S")):
+            assert s.count(a) == 1, a  # the firmware changed: update this patch
+            s = s.replace(a, b)
+        p.write_text(s)
+
     return {
         "v1": build("v1"),
+        "quick": build("quick", app=_patched_app(tmp, "quick", quick)),
         "v2": build("v2"),
         "v2-signed": build("v2-signed", key=SIGNING_KEY),
         "crash": build("crash", app=_patched_app(tmp, "crash", crash)),
@@ -200,8 +223,10 @@ class Bus:
         return devsim.wait_for(find, timeout, what=f"MQTT {topic}")
 
     def close(self):
-        self.c.loop_stop()
+        # Disconnect first: loop_stop() alone waits out the network loop's
+        # ~1 s select timeout.
         self.c.disconnect()
+        self.c.loop_stop()
 
 
 @pytest.fixture
