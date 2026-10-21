@@ -77,10 +77,14 @@ jobs:
         run: |
           tests=tests/firmware
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > "$RUNNER_TEMP/changed.txt"
+            # One record per changed file; a rename counts its old path too
+            # (moving a test out of tests/ is not an effects-only change).
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+              --jq '.[] | .filename + "\t" + (.previous_filename // "")' > "$RUNNER_TEMP/files.tsv"
+            tr '\t' '\n' < "$RUNNER_TEMP/files.tsv" | sed '/^$/d' > "$RUNNER_TEMP/changed.txt"
             echo "Changed files:"; cat "$RUNNER_TEMP/changed.txt"
             # The API lists at most 3000 files; at that size, run everything.
-            if [ "$(wc -l < "$RUNNER_TEMP/changed.txt")" -lt 3000 ] &&
+            if [ "$(wc -l < "$RUNNER_TEMP/files.tsv")" -lt 3000 ] &&
                ! grep -Ev '^(effects/|renders/|docs/)|^[^/]+\.md$' "$RUNNER_TEMP/changed.txt" >/dev/null; then
               # The bundle built from effects/ (every effect on the device,
               # the board-sized heap campaign) and the firmware's copy of
