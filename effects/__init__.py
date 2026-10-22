@@ -24,6 +24,7 @@ EFFECTS = [
     "level_up",
     "beacon",
     "tetris",
+    "portal",
 ]
 
 DISABLED = [
