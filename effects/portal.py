@@ -57,10 +57,11 @@ FADE_MS = 900  # portals fade out after the fall
 AXIS_FROM = 0.1  # fit the trunk axis to slices above this (the base is ragged)
 AXIS_SLICE = 0.05
 BLUE_BAND = (0.10, 0.18)  # portal rings: LEDs in this height band...
-ORANGE_BAND = (0.55, 0.64)
+ORANGE_BAND = (0.62, 0.74)
 RING_RAD = ((0.78, 1.28), (0.7, 1.35))  # ...at this share of its median radius (blue, orange)
 PATH_D = 0.05  # the box falls this far in front of the axis (+z)
-BOX = 0.075  # cube half-size
+BOX = 0.075  # cube half-size...
+BOX_R = 0.16  # ...where the tree's radius is at most this; in proportion below
 EDGE = 0.02  # soft edge outside the cube
 WAVE_W = 0.12  # half-width of the closing wave
 
@@ -196,9 +197,9 @@ class Effect:
 
         # The fall runs from the middle of the orange band to the middle of
         # the blue one, along the axis, PATH_D in front of it. LEDs within
-        # the cube's reach of that line, with their offsets. The cube's
-        # width is in proportion to the tree's radius, the ring radii
-        # interpolated by height, and never under BOX: the lower trunk has
+        # the cube's reach of that line, with their offsets. Below BOX_R the
+        # cube's width is in proportion to the tree's radius (the ring radii
+        # interpolated by height), and never under BOX: the lower trunk has
         # hardly any LEDs near the axis, and a cube of fixed width would
         # vanish well before it reached the blue portal.
         yo = (ORANGE_BAND[0] + ORANGE_BAND[1]) / 2
@@ -212,8 +213,7 @@ class Effect:
             y = coords[i][1]
             if not yb <= y <= yo:
                 continue
-            g = (meds[0] + (meds[1] - meds[0]) * (y - yb) / (yo - yb)) / meds[1] \
-                if meds[1] > 0 else 1.0
+            g = (meds[0] + (meds[1] - meds[0]) * (y - yb) / (yo - yb)) / BOX_R
             g = g if g > 1.0 else 1.0
             ox = dxs[i] / g
             oz = (dzs[i] - PATH_D) / g
