@@ -1,16 +1,18 @@
 """Portal: a box falls through a pair of portals, faster and faster.
 
 A blue portal glows in a ring low on the tree and an orange one in a
-ring higher up, each with a slow swirl. A box (a cube of light, flat-lit
-with hard edges) drops out of the orange portal, falls straight down the
-middle of the tree into the blue one and comes straight back out of the
-orange one, keeping its speed: one continuous fall that wraps through the
-portals, so every pass is quicker than the last (the infinite-fall
-trick). It is clipped at the portal planes, so it sinks into one and
-emerges from the other. As it speeds up it is motion-blurred into a
-streak, and at top speed into a steady beam between the portals. On its
-last pass into the blue portal a wave of light rises up the tree from it,
-everything fades out, and after a moment of dark the portals open again.
+ring higher up, each with a slow swirl. A box (a companion cube of
+light, flat-lit with hard edges and a pink heart at its centre) drops out
+of the orange portal, falls straight down the middle of the tree into the
+blue one and comes straight back out of the orange one, keeping its
+speed: one continuous fall that wraps through the portals, so every pass
+is quicker than the last (the infinite-fall trick). It is clipped at the
+portal planes, so while it is part-way through it shows in both places:
+sinking into the blue portal and emerging from the orange one. As it
+speeds up it is motion-blurred into a streak, and at top speed into a
+steady beam between the portals. On its last pass into the blue portal a
+wave of light rises up the tree from it, everything fades out, and after
+a moment of dark the portals open again.
 
 The portals and the fall share one vertical axis, fitted to the trunk
 from the coordinates (circle centres of height slices), so the box falls
@@ -55,8 +57,8 @@ FADE_MS = 900  # portals fade out after the fall
 AXIS_FROM = 0.1  # fit the trunk axis to slices above this (the base is ragged)
 AXIS_SLICE = 0.05
 BLUE_BAND = (0.10, 0.18)  # portal rings: LEDs in this height band...
-ORANGE_BAND = (0.53, 0.61)
-RING_RAD = (0.78, 1.28)  # ...at this share of the band's median radius
+ORANGE_BAND = (0.55, 0.64)
+RING_RAD = ((0.78, 1.28), (0.7, 1.35))  # ...at this share of its median radius (blue, orange)
 PATH_D = 0.05  # the box falls this far in front of the axis (+z)
 BOX = 0.075  # cube half-size
 EDGE = 0.02  # soft edge outside the cube
@@ -77,6 +79,7 @@ HEAD_RATE = 3.0
 BLUE = (0, 110, 255)
 ORANGE = (255, 45, 0)
 CUBE = (215, 222, 235)
+PINK = (255, 90, 190)  # the heart; close to CUBE's level, so moving it is no flash
 WAVE = (200, 225, 255)
 PORTAL = 110  # /256 portal glow; the swirl adds up to SWIRL_AMP
 SWIRL_AMP = 70
@@ -174,15 +177,16 @@ class Effect:
         # band's median distance from the axis. Each LED's angle round the
         # axis (0..255) drives the swirl.
         rings = []
-        for lo, hi in (BLUE_BAND, ORANGE_BAND):
+        meds = []
+        for (lo, hi), (rlo, rhi) in zip((BLUE_BAND, ORANGE_BAND), RING_RAD):
             band = []
             for i in range(n):
                 if known[i] and lo <= coords[i][1] < hi:
                     band.append((math.sqrt(dxs[i] * dxs[i] + dzs[i] * dzs[i]), i))
             band.sort()
             med = band[len(band) // 2][0] if band else 0.0
-            rings.append(array("H", sorted(i for r, i in band
-                                           if RING_RAD[0] * med <= r <= RING_RAD[1] * med)))
+            meds.append(med)
+            rings.append(array("H", sorted(i for r, i in band if rlo * med <= r <= rhi * med)))
             band = None
         self.rings = (rings[0], rings[1])
         self.ang = bytearray(n)
@@ -192,24 +196,36 @@ class Effect:
 
         # The fall runs from the middle of the orange band to the middle of
         # the blue one, along the axis, PATH_D in front of it. LEDs within
-        # the cube's reach of that line, with their offsets.
-        self.y_top = int((ORANGE_BAND[0] + ORANGE_BAND[1]) / 2 * F)
-        self.y_bot = int((BLUE_BAND[0] + BLUE_BAND[1]) / 2 * F)
-        reach = BOX + EDGE
+        # the cube's reach of that line, with their offsets. The cube's
+        # width is in proportion to the tree's radius, the ring radii
+        # interpolated by height, and never under BOX: the lower trunk has
+        # hardly any LEDs near the axis, and a cube of fixed width would
+        # vanish well before it reached the blue portal.
+        yo = (ORANGE_BAND[0] + ORANGE_BAND[1]) / 2
+        yb = (BLUE_BAND[0] + BLUE_BAND[1]) / 2
+        self.y_top = int(yo * F)
+        self.y_bot = int(yb * F)
         path = []
         for i in range(n):
             if not known[i]:
                 continue
-            y = int(coords[i][1] * F)
-            ox = dxs[i]
-            oz = dzs[i] - PATH_D
-            if self.y_bot <= y <= self.y_top and -reach < ox < reach and -reach < oz < reach:
-                ax = ox if ox >= 0 else -ox
-                az = oz if oz >= 0 else -oz
-                path.append((i, y, int((ax if ax > az else az) * F)))
+            y = coords[i][1]
+            if not yb <= y <= yo:
+                continue
+            g = (meds[0] + (meds[1] - meds[0]) * (y - yb) / (yo - yb)) / meds[1] \
+                if meds[1] > 0 else 1.0
+            g = g if g > 1.0 else 1.0
+            ox = dxs[i] / g
+            oz = (dzs[i] - PATH_D) / g
+            ax = ox if ox >= 0 else -ox
+            az = oz if oz >= 0 else -oz
+            if ax < BOX + EDGE and az < BOX + EDGE:
+                path.append((i, int(y * F), int((ax if ax > az else az) * F),
+                             int(math.sqrt(ox * ox + oz * oz) * F)))
         self.path = array("H", [p[0] for p in path])
         self.py = array("h", [p[1] for p in path])
-        self.pm = array("h", [p[2] for p in path])  # Chebyshev offset
+        self.pm = array("h", [p[2] for p in path])  # Chebyshev offset, scaled
+        self.pr = array("h", [p[3] for p in path])  # distance from the path, scaled
         dxs = dzs = None
 
         span = self.y_top - self.y_bot  # one pass, 1/1024 tree heights
@@ -412,6 +428,15 @@ class Effect:
         path = self.path
         py = self.py
         pm = self.pm
+        pr = self.pr
+        # Heart: the LED nearest the centre of whichever copy has its centre
+        # between the portals, so it goes through a portal with the middle
+        # of the cube.
+        best = -1
+        bd = 0
+        blv = 0
+        y_top = self.y_top
+        y_bot = self.y_bot
         for j in range(len(path)):
             hm = pm[j]
             if hm >= se:
@@ -432,6 +457,11 @@ class Effect:
                     if d < se:
                         ad = d if d >= 0 else -d
                         hd += 256 if ad <= s else (se - ad) * 256 // e
+                        if ad <= s and hm <= s and y_bot <= py[j] - d <= y_top:
+                            r2 = ad * ad + pr[j] * pr[j]
+                            if best < 0 or r2 < bd:
+                                best = j
+                                bd = r2
                 d += span
             if cov <= 0:
                 continue
@@ -441,6 +471,8 @@ class Effect:
             lv = (cov * (256 - w) * cmax >> 16) + (hd * w >> 8)
             if hm > s:
                 lv = lv * (se - hm) // e
+            if j == best:
+                blv = lv
             i = path[j]
             k = 3 * i
             c = frame[k] + (cr * lv >> 8)
@@ -449,6 +481,18 @@ class Effect:
             frame[k + 1] = c if c < 255 else 255
             c = frame[k + 2] + (cb * lv >> 8)
             frame[k + 2] = c if c < 255 else 255
+        if best >= 0:
+            # Recolour that LED, fading back to white as the cube fades
+            # into the beam.
+            hl = blv * w // self.head
+            k = 3 * path[best]
+            pr_, pg, pb = PINK
+            c = frame[k] - (cr * hl >> 8) + (pr_ * hl >> 8)
+            frame[k] = 0 if c < 0 else c if c < 255 else 255
+            c = frame[k + 1] - (cg * hl >> 8) + (pg * hl >> 8)
+            frame[k + 1] = 0 if c < 0 else c if c < 255 else 255
+            c = frame[k + 2] - (cb * hl >> 8) + (pb * hl >> 8)
+            frame[k + 2] = 0 if c < 0 else c if c < 255 else 255
 
 
 def _prim(u, s, e, se):
