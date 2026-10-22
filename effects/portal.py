@@ -31,7 +31,7 @@ from effects._output import budget_for_current
 from effects._util import SIN, Param, Phase
 
 NAME = "portal"
-PERIOD_MS = 19000  # one cycle at speed 1
+PERIOD_MS = 11400  # one cycle at speed 1
 DURATION_MS = PERIOD_MS
 PARAMS = {
     "speed": (1.0, 0.5, 2.0),
@@ -39,19 +39,19 @@ PARAMS = {
 NEEDS_COORDS = True
 
 # Timeline, ms at speed 1.
-OPEN_MS = 700  # portals fade in
-FALL_MS = 16200  # the whole accelerating fall
+OPEN_MS = 420  # portals fade in
+FALL_MS = 9720  # the whole accelerating fall
 # Passes per second through the portals at points of the fall (ms into
 # it), interpolated exponentially: most of the time goes to the build, and
-# the last two seconds are much the fastest. Scaled so the fall is a whole
+# the last second is much the fastest. Scaled so the fall is a whole
 # number of passes.
-RATE = ((0, 0.8), (4000, 1.05), (8000, 1.45), (11000, 1.95), (13000, 2.45),
-        (14500, 3.0), (15300, 4.0), (15800, 5.5), (FALL_MS, 9.0))
+RATE = ((0, 1.33), (2400, 1.75), (4800, 2.42), (6600, 3.25), (7800, 4.08),
+        (8700, 5.0), (9180, 6.67), (9480, 9.17), (FALL_MS, 15.0))
 STEPS = 512  # distance table resolution over the fall
-DIP_MS = 250  # portals dim just before the end of the fall, for contrast
-WAVE_MS = 1000  # the closing wave climbs from the blue portal to the top
-ATTACK_MS = 160  # wave rise
-FADE_MS = 900  # portals fade out after the fall
+DIP_MS = 150  # portals dim just before the end of the fall, for contrast
+WAVE_MS = 600  # the closing wave climbs from the blue portal to the top
+ATTACK_MS = 96  # wave rise
+FADE_MS = 540  # portals fade out after the fall
 
 # Geometry, tree heights.
 AXIS_FROM = 0.1  # fit the trunk axis to slices above this (the base is ragged)
@@ -80,13 +80,13 @@ HEAD_RATE = 3.0
 
 BLUE = (0, 110, 255)
 ORANGE = (255, 45, 0)
-CUBE = (215, 222, 235)
-PINK = (255, 25, 110)
-HEART_RATE = (1.2, 2.0)  # the heart fades to white between these passes a second
+CUBE = (140, 142, 145)  # companion cube grey
+PINK = (255, 40, 130)  # as bright as CUBE (channel sum), so the core is no flash
+HEART_RATE = (1.6, 2.4)  # the heart fades to white between these passes a second
 WAVE = (200, 225, 255)
 PORTAL = 110  # /256 portal glow; the swirl adds up to SWIRL_AMP
 SWIRL_AMP = 70
-SWIRL_MS = 2400  # one turn of the swirl at rest...
+SWIRL_MS = 1440  # one turn of the swirl at rest...
 SWIRL_K = 0.5  # ...and SWIRL_K turns per pass during the fall,
 SWIRL_MAX = 2.0  # up to this many turns a second
 DIP = 110  # /256 the portals dim to at the end of the fall
