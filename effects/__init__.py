@@ -25,6 +25,9 @@ EFFECTS = [
     "beacon",
     "tetris",
     "portal",
+    "fire",
+    "lightning",
+    "storm",
 ]
 
 DISABLED = [
