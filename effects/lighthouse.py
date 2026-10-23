@@ -3,15 +3,19 @@
 A vertical wedge through the trunk axis rotates about it. The leading edge
 is crisp, and the trailing edge fades out more slowly like a lamp's
 afterglow. The rest of the tree keeps a faint warm ambient glow.
+
+The beam colour is a param (warm by default; Home Assistant's F1 automation
+shows the safety car as an amber beam), and the ambient follows it.
 """
 
-from effects._util import ONE, MASK, Layout, Param, Phase
+from effects._util import ONE, MASK, ColorParam, Layout, Param, Phase, rgb_spec
 
 NAME = "lighthouse"
 DURATION_MS = 20000
 PARAMS = {
     "speed": (1.0, 0.2, 4.0),
     "width": (50, 10, 120),  # beam width, degrees
+    "color": rgb_spec(255, 196, 120),  # beam
 }
 NEEDS_COORDS = True
 
@@ -30,6 +34,8 @@ class Effect:
         self.speed = Param(ctx, "speed", 1.0)
         self.width = Param(ctx, "width", 50, 1)
         self.phase = Phase(PERIOD_MS)
+        self.color = ColorParam(ctx, "color", PARAMS["color"][0])
+        self.amb = bytearray(3)
 
     def render(self, t_ms, frame):
         # theta = atan2(z, x) increases anticlockwise seen from above, so
@@ -37,8 +43,20 @@ class Effect:
         beam = self.phase.update(t_ms, self.speed.get())
         half = max(1, self.width.get() * ONE // 720)
         tail = half * TRAIL
-        br, bg, bb = BEAM
-        ar, ag, ab = AMBIENT
+        c = self.color
+        if c.update():
+            # The ambient is AMBIENT scaled with the beam: exactly AMBIENT
+            # for the default beam.
+            self.amb[0] = AMBIENT[0] * c.r // BEAM[0]
+            self.amb[1] = AMBIENT[1] * c.g // BEAM[1]
+            self.amb[2] = AMBIENT[2] * c.b // BEAM[2]
+        br = c.r
+        bg = c.g
+        bb = c.b
+        amb = self.amb
+        ar = amb[0]
+        ag = amb[1]
+        ab = amb[2]
         mid = ONE >> 1
         known = self.known
         theta = self.theta

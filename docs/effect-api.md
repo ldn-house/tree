@@ -17,7 +17,7 @@ effects/
 ```
 
 - `EFFECTS` is ordered. It drives the Home Assistant effect list and the auto cycle. `"auto"` is a runtime mode, not an effect.
-- An effect with `AUTO = False` is registered (Home Assistant can select it, and takeovers can show it) but the auto cycle skips it: `solid`. If every eligible effect is `AUTO = False`, auto mode shows the fallback.
+- An effect with `AUTO = False` is registered (Home Assistant can select it, and takeovers can show it) but the auto cycle skips it: `solid` and the `f1_*` effects. If every eligible effect is `AUTO = False`, auto mode shows the fallback.
 - `DISABLED` lists effect modules kept in the package but not registered (currently `sparkle`). Only `EFFECTS` may be exposed to Home Assistant, the auto cycle or tools; nothing may discover effects by listing `effects/*.py`. To re-enable an effect, move its name from `DISABLED` back into `EFFECTS`.
 - Module name == `NAME` == the name in `EFFECTS`. The current names are the ones Home Assistant already knows (`rainbow_cycle`, `christmas`, ...), so existing automations keep working.
 - One module per effect, so a single effect can be hot-pushed over OTA without a firmware rebuild.
