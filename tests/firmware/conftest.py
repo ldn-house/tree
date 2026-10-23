@@ -236,6 +236,43 @@ def bus(broker):
     b.close()
 
 
+# -- board-sized heap campaign ------------------------------------------------
+
+
+@pytest.fixture
+def heap_campaign(tmp_path):
+    """Runs heapcheck.py (one half of it per test file, so CI can run the
+    halves in parallel) on the 32-bit build in $MICROPYTHON32, with the repo's
+    effects/; fails unless every step passed."""
+    if not os.environ.get("MICROPYTHON32") and not os.environ.get("CI"):
+        pytest.skip("needs a 32-bit MicroPython in $MICROPYTHON32")
+
+    def run(*args):
+        fx = devsim.ROOT / "effects"
+        key = "heap-signing-key"
+        a = devsim.build_bundle(tmp_path / "a", effects=fx, key=key, version="heap-a", generation=100)
+        b = devsim.build_bundle(tmp_path / "b", effects=fx, key=key, version="heap-b", generation=200)
+        cert, pkey = tmp_path / "c.pem", tmp_path / "k.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(pkey), "-out",
+                        str(cert), "-days", "1", "-subj", "/CN=127.0.0.1"], check=True, capture_output=True)
+        out = tmp_path / "result.json"
+        cmd = [sys.executable, str(HERE / "heapcheck.py"), "--micropython", os.environ["MICROPYTHON32"],
+               "--bundle", str(a), "--update", str(b), "--key-string", key, "--cert", str(cert), "--key", str(pkey),
+               "--heap", os.environ.get("HEAPCHECK_HEAP", "400K"),  # Pico 2 W: 452,544 bytes free idle, minus Wi-Fi margin
+               "--root", str(tmp_path / "dev"), "--out", str(out), *args]
+        if os.path.exists(MOSQUITTO):
+            cmd += ["--mosquitto", MOSQUITTO]
+        elif os.environ.get("CI"):
+            pytest.fail("mosquitto is needed for the MQTT part of the campaign")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
+        print(r.stdout[-4000:], r.stderr[-2000:])
+        res = json.loads(out.read_text())
+        assert res["ok"], res
+        return res
+
+    return run
+
+
 def curl(*args):
     """Run curl; returns (http_code, parsed JSON or text). Exit codes other
     than 0 (e.g. 28 when --max-time fires) come back as code 0."""
