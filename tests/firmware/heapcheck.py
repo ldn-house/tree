@@ -10,7 +10,8 @@ for Wi-Fi), the real effects, the full coordinates file and TLS:
    (--mosquitto): the free heap must never drop below --floor (64 KB), even
    uncollected, and the MQTT session must never drop;
 2. meanwhile check for updates and then self-update over HTTPS (mbedtls on
-   the MicroPython heap, as on the board) from a local TLS server;
+   the MicroPython heap, as on the board) from a local TLS server that
+   redirects like github.com, with a head as large as its;
 3. after the reboot, cycle again and play the default calibration sequence.
 
 Stdlib only, so it runs inside a 32-bit container:
@@ -59,7 +60,16 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        data = files.get(self.path)
+        path, _, _ = self.path.partition("?")
+        if not path.startswith("/assets/"):
+            # Like github.com: an ~11 KB redirect head with one ~10 KB line.
+            self.send_response(302)
+            self.send_header("Location", "https://127.0.0.1:%d/assets%s?sig=%s" % (srv.server_address[1], path, "S" * 800))
+            self.send_header("Content-Security-Policy", "default-src 'none'; " + "connect-src github.com; " * 400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        data = files.get(path[len("/assets"):])
         if data is None:
             self.send_response(404)
             self.end_headers()

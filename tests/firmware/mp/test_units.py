@@ -769,6 +769,55 @@ def h6_bounded_line_reader():
 
 
 @test
+def capped_line_reader_drops_long_lines_within_the_head_budget():
+    import asyncio
+    from app.streams import BufReader, TooLong
+
+    class Src:
+        def __init__(self, data):
+            self.data = data
+            self.br = None
+            self.held = 0
+
+        async def read(self, n):
+            self.held = max(self.held, len(self.br.buf))
+            out, self.data = self.data[:n], self.data[n:]
+            return out
+
+    def reader(data, budget):
+        s = Src(data)
+        s.br = BufReader(s, budget)
+        return s, s.br
+
+    async def main():
+        # github.com's redirect: one 9 KB line among short ones.
+        csp = b"Content-Security-Policy: " + b"x" * 9200 + b"\r\n"
+        s, br = reader(b"HTTP/1.1 302 Found\r\n" + csp + b"Location: /a\r\n\r\nBODY", 16384)
+        assert await br.readline_capped(64) == (b"HTTP/1.1 302 Found\r\n", True)
+        line, whole = await br.readline_capped(64)
+        assert not whole and line == csp[:64], line
+        assert await br.readline_capped(64) == (b"Location: /a\r\n", True)
+        assert await br.readline_capped(64) == (b"\r\n", True)
+        assert await br.read(10) == b"BODY"
+        assert s.held <= 64 + 256, s.held  # the long line was never held
+        # Dropped bytes still count: an endless line ends at the head budget.
+        s, br = reader(b"X-Big: " + b"A" * 100000, 32768)
+        try:
+            await br.readline_capped(64)
+        except TooLong:
+            pass
+        else:
+            raise AssertionError("head budget not enforced")
+        assert len(s.data) > 60000 and s.held <= 64 + 256, (len(s.data), s.held)
+        # A long last line at EOF.
+        s, br = reader(b"y" * 500, 4096)
+        assert await br.readline_capped(64) == (b"y" * 64, False)
+        assert await br.readline_capped(64) == (b"", True)
+
+    asyncio.run(main())
+
+
+@test
 def l11_render_never_sees_the_clock_limit():
     import asyncio
     from app.engine import Engine, T_RESTART_MS

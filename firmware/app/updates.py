@@ -31,9 +31,14 @@ ASSET = "tree-firmware.bin"
 MANIFEST = "manifest.json"
 TIMEOUT = 15
 MAX_REDIRECTS = 5
-MAX_LINE = 2048
-MAX_HEAD = 8192
-MAX_HEADERS = 40
+# Response heads: github.com's redirect alone is ~11 KB, most of it one 9 KB
+# Content-Security-Policy line, and its signed Location is ~1 KB. Only the
+# headers in KEEP are held (up to MAX_LINE bytes each); other lines are read
+# and dropped whatever their length, within MAX_HEAD bytes per response.
+MAX_LINE = 4096
+MAX_HEAD = 32768
+MAX_HEADERS = 64
+KEEP = (b"location", b"content-length", b"transfer-encoding")
 HEAD_DEADLINE = 30  # connect, TLS, redirects and headers, all together
 CHECK_DEADLINE = 40  # a whole update check
 DOWNLOAD_DEADLINE = 900
@@ -57,9 +62,10 @@ def _split(url):
 
 async def _get_once(url):
     """One GET without following redirects. Returns (code, headers, reader)
-    where reader is a BufReader positioned at the body. Status and header
-    lines are bounded (H6): a hostile or broken server can't make this
-    allocate more than MAX_HEAD."""
+    where reader is a BufReader positioned at the body and headers holds
+    only the ones in KEEP. The head is bounded (H6): a hostile or broken
+    server can make this read at most MAX_HEAD bytes and hold about
+    MAX_LINE of them."""
     tls, host, port, path = _split(url)
     ip = await dns.resolve(host)
     if tls:
@@ -75,16 +81,23 @@ async def _get_once(url):
         req = "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: tree-firmware\r\nAccept: */*\r\nConnection: close\r\n\r\n" % (path, host)
         w.write(req.encode())
         await asyncio.wait_for(w.drain(), TIMEOUT)
-        status = await asyncio.wait_for(br.readline(MAX_LINE), TIMEOUT)
+        status, whole = await asyncio.wait_for(br.readline_capped(MAX_LINE), TIMEOUT)
+        if not whole:
+            raise TooLong()
         parts = status.split(None, 2)
         code = int(parts[1]) if len(parts) > 1 else 0
         headers = {}
         for _ in range(MAX_HEADERS + 1):
-            line = (await asyncio.wait_for(br.readline(MAX_LINE), TIMEOUT)).strip()
+            line, whole = await asyncio.wait_for(br.readline_capped(MAX_LINE), TIMEOUT)
+            line = line.strip()
             if not line:
                 break
-            k, _, v = line.decode().partition(":")
-            headers[k.strip().lower()] = v.strip()
+            k, _, v = line.partition(b":")
+            k = k.strip().lower()
+            if k in KEEP:
+                if not whole:
+                    raise OSError("response header %s too long" % k.decode())
+                headers[k.decode()] = v.strip().decode()
         else:
             raise OSError("too many response headers")
     except TooLong:
@@ -96,19 +109,29 @@ async def _get_once(url):
     return code, headers, br, (tls, host, port)
 
 
+def _resolve(loc, tls, host, port):
+    """Location (absolute, scheme-relative or an absolute path) as a URL."""
+    if loc[:7] == "http://" or loc[:8] == "https://":
+        return loc
+    scheme = "https" if tls else "http"
+    if loc.startswith("//"):
+        return scheme + ":" + loc
+    if not loc.startswith("/"):
+        raise OSError("unsupported redirect " + loc[:80])
+    return "%s://%s%s" % (scheme, host if port in (80, 443) else "%s:%d" % (host, port), loc)
+
+
 async def _http_get(url):
     for _ in range(MAX_REDIRECTS + 1):
         code, headers, br, (tls, host, port) = await _get_once(url)
         if code in (301, 302, 303, 307, 308) and "location" in headers:
             br.close()
-            loc = headers["location"]
-            if loc.startswith("/"):
-                loc = "%s://%s%s" % ("https" if tls else "http", host if port in (80, 443) else "%s:%d" % (host, port), loc)
-            url = loc
+            url = _resolve(headers["location"], tls, host, port)
             continue
+        # Chunked encoding is HTTP/1.1, and the request says HTTP/1.0.
         if code != 200 or "chunked" in headers.get("transfer-encoding", ""):
             br.close()
-            raise OSError("HTTP %d for %s" % (code, url) if code != 200 else "chunked responses are not supported")
+            raise OSError("HTTP %d for %s" % (code, url[:120]) if code != 200 else "chunked responses are not supported")
         length = headers.get("content-length")
         try:
             length = int(length) if length is not None else None
