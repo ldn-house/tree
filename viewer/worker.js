@@ -25,8 +25,15 @@ class Host:
         self.raw = bytearray(3 * n)
         self.out = bytearray(3 * n)
         self.stage = _output.Output(n)
+        # The colour floor, found as on the tree (effects/_output.py).
+        self.colour = _output.ColourFloor(self.stage)
+        self.colour_t0 = None
         self.effect = None
         self.params = {}
+
+    def colour_reset(self):
+        self.colour.reset()
+        self.colour_t0 = None
 
     def names(self):
         return list(effects.EFFECTS)
@@ -38,6 +45,7 @@ class Host:
         ctx = effects.Ctx(self.n, self.coords, self.params, random.Random(seed))
         self.effect = mod.Effect(ctx)
         self.name = name
+        self.colour_reset()
         spec = {k: list(v) for k, v in getattr(mod, "PARAMS", {}).items()}
         return {"params": spec, "values": dict(self.params),
                 "needs_coords": bool(getattr(mod, "NEEDS_COORDS", False)),
@@ -45,15 +53,25 @@ class Host:
 
     def set_param(self, key, value):
         self.params[key] = value
+        self.colour_reset()
+
+    def set_accuracy(self, value):
+        self.colour.set_accuracy(value)
+        self.colour_t0 = None
 
     def limits(self):
-        return [_output.LIMIT_A, _output.MA_PER_CHANNEL, self.stage.floor]
+        return [_output.LIMIT_A, _output.MA_PER_CHANNEL, self.stage.floor, self.colour.accuracy]
 
     def set_limit(self, limit_a):
         self.stage.budget = _output.budget_for_current(limit_a)
+        self.colour_reset()
 
     def frame(self, t_ms, brightness):
         self.effect.render(int(t_ms), self.raw)
+        if self.colour_t0 is None:
+            self.colour_t0 = int(t_ms)
+        if self.colour.due(int(t_ms) - self.colour_t0):
+            self.colour.add(self.raw)
         self.stage.process(self.raw, self.out, int(brightness))
         out_total = sum(self.out)
         # Estimated current from the bytes actually output (after gamma,
@@ -61,7 +79,8 @@ class Host:
         amps = _output.current_a(out_total)
         limit = _output.current_a(self.stage.budget)
         return (bytes(self.out), bytes(self.raw), self.stage.capped, self.stage.factor,
-                self.stage.raw_total, out_total, self.stage.budget, amps, limit)
+                self.stage.raw_total, out_total, self.stage.budget, amps, limit,
+                self.stage.colour_floor, self.stage.floor_pct())
 
     def reload(self):
         for k in [k for k in sys.modules if k == "effects" or k.startswith("effects.")]:
@@ -70,6 +89,8 @@ class Host:
         import effects
         from effects import _coords, _output
         self.stage = _output.Output(self.n, budget=self.stage.budget)
+        self.colour = _output.ColourFloor(self.stage, self.colour.accuracy)
+        self.colour_t0 = None
 `;
 
 async function fetchText(path) {
@@ -131,7 +152,7 @@ const handlers = {
     py.globals.set("H", host);
     const pos = py.runPython("None if H.coords is None else [list(c) if c else None for c in H.coords]");
     const limits = host.limits().toJs();
-    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1], floorPct: limits[2] };
+    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1], floorPct: limits[2], accuracy: limits[3] };
   },
   async select({ name, seed, params }) {
     const proxy = host.select(name, seed, py.toPy(params || {}));
@@ -147,6 +168,10 @@ const handlers = {
     host.set_limit(amps);
     return {};
   },
+  async accuracy({ value }) {
+    host.set_accuracy(value);
+    return {};
+  },
   async frame({ t, brightness }) {
     const proxy = host.frame(t, brightness);
     const r = proxy.toJs();
@@ -155,6 +180,7 @@ const handlers = {
     const raw = new Uint8Array(r[1]);
     return {
       out, raw, capped: r[2], factor: r[3] / 4096, rawTotal: r[4], outTotal: r[5], budget: r[6], amps: r[7], limitA: r[8],
+      colourPct: r[9], effectivePct: r[10],
       __transfer: [out.buffer, raw.buffer],
     };
   },

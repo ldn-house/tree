@@ -56,6 +56,7 @@ def test_discovery_payloads(mdev, bus):
     have = {t.split("/")[1] + "." + (t.split("/")[3] if t.count("/") == 4 else "light") for t in cfgs}
     want = {
         "light.light", "number.speed", "number.auto_cycle", "number.param_solid_level", "number.param_chase_speed",
+        "number.brightness_floor", "number.colour_accuracy", "sensor.floor", "sensor.floor_colour",
         "sensor.rssi", "sensor.heap", "sensor.uptime", "sensor.fps", "sensor.cap_pct", "sensor.reset",
         "sensor.boot", "sensor.recovery", "sensor.ip", "sensor.error", "sensor.effect_running", "binary_sensor.power_capped",
         "binary_sensor.calibrating", "button.reboot", "button.calibrate_play", "button.calibrate_stop",
@@ -156,6 +157,36 @@ def test_brightness_floor_from_home_assistant(mdev, bus):
     bus.pub(P + "/cmd/brightness_floor", "80")  # clamped to 25
     bus.wait(P + "/settings", lambda p: json.loads(p)["floor"] == 25, 10, after=t0)
     assert status(d)["state"]["floor"] == 25
+    assert len(d.boots) == 0
+
+
+def test_colour_accuracy_from_home_assistant(mdev, bus):
+    """The "Colour accuracy" number sets the colour floor's threshold; the
+    settings payload reports it, and diag reports the floor in effect and
+    the colour floor, re-published when the colour floor changes."""
+    d = mdev
+    c = json.loads(bus.wait("homeassistant/number/xmas_tree/colour_accuracy/config", timeout=20))
+    assert c["command_topic"] == P + "/cmd/colour_accuracy" and c["state_topic"] == P + "/settings"
+    assert c["value_template"] == "{{ value_json.colour_accuracy }}" and (c["min"], c["max"]) == (0, 0.05)
+    assert c["entity_category"] == "config"
+    for key in ("floor", "floor_colour"):
+        s = json.loads(bus.wait("homeassistant/sensor/xmas_tree/%s/config" % key, timeout=10))
+        assert s["state_topic"] == P + "/diag" and s["value_template"] == "{{ value_json.%s }}" % key
+    assert json.loads(bus.wait(P + "/settings", timeout=10))["colour_accuracy"] == 0.01
+    t0 = time.time()
+    bus.pub(P + "/set", '{"state":"ON","brightness":3,"effect":"solid"}')
+    bus.pub(P + "/cmd/param/solid/tint", "1")
+    diag = bus.wait(P + "/diag", lambda p: json.loads(p)["floor_colour"] > 10, 10, after=t0)
+    warm = json.loads(diag)["floor_colour"]
+    assert json.loads(diag)["floor"] == warm
+    t0 = time.time()
+    bus.pub(P + "/cmd/colour_accuracy", "0.02")
+    bus.wait(P + "/settings", lambda p: json.loads(p)["colour_accuracy"] == 0.02, 10, after=t0)
+    bus.wait(P + "/diag", lambda p: 4 < json.loads(p)["floor_colour"] < warm, 10, after=t0)
+    bus.pub(P + "/cmd/colour_accuracy", "abc")
+    bus.pub(P + "/cmd/colour_accuracy", "0")
+    bus.wait(P + "/diag", lambda p: json.loads(p)["floor_colour"] == 0 and json.loads(p)["floor"] == 4, 10, after=t0)
+    assert status(d)["state"]["colour_accuracy"] == 0
     assert len(d.boots) == 0
 
 

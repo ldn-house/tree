@@ -40,11 +40,14 @@ def test_manifest_and_binaries(exported):
     assert manifest["encoding"] == "rgb8"
     assert manifest["frame_stage"] == "raw"
     assert manifest["output"] == {"applied": False, "brightness": 255, "limit_a": 1.5,
-                                   "ma_per_channel": 8, "gamma": None, "brightness_floor_pct": 4}
+                                   "ma_per_channel": 8, "gamma": None, "brightness_floor_pct": 4,
+                                   "colour_accuracy": 0.01}
     coords = export_web.calibrated_coords()
     assert manifest["coords"] == [None if c is None else [round(v, 4) for v in c] for c in coords]
     assert len(manifest["coords"]) == manifest["leds"]
     assert [e["name"] for e in manifest["effects"]] == effects.EFFECTS
+    floors = {e["name"]: e["colour_floor_pct"] for e in manifest["effects"]}
+    assert floors["christmas"] == 0 and floors["warm_white"] > manifest["output"]["brightness_floor_pct"]
     assert not set(effects.DISABLED) & {e["name"] for e in manifest["effects"]}
     for e in manifest["effects"]:
         assert re.fullmatch(r"[a-z0-9_]+\.bin", e["file"])

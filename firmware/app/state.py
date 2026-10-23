@@ -1,7 +1,7 @@
 """User-facing state, persisted to flash and authoritative at boot.
 
-Power, brightness, the brightness floor, effect, speed, auto-cycle duration
-and effect params are saved (debounced, atomically) to /state.json and restored at boot, whatever
+Power, brightness, the brightness floor, colour accuracy, effect, speed,
+auto-cycle duration and effect params are saved (debounced, atomically) to /state.json and restored at boot, whatever
 the network is doing. MQTT and HTTP only ever send changes through update();
 retained MQTT messages never override what is restored here (review M4).
 """
@@ -31,6 +31,9 @@ def defaults():
         "power": True,
         "brightness": 128,
         "floor": outstage.FLOOR_PCT,
+        # u'v' drift allowed at the bottom of the slider (the colour floor,
+        # effects/_output.py); 0 turns it off.
+        "colour_accuracy": outstage.COLOUR_ACCURACY,
         "effect": "auto",
         "speed": 1.0,
         "auto_s": 0,  # 0: use each effect's DURATION_MS
@@ -101,6 +104,8 @@ class State:
         if "floor" in changes:
             v = float(clamp(_num(changes["floor"]), 0, FLOOR_MAX))
             applied["floor"] = int(v) if v == int(v) else v
+        if "colour_accuracy" in changes:
+            applied["colour_accuracy"] = round(outstage.colour_accuracy(float(_num(changes["colour_accuracy"]))), 4)
         if "effect" in changes:
             v = changes["effect"]
             if not isinstance(v, str) or not v or len(v) > 32:

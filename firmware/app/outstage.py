@@ -8,9 +8,9 @@ broken.
 """
 
 try:
-    from effects._output import Output, budget_for, NATIVE, FLOOR_PCT
+    from effects._output import Output, ColourFloor, budget_for, colour_accuracy, NATIVE, FLOOR_PCT, COLOUR_ACCURACY
 except Exception:
-    from app._output_fallback import Output, budget_for, NATIVE, FLOOR_PCT
+    from app._output_fallback import Output, ColourFloor, budget_for, colour_accuracy, NATIVE, FLOOR_PCT, COLOUR_ACCURACY
 
 
 def channel_budget(n, limit_a, ma_per_channel, percent=None):

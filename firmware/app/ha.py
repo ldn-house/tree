@@ -9,7 +9,7 @@ Topics (prefix cfg.MQTT_PREFIX, default "xmas_tree"):
     <p>/availability         online/offline (retained; last will = offline)
     <p>/state, <p>/set       the light (JSON schema), as before
     <p>/settings             speed, auto-cycle duration, brightness floor,
-                             effect params (JSON)
+                             colour accuracy, effect params (JSON)
     <p>/diag                 diagnostics (JSON, every 30 s)
     <p>/effect_running       what the strip shows: effect name, "off" or
                              "calibration" (retained, on change, <= 1/s)
@@ -115,6 +115,8 @@ class HA:
             self.dirty["light"] = True
         if "speed" in changed or "auto_s" in changed or "floor" in changed or "params" in changed:
             self.dirty["settings"] = True
+        if "colour_accuracy" in changed:
+            self.dirty["settings"] = True
 
     def mark(self, what):
         self.dirty[what] = True
@@ -190,6 +192,8 @@ class HA:
             self.rt.apply({"speed": float(text)}, "mqtt")
         elif name == "brightness_floor":
             self.rt.apply({"floor": float(text)}, "mqtt")
+        elif name == "colour_accuracy":
+            self.rt.apply({"colour_accuracy": float(text)}, "mqtt")
         elif name == "auto_cycle":
             self.rt.apply({"auto_s": int(float(text))}, "mqtt")
         elif name.startswith("param/"):
@@ -271,6 +275,19 @@ class HA:
             "icon": "mdi:brightness-percent",
             "entity_category": "config",
         }
+        yield "number", "colour_accuracy", {
+            # u'v' drift allowed at the bottom of the slider; 0 is off.
+            "name": "Colour accuracy",
+            "command_topic": self.t_cmd + "colour_accuracy",
+            "state_topic": self.t_settings,
+            "value_template": "{{ value_json.colour_accuracy }}",
+            "min": 0,
+            "max": 0.05,
+            "step": 0.001,
+            "mode": "box",
+            "icon": "mdi:palette",
+            "entity_category": "config",
+        }
         yield "number", "auto_cycle", {
             "name": "Auto-cycle duration",
             "command_topic": self.t_cmd + "auto_cycle",
@@ -317,6 +334,8 @@ class HA:
             ("uptime", "Uptime", {"device_class": "duration", "unit_of_measurement": "s", "state_class": "total_increasing"}),
             ("fps", "Frame rate", {"unit_of_measurement": "fps", "state_class": "measurement", "icon": "mdi:filmstrip"}),
             ("cap_pct", "Power cap output", {"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:flash-triangle"}),
+            ("floor", "Brightness floor in effect", {"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:brightness-percent", "suggested_display_precision": 1}),
+            ("floor_colour", "Colour floor", {"unit_of_measurement": "%", "state_class": "measurement", "icon": "mdi:palette", "suggested_display_precision": 1}),
             ("led_amps", "LED current (estimated, 12 V)", {"device_class": "current", "unit_of_measurement": "A", "state_class": "measurement", "suggested_display_precision": 2}),
             ("reset", "Last reset cause", {"icon": "mdi:restart-alert"}),
             ("boot", "Boot status", {"icon": "mdi:shield-check"}),
@@ -463,7 +482,8 @@ class HA:
             spec = self.rt.fx.meta(eff)["params"]
             if spec:
                 params[eff] = {k: st.param(eff, k, v[0]) for k, v in spec.items()}
-        return {"speed": st.get("speed"), "auto_s": st.get("auto_s"), "floor": st.get("floor"), "params": params}
+        return {"speed": st.get("speed"), "auto_s": st.get("auto_s"), "floor": st.get("floor"),
+                "colour_accuracy": st.get("colour_accuracy"), "params": params}
 
     def diag_payload(self):
         return self.rt.diag()

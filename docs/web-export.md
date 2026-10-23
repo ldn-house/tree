@@ -23,7 +23,8 @@ The required playback fields are:
   "source": {"commit": "<40-character checkout HEAD SHA>"},
   "fps": 20,
   "leds": 500,
-  "output": {"applied": false, "brightness": 255, "limit_a": 1.5, "ma_per_channel": 8, "gamma": null},
+  "output": {"applied": false, "brightness": 255, "limit_a": 1.5, "ma_per_channel": 8, "gamma": null,
+             "brightness_floor_pct": 4, "colour_accuracy": 0.01},
   "coords": [[0.1, 0.5, -0.1], null],
   "seed": 0,
   "encoding": "rgb8",
@@ -38,6 +39,7 @@ The required playback fields are:
       "gzip_bytes": 50837,
       "sha256": "<64-character hash of the uncompressed binary>",
       "params": {"speed": 1.0},
+      "colour_floor_pct": 21.2,
       "loop": {"mode": "period", "source_start_frame": 0, "crossfade_frames": 0}
     }
   ]
@@ -50,7 +52,7 @@ All effects share `fps`. `frames / fps` is the loop duration (a one-frame effect
 
 ## Brightness and colour
 
-The agreed web format uses **raw linear effect RGB**. It does not bake in the power cap, brightness, gamma, spatial dithering, white balance, or wire colour order. This avoids making a screen inherit the tree's electrical limits and spatial dithering. `frame_stage: "raw"` and `output.applied: false` make this explicit. The other `output` fields record the renderer's reference settings: brightness 255/255, the default 1.5 A limit at 8 mA/channel, and gamma disabled. They do **not** describe a transform applied to the binary. No device configuration or credentials are read.
+The agreed web format uses **raw linear effect RGB**. It does not bake in the power cap, brightness, gamma, spatial dithering, white balance, or wire colour order. This avoids making a screen inherit the tree's electrical limits and spatial dithering. `frame_stage: "raw"` and `output.applied: false` make this explicit. The other `output` fields record the renderer's reference settings: brightness 255/255, the default 1.5 A limit at 8 mA/channel, and gamma disabled. They do **not** describe a transform applied to the binary. A player that dims as the tree does maps brightness 1..255 onto floor..100%, where floor is the higher of `brightness_floor_pct` and the effect's `colour_floor_pct` (the lowest level at which its colours stay within `colour_accuracy`, found from the exported frames as the tree finds it; see `docs/effect-api.md`). No device configuration or credentials are read.
 
 For screen rendering, interpret `channel / 255` as linear intensity and convert to sRGB for display, or use the renderer's approximate display curve `pow(channel / 255, 1 / 2.2)`. Apply this once: a graphics pipeline that already converts linear output to sRGB does not need a second gamma conversion. A web brightness slider can scale linear RGB before that conversion. The bytes represent the same effect code and default parameters as the tree, but do not claim to simulate its measured physical brightness or current state. MicroPython and CPython also use different random generators.
 

@@ -97,6 +97,15 @@ def effect_loop(name, coords):
     }
 
 
+def colour_floor(frames):
+    """The effect's colour floor from its raw frames, as the tree finds it."""
+    colour = _output.ColourFloor(_output.Output(render.LED_COUNT))
+    for i, frame in enumerate(frames):
+        if colour.due(i * 1000 // FPS):
+            colour.add(bytearray(frame.tobytes()))
+    return colour.pct
+
+
 def gzip_bytes(data):
     # GzipFile fixes both the timestamp and filename (unlike gzip's defaults).
     out = io.BytesIO()
@@ -135,8 +144,11 @@ def export(out, archive=None):
         "output": {"applied": False, "brightness": round(BRIGHTNESS * 255), "limit_a": _output.LIMIT_A,
                    "ma_per_channel": _output.MA_PER_CHANNEL, "gamma": None,
                    # A player that dims should map brightness 1..255 onto
-                   # floor..100% as the tree does (effects/_output.py).
-                   "brightness_floor_pct": _output.FLOOR_PCT},
+                   # floor..100% as the tree does (effects/_output.py), where
+                   # floor is the higher of this and the effect's
+                   # colour_floor_pct (found at colour_accuracy).
+                   "brightness_floor_pct": _output.FLOOR_PCT,
+                   "colour_accuracy": _output.COLOUR_ACCURACY},
         "coords": [None if c is None else [round(v, 4) for v in c] for c in coords],
         "effects": [],
     }
@@ -160,6 +172,7 @@ def export(out, archive=None):
             "gzip_bytes": compressed_size,
             "sha256": hashlib.sha256(data).hexdigest(),
             "params": effects.defaults(effects.load(name)),
+            "colour_floor_pct": colour_floor(frames),
             "loop": loop,
         }
         manifest["effects"].append(entry)

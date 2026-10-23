@@ -39,8 +39,10 @@ GC = 11
 RESERVE = 12
 WIFI = 13
 SUPERVISOR = 14
+COLOUR = 15
 NAMES = ("idle", "effect render", "output stage", "effect start", "mqtt", "home assistant", "http request",
-         "state save", "coordinates", "update", "calibration", "gc", "reserve", "wifi", "supervisor")
+         "state save", "coordinates", "update", "calibration", "gc", "reserve", "wifi", "supervisor",
+         "colour floor")
 
 _MAGIC = 0x7EE10000
 _SCRATCH1 = 0x10

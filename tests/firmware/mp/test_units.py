@@ -848,6 +848,7 @@ def l11_render_never_sees_the_clock_limit():
             reload = False
             probing = False
             out = None
+            colour = None
 
             async def present(self, *a):
                 pass

@@ -131,6 +131,58 @@ def test_brightness_floor(device):
     wait_for(lambda: d.saved_state().get("floor") == 12.5, 10, what="floor saved")
 
 
+def leds(frame):
+    return {tuple(frame[k:k + 3]) for k in range(0, len(frame), 3)}
+
+
+def test_colour_floor(device):
+    """The bottom of the slider is the higher of the brightness floor and the
+    running effect's colour floor (effects/_output.py): warm white keeps its
+    blue at 1% instead of the yellow (3, 1, 0), a stricter accuracy raises
+    it, 0 turns it off, and it follows effect switches and param changes."""
+    d = device
+
+    def floor():
+        return status(d)["brightness_floor"]
+
+    d.post("/state", {"effect": "solid", "brightness": 3})
+    wait_for(lambda: status(d)["effect"]["running"] == "solid", 10)
+    bf = floor()
+    assert (bf["floor"], bf["colour"], bf["effective"], bf["colour_accuracy"]) == (4, 0, 4, 0.01)
+    assert status(d)["state"]["colour_accuracy"] == 0.01
+    wait_for(lambda: leds(frame_sum(d)[1]) == {(1, 1, 1)}, 5, what="white at the 4% floor")
+    # Param change: warm white.
+    d.post("/state", {"params": {"solid": {"tint": 1}}})
+    wait_for(lambda: floor()["colour"] > 10, 5, what="colour floor for warm white")
+    bf = floor()
+    assert bf["effective"] == bf["colour"] and bf["colour_pixels"] > 0
+    wait_for(lambda: all(g == 4 and b == 1 for _r, g, b in leds(frame_sum(d)[1])), 5, what="warm white keeps its blue")
+    warm = bf["colour"]
+    code, res = d.post("/state", {"colour_accuracy": 0.005})
+    assert code == 200 and res["changed"] == {"colour_accuracy": 0.005}
+    wait_for(lambda: floor()["colour"] > warm + 10, 5, what="stricter accuracy, higher floor")
+    d.post("/state", {"colour_accuracy": 0})
+    wait_for(lambda: floor()["colour"] == 0, 5, what="colour floor off")
+    wait_for(lambda: leds(frame_sum(d)[1]) == {(3, 1, 0)}, 5, what="#25's floor alone: the yellow")
+    d.post("/state", {"colour_accuracy": 0.01})
+    wait_for(lambda: floor()["colour"] == warm, 5, what="back to the default")
+    # Effect switch: chase is pure red, which never drifts; and back.
+    d.post("/state", {"effect": "chase"})
+    wait_for(lambda: status(d)["effect"]["running"] == "chase" and floor()["colour"] == 0, 5, what="chase: no colour floor")
+    assert floor()["effective"] == 4
+    d.post("/state", {"effect": "solid"})
+    wait_for(lambda: floor()["colour"] == warm, 5, what="solid warm again")
+    # A user floor above the colour floor wins.
+    d.post("/state", {"floor": 25})
+    wait_for(lambda: floor()["effective"] == 25, 5, what="user floor above")
+    # Bounds and validation.
+    assert d.post("/state", {"colour_accuracy": "x"})[0] == 400
+    assert d.post("/state", {"colour_accuracy": 1})[1]["state"]["colour_accuracy"] == 0.05
+    assert d.post("/state", {"colour_accuracy": 0.001})[1]["state"]["colour_accuracy"] == 0.005
+    wait_for(lambda: d.saved_state().get("colour_accuracy") == 0.005, 10, what="accuracy saved")
+    assert floor()["colour_call_ms_max"] > 0
+
+
 def test_state_persists_across_power_cut(device):
     d = device
     code, body = d.post("/state", {"power": False, "brightness": 77, "effect": "chase", "speed": 2.0})

@@ -7,7 +7,7 @@ app.calib. "auth" routes need the HTTP_TOKEN (see app.httpd).
     GET  /frame                     last frame sent to the strip (base64, wire order)
     GET  /mqtt                      cached MQTT client state
     GET  /effects                   effects, params, overlays, failures
-    POST /state               auth  {"power", "brightness", "floor", "effect", "speed",
+    POST /state               auth  {"power", "brightness", "floor", "colour_accuracy", "effect", "speed",
                                      "auto_s", "params": {effect: {param: v}}}
     PUT  /effects/<name>      auth  hot-push one effect module (no reboot); with
                                     UPDATE_KEY set it must be signed (X-Signature)
@@ -94,7 +94,7 @@ def register(rt, srv):
     async def h_state(req):
         body = await req.json()
         changes = {}
-        for k in ("power", "brightness", "floor", "effect", "speed", "auto_s", "params"):
+        for k in ("power", "brightness", "floor", "colour_accuracy", "effect", "speed", "auto_s", "params"):
             if k in body:
                 changes[k] = body[k]
         try:
