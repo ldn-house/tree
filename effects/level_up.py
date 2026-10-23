@@ -12,6 +12,7 @@ so a variant (an F1 race start, say) only needs a subclass:
 
     class Effect(level_up.Effect):
         palette = bytes((0, 255, 40))  # green, every level
+        once = True  # one level, then hold the glow (f1_start)
 
 Power: the steady glow is sized to about a third of the default 1.5 A cap
 for a full tree, so the finish flash and pulse (which the cap scales to the
@@ -64,6 +65,7 @@ _HOLD = 2
 
 class Effect:
     palette = PALETTE
+    once = False
 
     def __init__(self, ctx):
         n = ctx.n
@@ -138,7 +140,9 @@ class Effect:
         finish = 1 if self.finish.get() else 0
         fill_ms = LEAD_MS + steps * BEAT_MS
         finish_ms = PULSE_MS if finish else FLASH_MS
-        if self.t >= fill_ms + finish_ms + HOLD_MS:
+        if self.once and self.t > fill_ms + finish_ms:
+            self.t = fill_ms + finish_ms  # hold the first level's glow
+        elif self.t >= fill_ms + finish_ms + HOLD_MS:
             self.t = 0
             self.level += 1
             if self.level >= 1 << 20:

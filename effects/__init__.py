@@ -32,6 +32,11 @@ EFFECTS = [
     "lightning",
     "storm",
     "solid",
+    "f1_start",
+    "f1_yellow",
+    "f1_red",
+    "f1_chequered",
+    "f1_winner",
 ]
 
 DISABLED = [
