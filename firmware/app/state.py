@@ -11,7 +11,7 @@ import time
 
 import bootmgr
 
-from app import outstage, trace
+from app import fx, outstage, trace
 from app.log import log
 
 FILE = "state.json"
@@ -125,12 +125,14 @@ class State:
                 spec = param_specs(eff) if param_specs else None
                 cur = merged.setdefault(eff, {})
                 for name, v in vals.items():
-                    v = _num(v)
-                    if spec is not None:
-                        if name not in spec:
-                            raise ValueError("unknown param %s.%s" % (eff, name))
-                        lo, hi = spec[name][1], spec[name][2]
-                        v = clamp(v, lo, hi)
+                    if spec is not None and name not in spec:
+                        raise ValueError("unknown param %s.%s" % (eff, name))
+                    if spec is not None and fx.is_rgb(spec[name]):
+                        v = fx.parse_rgb(v)
+                    else:
+                        v = _num(v)
+                        if spec is not None:
+                            v = clamp(v, spec[name][1], spec[name][2])
                     cur[name] = v
             applied["params"] = merged
         changed = {}

@@ -9,6 +9,9 @@ app.calib. "auth" routes need the HTTP_TOKEN (see app.httpd).
     GET  /effects                   effects, params, overlays, failures
     POST /state               auth  {"power", "brightness", "floor", "effect", "speed",
                                      "auto_s", "params": {effect: {param: v}}}
+    GET  /takeover                  active takeovers (app.takeover)
+    POST /takeover            auth  start/refresh/end a takeover (JSON, app.takeover)
+    DELETE /takeover          auth  end every takeover (?id=X: just that one)
     PUT  /effects/<name>      auth  hot-push one effect module (no reboot); with
                                     UPDATE_KEY set it must be signed (X-Signature)
     DELETE /effects/<name>    auth  remove a hot-pushed effect
@@ -82,8 +85,8 @@ def register(rt, srv):
                     "name": name,
                     "duration_ms": m["duration_ms"],
                     "needs_coords": m["needs_coords"],
-                    "params": {k: {"default": v[0], "min": v[1], "max": v[2], "value": rt.state.param(name, k, v[0])}
-                               for k, v in m["params"].items()},
+                    "params": {k: _param_info(v, rt.state.param(name, k, v[0])) for k, v in m["params"].items()},
+                    "auto": m.get("auto", True),
                     "overlay": rt.fx.overlay_file(name) is not None,
                     "eligible": rt.engine.eligible(name),
                     "error": rt.engine.errors.get(name),
@@ -102,6 +105,25 @@ def register(rt, srv):
         except ValueError as e:
             raise HTTPError(400, str(e))
         return 200, {"changed": changed, "state": rt.state.snapshot()}
+
+    async def h_takeover(req):
+        return 200, rt.takeovers.status()
+
+    async def h_takeover_post(req):
+        try:
+            res = rt.takeovers.command(await req.json(), "http")
+        except ValueError as e:
+            raise HTTPError(400, str(e))
+        return 200, {"result": res, "takeover": rt.takeovers.status()}
+
+    async def h_takeover_delete(req):
+        tid = req.query.get("id")
+        cmd = {"action": "end", "id": tid} if tid else {"action": "end_all"}
+        try:
+            res = rt.takeovers.command(cmd, "http")
+        except ValueError as e:
+            raise HTTPError(400, str(e))
+        return 200, {"result": res, "takeover": rt.takeovers.status()}
 
     async def h_effect_put(req):
         name = req.path[len("/effects/") :]
@@ -253,6 +275,9 @@ def register(rt, srv):
     srv.route("GET", "/gc", h_gc)
     srv.route("GET", "/effects", h_effects)
     srv.route("POST", "/state", h_state, auth=True)
+    srv.route("GET", "/takeover", h_takeover)
+    srv.route("POST", "/takeover", h_takeover_post, auth=True)
+    srv.route("DELETE", "/takeover", h_takeover_delete, auth=True)
     srv.route("PUT", "/effects/*", h_effect_put, auth=True, deadline=60)
     srv.route("POST", "/effects/*", h_effect_put, auth=True, deadline=60)
     srv.route("PUT", "/config", h_config, auth=True)
@@ -269,6 +294,13 @@ def register(rt, srv):
     srv.route("POST", "/update/confirm", h_confirm, auth=True)
     srv.route("POST", "/update/rollback", h_rollback, auth=True)
     srv.route("POST", "/reboot", h_reboot, auth=True)
+
+
+def _param_info(spec, value):
+    info = {"default": spec[0], "min": spec[1], "max": spec[2], "value": value}
+    if fxmod.is_rgb(spec):
+        info["type"] = "rgb"
+    return info
 
 
 def _try_effect(rt, name, data, ext):
@@ -311,4 +343,5 @@ def _try_effect(rt, name, data, ext):
     finally:
         if bootmgr.exists(stage):
             os.remove(stage)
-    return {"duration_ms": meta["duration_ms"], "params": meta["params"], "needs_coords": meta["needs_coords"]}
+    return {"duration_ms": meta["duration_ms"], "params": meta["params"], "needs_coords": meta["needs_coords"],
+            "auto": meta["auto"]}

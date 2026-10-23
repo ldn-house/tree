@@ -17,6 +17,7 @@ effects/
 ```
 
 - `EFFECTS` is ordered. It drives the Home Assistant effect list and the auto cycle. `"auto"` is a runtime mode, not an effect.
+- An effect with `AUTO = False` is registered (Home Assistant can select it, and takeovers can show it) but the auto cycle skips it: `solid`. If every eligible effect is `AUTO = False`, auto mode shows the fallback.
 - `DISABLED` lists effect modules kept in the package but not registered (currently `sparkle`). Only `EFFECTS` may be exposed to Home Assistant, the auto cycle or tools; nothing may discover effects by listing `effects/*.py`. To re-enable an effect, move its name from `DISABLED` back into `EFFECTS`.
 - Module name == `NAME` == the name in `EFFECTS`. The current names are the ones Home Assistant already knows (`rainbow_cycle`, `christmas`, ...), so existing automations keep working.
 - One module per effect, so a single effect can be hot-pushed over OTA without a firmware rebuild.
@@ -29,8 +30,10 @@ NAME = "rainbow_cycle"
 DURATION_MS = 20000          # suggested time in the auto cycle; effects never "finish"
 PARAMS = {                   # optional; exposed to HA, the renderer CLI and the viewer
     "speed": (1.0, 0.1, 5.0),  # (default, min, max)
+    "color": rgb_spec(255, 0, 0),  # a colour: (0xFF0000, 0, 0xFFFFFF, "rgb")
 }
 NEEDS_COORDS = False         # True: the scheduler skips it when no calibration is loaded
+AUTO = True                  # optional; False: never auto-cycled, only selected or taken over
 
 class Effect:
     def __init__(self, ctx):
@@ -41,6 +44,15 @@ class Effect:
         # Fill frame (every pixel, every call). No allocation, no sleeps, return None.
         ...
 ```
+
+### Colour params
+
+A param whose spec is `(0xRRGGBB, 0, 0xFFFFFF, "rgb")` is a colour; build it with `_util.rgb_spec(r, g, b)`. Its value is a packed `0xRRGGBB` int, so reading it never allocates, and a tool that only knows `(default, min, max)` still sees a valid range.
+
+- In `render()`, read it through `_util.ColorParam(ctx, name, default)`: `update()` returns True when the value changed (and on the first call) and sets `.r`, `.g`, `.b`. Rebuild anything derived from the colour only then.
+- Values come in as `"#RRGGBB"`, `"r,g,b"`, `[r, g, b]` or the int (`_util.parse_rgb`); the runtime, `render.py --param color=#ff8000`, the viewer (a colour picker) and the firmware all store the int.
+- Home Assistant shows each colour param as a `text` entity that takes `#RRGGBB`. A param named `color` is the effect's main colour: picking a colour on the HA light sets it (firmware `app/ha.py`).
+- `GET /effects` marks colour params with `"type": "rgb"`.
 
 ### ctx
 
@@ -78,6 +90,7 @@ class Effect:
 | `Param(ctx, name, default, scale=ONE)` | `.get()` returns `int(value * scale)`, recomputed only when the value object changes. |
 | `Phase(period_ms)` | `.update(t_ms, speed)` returns 0..ONE-1, one cycle per `period_ms` at `speed == ONE`; accumulates per-frame deltas, so speed changes stay smooth. |
 | `WHEEL`, `SIN` | 256-entry colour wheel (RGB triples) and sine (0-255) tables. |
+| `rgb_spec(r, g, b)`, `ColorParam(ctx, name, default)` | A colour param's spec, and its allocation-free reader (`.update()`, `.r`, `.g`, `.b`). See [Colour params](#colour-params). |
 
 ## Output stage
 
@@ -166,7 +179,7 @@ The firmware (`firmware/app/api.py`) defines the device side:
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /effects` | `{"effects": [{"name", "duration_ms", "needs_coords", "params": {k: {"default", "min", "max", "value"}}, "overlay", "eligible", "error"}], "running", "fx_error"}` |
+| `GET /effects` | `{"effects": [{"name", "duration_ms", "needs_coords", "auto", "params": {k: {"default", "min", "max", "value", "type"?}}, "overlay", "eligible", "error"}], "running", "fx_error"}` (`type` is `"rgb"` for a colour) |
 | `PUT` or `POST /effects/<name>` | Auth required (401). If the device has `UPDATE_KEY`, `X-Signature` must verify before any of the code runs (403). The body is module source, or `.mpy` (sniffed, or `?format=mpy`), at most 32 KB. Optional `X-Content-SHA256`; `?activate=1` also selects the effect. The device compile-checks the module, imports it under a staging name, builds `Effect(ctx)` and renders t=0 and t=33. Only then does it replace the overlay (`/fx/fx_<name>.py`) and hot-reload. Replies `200 {"effect", "overlay": true, "activated", "duration_ms", "params", "needs_coords"}`, or `400 {"error"}` and keeps the previous version. |
 | `DELETE /effects/<name>` | Auth required. Removes the overlay. |
 

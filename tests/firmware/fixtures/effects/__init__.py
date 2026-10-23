@@ -2,7 +2,7 @@
 (docs/effect-api.md). The firmware is tested against this until the
 harness thread's effects/ package lands."""
 
-EFFECTS = ["solid", "chase", "height"]
+EFFECTS = ["solid", "chase", "height", "tint"]
 
 
 def load(name):
