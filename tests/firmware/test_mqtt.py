@@ -127,7 +127,7 @@ def test_brightness_floor_from_home_assistant(mdev, bus):
     c = json.loads(bus.wait("homeassistant/number/xmas_tree/brightness_floor/config", timeout=20))
     assert c["command_topic"] == P + "/cmd/brightness_floor" and c["state_topic"] == P + "/settings"
     assert c["value_template"] == "{{ value_json.floor }}" and (c["min"], c["max"], c["unit_of_measurement"]) == (0, 25, "%")
-    assert json.loads(bus.wait(P + "/settings", timeout=10))["floor"] == 8
+    assert json.loads(bus.wait(P + "/settings", timeout=10))["floor"] == 4
     budget = status(d)["power_budget"]
 
     def frame_sum():
@@ -136,19 +136,22 @@ def test_brightness_floor_from_home_assistant(mdev, bus):
     t0 = time.time()
     bus.pub(P + "/set", '{"state":"ON","brightness":3,"effect":"solid"}')
     bus.wait(P + "/state", lambda p: json.loads(p)["brightness"] == 3, 10, after=t0)
-    wait_for(lambda: abs(frame_sum() - budget * 0.08) < 600, 10, what="1% at the floor")
-    # Each HA step above 1% is brighter.
+    wait_for(lambda: frame_sum() == 1500, 10, what="1% at the 4% floor: 1 on every channel")
+    # Higher HA steps are brighter (neighbouring steps at the bottom can give
+    # the same whole levels: 2% and 3% are both 2 here).
     sums = []
-    for pct in (1, 2, 3, 50, 100):
-        bus.pub(P + "/set", '{"brightness":%d}' % round(pct * 255 / 100))
+    for pct in (1, 5, 50, 100):
+        b = round(pct * 255 / 100)
+        bus.pub(P + "/set", '{"brightness":%d}' % b)
+        bus.wait(P + "/state", lambda p, b=b: json.loads(p)["brightness"] == b, 10, after=time.time() - 0.05)
         time.sleep(0.6)
         sums.append(frame_sum())
-    assert sums == sorted(sums) and len(set(sums)) == len(sums), sums
+    assert sums[:2] == [1500, 3000] and sums == sorted(sums) and len(set(sums)) == len(sums), sums
     t0 = time.time()
     bus.pub(P + "/set", '{"brightness":3}')
     bus.pub(P + "/cmd/brightness_floor", "5")
     bus.wait(P + "/settings", lambda p: json.loads(p)["floor"] == 5, 10, after=t0)
-    wait_for(lambda: abs(frame_sum() - budget * 0.05) < 600, 10, what="5% floor")
+    wait_for(lambda: frame_sum() == 3000, 10, what="5% floor: 1.6, so 2 on every channel")
     bus.pub(P + "/cmd/brightness_floor", "abc")
     bus.pub(P + "/cmd/brightness_floor", "80")  # clamped to 25
     bus.wait(P + "/settings", lambda p: json.loads(p)["floor"] == 25, 10, after=t0)

@@ -2,10 +2,8 @@
 
 The tone param picks one of several warm whites, for comparing on the real
 LEDs (an A/B for the colour, from Home Assistant's "tone" number). The
-default is 1: on the tree it is the first tone that looks warm, and it
-keeps individual LEDs closer to one colour than tone 2 does (at the
-tree's few wire levels, tone 2's tiny green and blue make neighbouring
-LEDs differ more visibly):
+default is 2, which looked warm on the tree, like incandescent Christmas
+lights, once low levels stopped being dithered:
 - 0: (255, 140, 50), the original colour picked on a screen (looks cool and
   yellow-white on the LEDs);
 - 1: 0 white-balanced by (1.0, 0.85, 0.7), less green and blue;
@@ -19,7 +17,7 @@ global GAMMA setting would, at any brightness.
 NAME = "warm_white"
 DURATION_MS = 10000
 PARAMS = {
-    "tone": (1, 0, 3),
+    "tone": (2, 0, 3),
 }
 NEEDS_COORDS = False
 
@@ -37,9 +35,9 @@ class Effect:
         self.params = ctx.params
 
     def render(self, t_ms, frame):
-        tone = int(self.params.get("tone", 1))
+        tone = int(self.params.get("tone", 2))
         if tone < 0 or tone >= len(TONES):
-            tone = 1
+            tone = 2
         r, g, b = TONES[tone]
         for k in range(0, 3 * self.n, 3):
             frame[k] = r

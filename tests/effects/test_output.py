@@ -20,9 +20,11 @@ WARM = (255, 140, 50)
 
 
 def stage(**kw):
-    """An output stage without the brightness floor, for testing rounding
-    and dithering at raw brightness levels (the floor has its own tests)."""
+    """An output stage without the brightness floor and dithering at every
+    level, for testing rounding and dithering themselves at raw brightness
+    levels (the floor and the undithered low end have their own tests)."""
     kw.setdefault("floor", 0)
+    kw.setdefault("dither_min", 0)
     return _output.Output(N, **kw)
 
 
@@ -203,19 +205,16 @@ def test_brightness_zero_is_dark():
         assert not any(dst)
 
 
-# -- brightness floor --
+# -- the low end: brightness floor, no dithering below DITHER_MIN --
 #
-# These pin the wire bytes. They can't show how an LED looks: at 1-5 LSB a
-# WS2811's three dies aren't in their linear proportions (at 1/255 they look
-# about equally bright), and the eye blends neighbouring LEDs differently
-# depending on how densely they sit in the tree. That needs the real tree.
+# These pin the wire bytes. They can't show how an LED looks: at a few levels
+# a WS2811's three dies aren't in their linear proportions (at 1/255 they look
+# about equally bright, so blue 1 next to blue 0 reads as white next to
+# yellow), and the eye blends neighbouring LEDs differently depending on how
+# densely they sit in the tree. That needs the real tree.
 
-TONE1 = (255, 119, 35)  # warm_white's default
-
-
-def test_floor_default():
-    o = _output.Output(N)
-    assert o.floor == _output.FLOOR_PCT == 8
+TONES = ((255, 140, 50), (255, 119, 35), (255, 87, 14), (255, 68, 7))
+TONE2 = TONES[2]  # warm_white's default
 
 
 def hass(pct):
@@ -223,22 +222,33 @@ def hass(pct):
     return round(pct * 255 / 100)
 
 
+def targets(o, color, brightness):
+    """Exact per-channel output for a solid frame, through the floor."""
+    return [c * o.factor / 4096 * o.level(brightness) / 65280 for c in color]
+
+
+def leds(frame):
+    return [tuple(frame[3 * i:3 * i + 3]) for i in range(len(frame) // 3)]
+
+
+def test_defaults():
+    o = _output.Output(N)
+    assert o.floor == _output.FLOOR_PCT == 4
+    assert o.dither_min == _output.DITHER_MIN == 9
+
+
 def test_floor_mapping():
     """0 stays off, HA's 1% lands on the floor, 100% is unchanged, and
-    every HA step between is strictly brighter (no dead zone)."""
+    every HA step between is a higher level."""
     o = _output.Output(N)
     levels = [o.level(b) for b in range(256)]
     assert levels[0] == 0
     assert levels[255] == 65280
     assert all(b >= a for a, b in zip(levels, levels[1:]))
-    floor_q = round(8 * 65280 / 100)
+    floor_q = round(4 * 65280 / 100)
     assert levels[1] == levels[2] == levels[hass(1)] == floor_q
     assert all(b > a for a, b in zip(levels[3:], levels[4:]))
-    pct = [o.level(hass(p)) / 652.8 for p in range(1, 101)]
-    assert all(b > a for a, b in zip(pct, pct[1:]))
-    # Linear in between: halfway along HA's slider is halfway between the
-    # floor and full.
-    assert o.level(129) / 652.8 == pytest.approx(8 + 92 * 126 / 252, abs=0.01)
+    assert o.level(129) / 652.8 == pytest.approx(4 + 96 * 126 / 252, abs=0.01)
 
 
 def test_no_floor_is_identity():
@@ -258,54 +268,124 @@ def test_set_floor():
     assert o.floor == 100 and o.level(1) == 65280
 
 
-def test_floor_dims_smoothly_on_the_wire():
-    """Whole-tree warm white, capped: the output total rises with every
-    step from HA's 1% (brightness 3) to 255."""
+@pytest.mark.parametrize("tone", range(4))
+@pytest.mark.parametrize("dither", ["spatial", "temporal"])
+def test_no_spatial_split_below_dither_min(tone, dither):
+    """For every warm white tone at every HA step, a channel whose target is
+    below DITHER_MIN is the same on every LED (and stays so frame after
+    frame), rounded to nearest; a channel at or above it is dithered within
+    1 of exact and averages to the target."""
+    o = _output.Output(N, dither=dither)
+    dst = bytearray(3 * N)
+    for pct in range(1, 101):
+        b = hass(pct)
+        for _ in range(3):
+            o.process(solid(TONES[tone]), dst, b)
+            if sum(dst) == o.budget:
+                continue  # rounding went over the cap and was trimmed (near 100% only)
+            want = targets(o, TONES[tone], b)
+            for c, x in enumerate(want):
+                vals = dst[c::3]
+                if x < _output.DITHER_MIN - 0.01:
+                    assert len(set(vals)) == 1, (pct, c, x, set(vals))
+                    assert abs(vals[0] - x) <= 0.5 + 1 / 64, (pct, c, x, vals[0])
+                elif x > _output.DITHER_MIN + 0.01:
+                    assert all(abs(v - x) < 1 for v in vals), (pct, c, x)
+                    if dither == "spatial":
+                        assert sum(vals) / N == pytest.approx(x, abs=0.02)
+
+
+def test_warm_white_bottom_of_the_slider():
+    """At HA's 1%, each tone is one colour on every LED. Tone 2 (the
+    default) is (3, 1, 0): green/red 0.33 against its 0.34, the closest
+    whole-number colour; one level lower would be (2, 1, 0), too yellow."""
+    dst = bytearray(3 * N)
+    got = []
+    for c in TONES:
+        _output.Output(N).process(solid(c), dst, hass(1))
+        assert len(set(leds(dst))) == 1
+        got.append(tuple(dst[:3]))
+    assert got == [(2, 1, 0), (2, 1, 0), (3, 1, 0), (3, 1, 0)]
+    _output.Output(N, floor=3).process(solid(TONE2), dst, hass(1))
+    assert tuple(dst[:3]) == (2, 1, 0)
+
+
+def test_one_colour_until_red_is_dithered():
+    """Warm white (tone 2) is a single colour on the whole tree from 1% until
+    red's target reaches DITHER_MIN; above that only red differs between
+    LEDs (by one level of at least 9), while green and blue stay uniform
+    until they reach DITHER_MIN too."""
+    o = _output.Output(N)
+    dst = bytearray(3 * N)
+    seen_red_split = False
+    for pct in range(1, 101):
+        b = hass(pct)
+        o.process(solid(TONE2), dst, b)
+        if sum(dst) == o.budget:
+            continue  # trimmed at the cap (near 100% only)
+        want = targets(o, TONE2, b)
+        colours = set(leds(dst))
+        if want[0] < _output.DITHER_MIN - 0.01:
+            assert len(colours) == 1, (pct, colours)
+        else:
+            for c in (1, 2):
+                if want[c] < _output.DITHER_MIN - 0.01:
+                    assert len({x[c] for x in colours}) == 1, (pct, colours)
+            reds = {c[0] for c in colours}
+            assert min(reds) >= _output.DITHER_MIN and max(reds) - min(reds) <= 1
+            seen_red_split = seen_red_split or len(reds) == 2
+    assert seen_red_split
+
+
+def test_dims_monotonically():
+    """Whole-tree warm white, capped: the output never gets brighter as the
+    slider goes down. Below DITHER_MIN neighbouring steps can give the same
+    colour (the levels are whole numbers); once red is dithered, every step
+    is brighter."""
     o = _output.Output(N)
     dst = bytearray(3 * N)
     totals = []
     for b in range(3, 256):
-        o.process(solid(TONE1), dst, b)
+        o.process(solid(TONE2), dst, b)
         assert o.capped
-        totals.append(sum(dst))
-    assert all(b > a for a, b in zip(totals, totals[1:]))
+        totals.append((b, sum(dst), targets(o, TONE2, b)[0]))
+    assert all(t2 >= t1 for (_, t1, _), (_, t2, _) in zip(totals, totals[1:]))
+    dithered = [(b, t) for b, t, red in totals if red >= _output.DITHER_MIN + 0.1]
+    assert all(t2 > t1 for (_, t1), (_, t2) in zip(dithered, dithered[1:]))
 
 
 @pytest.mark.parametrize("dither", ["spatial", "temporal", False])
-@pytest.mark.parametrize("brightness", [1, 3, 8])
-def test_power_cap_holds_at_the_floor(brightness, dither):
+@pytest.mark.parametrize("brightness", [1, 3, 8, 40])
+def test_power_cap_holds_at_the_low_end(brightness, dither):
     o = _output.Output(N, dither=dither)
     for src in (solid((255, 255, 255)), bytearray((k * 101 + 7) & 255 for k in range(3 * N))):
         for f in frames_of(o, src, brightness, 8):
-            assert sum(f) <= o.budget * o.level(brightness) // 65280 + 3 * N
             assert sum(f) <= o.budget
+
+
+def test_textured_frames_are_static_and_close():
+    """Arbitrary content at low brightness: identical bytes every frame and
+    every channel within 1 of exact (nearest below DITHER_MIN)."""
+    src = bytearray((k * 37 + 11) & 255 for k in range(3 * N))
+    o = _output.Output(N, budget=10**9)
+    for b in (3, 20, 60):
+        frames = frames_of(o, src, b, 5)
+        assert all(f == frames[0] for f in frames)
+        scale = o.level(b) / 65280
+        for k in range(3 * N):
+            x = src[k] * scale
+            assert abs(frames[0][k] - x) <= (0.5 + 1 / 64 if x < _output.DITHER_MIN else 1), (b, k, x)
 
 
 def test_full_brightness_unchanged_by_floor():
     """Brightness 255 (what calibration frames use) is the same with or
-    without a floor, so calibration frames are byte-identical."""
+    without the floor and the undithered low end, so calibration frames are
+    byte-identical."""
     src = bytearray((k * 13) & 255 for k in range(3 * N))
     a = bytearray(3 * N)
     b = bytearray(3 * N)
     stage(dither=False).process(src, a, 255)
     _output.Output(N, dither=False).process(src, b, 255)
     assert a == b
-
-
-@pytest.mark.parametrize("brightness", [1, 3])
-def test_warm_white_per_led_hue_at_the_floor(brightness):
-    """At the bottom of the slider, every LED of warm_white tone 1 has red of
-    at least 4 and no lit blue unless red is at least 4x it, so there are no
-    red-only or cold "white" (1, 1, 1) LEDs; green stays near its 0.47 ratio
-    to red. Without the floor, HA's 1% gave dark, red-only and (1, 1, 1)
-    LEDs."""
-    dst = bytearray(3 * N)
-    _output.Output(N).process(solid(TONE1), dst, brightness)
-    for i in range(N):
-        r, g, b = dst[3 * i:3 * i + 3]
-        assert r >= 4, (i, r, g, b)
-        assert b <= 1 and r >= 4 * b, (i, r, g, b)
-        assert 0.35 <= g / r <= 0.65, (i, r, g, b)
-    stage().process(solid(TONE1), dst, 3)
-    leds = {tuple(dst[3 * i:3 * i + 3]) for i in range(N)}
-    assert (0, 0, 0) in leds and (1, 0, 0) in leds and (1, 1, 1) in leds
+    _output.Output(N, budget=10**9).process(src, b, 255)
+    assert b == src

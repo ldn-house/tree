@@ -830,9 +830,9 @@ def output_cap_applies_before_brightness():
     full = sum(dst)
     out.process(src, dst, 128)
     half = sum(dst)
-    # Brightness still dims when capped: 128 is 8% + 92% x 125/252 above the
+    # Brightness still dims when capped: 128 is 4% + 96% x 125/252 above the
     # default floor, and exactly 128/255 without one.
-    assert abs(half - full * (8 + 92 * 125 / 252) / 100) <= 3 * n, (full, half)
+    assert abs(half - full * (4 + 96 * 125 / 252) / 100) <= 3 * n, (full, half)
     out.set_floor(0)
     out.process(src, dst, 128)
     assert abs(sum(dst) - full * 128 // 255) <= 3 * n, (full, sum(dst))

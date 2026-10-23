@@ -13,34 +13,38 @@ as the power budget allows" and lower values dim proportionally (review H7).
 All per-frame arithmetic is integer, and process() does not allocate.
 
 Low brightness. Whole-tree effects are capped to about 1/5 of full scale, so
-at a few percent brightness the wire values are only 0-2. Three things keep
-dim colours from collapsing to red:
-- every channel is computed in 8.8 fixed point and rounded to nearest, not
-  floored;
-- with dither="spatial" (the default), each LED has a fixed rounding
-  threshold, spread evenly along the string by a low-discrepancy sequence
-  and shared by its three channels, so a target of 0.6 is sent as 1 on
-  about 60% of LEDs and 0 on the rest, and a dim LED never shows a stray
-  primary (a warm white LED is dark, red, amber or white-ish). Every LED stays within 1 of its exact
-  value, the tree-wide average keeps the hue, and a static frame gives the
-  same bytes every time (no flicker). The thresholds cover 0..255 evenly,
-  so the average is unbiased (a dead zone for small fractions would shift
-  dim hues by up to 20%). dither="temporal" (opt-in) instead carries each
-  channel's remainder to the next frame; at the tree's ~40 fps that
-  flickers visibly at low levels. dither=False rounds to nearest. When
-  rounding could take a frame over the budget (only near the cap, at high
-  brightness), the excess is trimmed off, so the cap holds on every frame;
+at a few percent brightness the wire values are only a few levels. On the
+tree, a one-level difference in a small channel is visible as a different
+tint on that LED (blue 0 next to blue 1 reads as yellow next to white), so:
+- every channel is computed in 8.8 fixed point and rounded, not floored;
+- a channel whose target is below dither_min levels (default DITHER_MIN = 9)
+  is rounded to nearest on every LED, so a solid colour is one colour on
+  the whole tree. Nearest is the closest integer to each channel's target,
+  which also keeps the hue closest: warm white (255, 87, 14) at the floor is
+  (3, 1, 0) on every LED;
+- at and above dither_min, where one level is at most about 1/9 of the
+  channel and wasn't visible on the tree, dither="spatial" (the default)
+  gives each LED a fixed rounding threshold, spread evenly along the string
+  by a low-discrepancy sequence and shared by its three channels: a target
+  of 9.6 is sent as 10 on about 60% of LEDs and 9 on the rest. Every LED
+  stays within 1 of its exact value, the tree-wide average matches, and a
+  static frame gives the same bytes every time (no flicker).
+  dither="temporal" (opt-in) instead carries each channel's remainder to
+  the next frame, which flickers at the tree's ~40 fps. dither=False rounds
+  to nearest everywhere. When rounding could take a frame over the budget
+  (only near the cap, at high brightness), the excess is trimmed off, so
+  the cap holds on every frame;
 - optional gamma and per-channel white balance.
 
-Brightness floor. Below a few percent a channel can only be 0 or 1, so an
-LED can't show the colour at all (warm white at 1% is dark, red, amber or
-cold "white" LEDs). The floor (floor=, percent of full brightness, default
-FLOOR_PCT) maps brightness linearly onto floor..100% from Home Assistant's
-1% (brightness 3; 1 and 2, which HA's slider can't pick, give the floor too)
-to 255, so the slider still dims smoothly over its whole range and 0 stays
-off. At the default 8% under the 1.5 A cap, warm white (tone 1) is
-(4-5, 2-3, 0-1) on every LED. Calibration frames use floor=0 (and
-brightness 255, which the floor never changes).
+Brightness floor. Below a few levels no rounding can show a colour (warm
+white's red would be 1 or 2). The floor (floor=, percent of full
+brightness, default FLOOR_PCT = 4) maps brightness linearly onto
+floor..100% from Home Assistant's 1% (brightness 3; 1 and 2, which HA's
+slider can't pick, give the floor too) to 255, so 0 stays off and the
+slider covers the whole usable range. 4% is the lowest level at which warm
+white (tone 2) is still its own hue, (3, 1, 0); at 3% it would be (2, 1, 0),
+too yellow. Calibration frames use floor=0 (and brightness 255, which the
+floor never changes).
 
 On MicroPython the per-frame loops run as viper code compiled at import
 (it is kept as source because mpy-cross can't emit native code without
@@ -60,7 +64,10 @@ LIMIT_A = 1.5        # default cap, amps at 12 V
 BUDGET_PERCENT = 13
 
 # Default brightness floor, percent of full brightness (see the docstring).
-FLOOR_PCT = 8
+FLOOR_PCT = 4
+# Channel targets below this many levels are rounded to nearest on every LED
+# rather than dithered (see the docstring).
+DITHER_MIN = 9
 # The brightness that lands on the floor: Home Assistant's 1%.
 _FLOOR_AT = 3
 
@@ -73,15 +80,19 @@ _GSTEPS = 8
 _GSIZE = 255 * _GSTEPS + 1
 
 
-def _lut_py(lut, s, gtab, use_gamma):
+def _lut_py(lut, s, gtab, use_gamma, umax):
     """lut[v] = output level for input v at combined scale s (1/65536), in
-    8.8 fixed point (0..65280)."""
-    if use_gamma:
-        for v in range(256):
-            lut[v] = gtab[(v * s) >> 13]
-    else:
-        for v in range(256):
-            lut[v] = (v * s + 128) >> 8
+    8.8 fixed point (0..65280). Levels below umax (8.8) are rounded to a
+    whole level here, so every LED's rounding threshold (0..255) leaves them
+    unchanged: no dithering below dither_min."""
+    for v in range(256):
+        if use_gamma:
+            a = gtab[(v * s) >> 13]
+        else:
+            a = (v * s + 128) >> 8
+        if a < umax:
+            a = ((a + 128) >> 8) << 8
+        lut[v] = a
 
 
 def _apply_py(src, dst, res, l0, l1, l2, n3, o0, o1, o2, temporal):
@@ -122,13 +133,16 @@ def _trim_py(dst, n3, excess, k):
 
 _VIPER = """
 @micropython.viper
-def _lut_v(lut: ptr16, s: int, gtab: ptr16, use_gamma: int):
+def _lut_v(lut: ptr16, s: int, gtab: ptr16, use_gamma: int, umax: int):
     v = 0
     while v < 256:
         if use_gamma:
-            lut[v] = gtab[(v * s) >> 13]
+            a = gtab[(v * s) >> 13]
         else:
-            lut[v] = (v * s + 128) >> 8
+            a = (v * s + 128) >> 8
+        if a < umax:
+            a = ((a + 128) >> 8) << 8
+        lut[v] = a
         v += 1
 
 
@@ -221,6 +235,8 @@ class Output:
     - floor: brightness floor, percent of full (0 = none); brightness
       3..255 (HA's 1..100%) maps linearly onto floor..100%, 1 and 2 give
       the floor, 0 stays dark. set_floor() changes it.
+    - dither_min: channel targets below this many levels are rounded to
+      nearest on every LED instead of dithered (0 dithers everything).
 
     After each process() call:
     - raw_total: channel sum of the raw frame
@@ -229,9 +245,11 @@ class Output:
     """
 
     def __init__(self, n, budget=None, gamma=None, order="RGB", dither="spatial", white=None,
-                 floor=FLOOR_PCT):
+                 floor=FLOOR_PCT, dither_min=DITHER_MIN):
         self.n = n
         self.set_floor(floor)
+        self.dither_min = dither_min
+        self.umax = min(65280, max(0, int(dither_min * 256)))
         self.budget = budget_for_current() if budget is None else int(budget)
         self.order = bytes(["RGB".index(c) for c in order])
         if dither is True:
@@ -329,14 +347,14 @@ class Output:
         w = self.white
         if w is None:
             l0 = luts[0]
-            _lut(l0, s, self.gtab, use_gamma)
+            _lut(l0, s, self.gtab, use_gamma, self.umax)
             l1 = l0
             l2 = l0
         else:
             # One table per source channel: luts[c] serves source channel c.
-            _lut(luts[0], (s * w[0] + 2048) >> _Q, self.gtab, use_gamma)
-            _lut(luts[1], (s * w[1] + 2048) >> _Q, self.gtab, use_gamma)
-            _lut(luts[2], (s * w[2] + 2048) >> _Q, self.gtab, use_gamma)
+            _lut(luts[0], (s * w[0] + 2048) >> _Q, self.gtab, use_gamma, self.umax)
+            _lut(luts[1], (s * w[1] + 2048) >> _Q, self.gtab, use_gamma, self.umax)
+            _lut(luts[2], (s * w[2] + 2048) >> _Q, self.gtab, use_gamma, self.umax)
             o = self.order
             l0 = luts[o[0]]
             l1 = luts[o[1]]

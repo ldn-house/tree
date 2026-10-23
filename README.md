@@ -64,7 +64,7 @@ The tree remembers its power, brightness and effect across reboots and network o
 
 ### Power Limiting (HDR)
 
-The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. The light's 1% is a brightness floor (8% by default, the "Brightness floor" setting): below about that, single LEDs can't show a colour, so the slider maps 1-100% onto floor-100% and still dims smoothly. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
+The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. The light's 1% is a brightness floor (4% by default, the "Brightness floor" setting): below that, LEDs can't show a colour at all, so the slider maps 1-100% onto floor-100%. At the dim end every LED shows the same colour; the lowest few steps move in whole levels, so neighbouring steps can look the same. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
 
 ## Animations
 
