@@ -1,0 +1,13 @@
+# "The TV is on": any of these media players is in a state other than off,
+# unavailable, unknown or standby. webOS TVs go unavailable rather than off
+# when powered down, and a streamer can report on rather than playing while
+# something plays, so "not off-ish" catches more viewing than "playing".
+#
+# Add it to an automation's conditions (for example, F1 flag colours on the
+# room lights) to act only while someone's watching. Replace the entity IDs
+# with your TV and streamer.
+condition: template
+value_template: >-
+  {{ ['media_player.living_room_tv', 'media_player.living_room_streamer']
+     | reject('is_state', ['off', 'unavailable', 'unknown', 'standby'])
+     | list | count > 0 }}

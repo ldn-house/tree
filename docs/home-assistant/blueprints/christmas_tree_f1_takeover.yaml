@@ -1,0 +1,369 @@
+blueprint:
+  name: Christmas tree - F1 takeover
+  description: >-
+    Hands the tree to Formula 1 while a watched session is on and the TV is
+    on (F1 Sensor 6.0). Dark from the formation lap, a green sweep up the
+    tree at lights-out, then the track flag (green, yellow, VSC, SC, red),
+    and at the chequered flag: a chequered flag, the winner's team colours,
+    a spiral in them, and back to whatever the tree was doing. Uses the
+    tree's takeover command (docs/home-assistant/README.md), which ends by
+    itself if this automation stops refreshing it. The tree's own state is
+    never changed, so ending the takeover restores it.
+  domain: automation
+  source_url: https://github.com/ldn-house/tree/blob/main/docs/home-assistant/blueprints/christmas_tree_f1_takeover.yaml
+  input:
+    tree:
+      name: Tree
+      collapsed: false
+      input:
+        mqtt_prefix:
+          name: MQTT prefix
+          description: The tree's MQTT_PREFIX (config.py).
+          default: xmas_tree
+          selector:
+            text:
+        takeover_entity:
+          name: Takeover sensor
+          description: The tree's "Takeover" binary sensor (MQTT discovery).
+          selector:
+            entity:
+              domain: binary_sensor
+        brightness:
+          name: Brightness
+          description: >-
+            Takeover brightness, 1-255. The tree's 1.5 A power cap still
+            applies; changing the light's brightness during a takeover
+            overrides this until the takeover ends.
+          default: 255
+          selector:
+            number:
+              min: 1
+              max: 255
+        priority:
+          name: Priority
+          description: Takeover priority (0-100); a higher one shows over this.
+          default: 50
+          selector:
+            number:
+              min: 0
+              max: 100
+    watching:
+      name: When
+      collapsed: false
+      input:
+        tv_players:
+          name: TV
+          description: >-
+            Media players that mean "the TV is on" when any of them is not
+            off, unavailable, unknown or standby.
+          selector:
+            entity:
+              domain: media_player
+              multiple: true
+        sessions:
+          name: Sessions
+          description: Session names (the end of the F1 calendar event's title).
+          default: [Practice 3, Qualifying, Sprint Qualifying, Sprint, Race]
+          selector:
+            select:
+              multiple: true
+              options: [Practice 1, Practice 2, Practice 3, Qualifying, Sprint Qualifying, Sprint, Race]
+    f1:
+      name: F1 Sensor entities
+      collapsed: true
+      input:
+        calendar:
+          name: Season calendar
+          default: calendar.f1_race_season_calendar
+          selector:
+            entity:
+              domain: calendar
+        session_status:
+          name: Session status
+          default: sensor.f1_session_status
+          selector:
+            entity:
+              domain: sensor
+        track_status:
+          name: Track status
+          default: sensor.f1_track_status
+          selector:
+            entity:
+              domain: sensor
+        session_clock:
+          name: Session time remaining (has clock_running)
+          default: sensor.f1_session_session_time_remaining
+          selector:
+            entity:
+              domain: sensor
+        race_control:
+          name: Race control
+          default: sensor.f1_race_control
+          selector:
+            entity:
+              domain: sensor
+        top_three_p1:
+          name: Top three P1
+          default: sensor.f1_top_three_p1
+          selector:
+            entity:
+              domain: sensor
+        live_delay:
+          name: Live delay
+          description: >-
+            F1 Sensor's live delay (seconds). The calendar isn't delayed, so the
+            formation-lap darkness waits this long after the scheduled start.
+          default: number.f1_live_delay
+          selector:
+            entity:
+              domain: number
+    colours:
+      name: Colours
+      collapsed: true
+      input:
+        green:
+          name: Green
+          default: [0, 255, 0]
+          selector:
+            color_rgb:
+        yellow:
+          name: Yellow
+          default: [255, 255, 0]
+          selector:
+            color_rgb:
+        vsc:
+          name: Virtual safety car
+          default: [255, 191, 0]
+          selector:
+            color_rgb:
+        sc:
+          name: Safety car
+          default: [255, 140, 0]
+          selector:
+            color_rgb:
+        red:
+          name: Red
+          default: [255, 0, 0]
+          selector:
+            color_rgb:
+        winner_fallback:
+          name: Winner colour when F1 Sensor has none
+          default: [255, 215, 0]
+          selector:
+            color_rgb:
+
+mode: queued
+max: 25
+
+trigger_variables:
+  calendar: !input calendar
+  sessions: !input sessions
+  tv_players: !input tv_players
+
+triggers:
+  - trigger: template
+    id: tv_off
+    value_template: >-
+      {{ tv_players | reject('is_state', ['off', 'unavailable', 'unknown', 'standby']) | list | count == 0 }}
+    for:
+      seconds: 60
+  # The scheduled start of a Race or Sprint is the formation lap.
+  - trigger: calendar
+    id: formation
+    event: start
+    entity_id: !input calendar
+  - trigger: state
+    id: race_control
+    entity_id: !input race_control
+    to: ~  # state changes only, not attribute updates
+  - trigger: state
+    id: clock_start
+    entity_id: !input session_clock
+    attribute: clock_running
+    to: true
+  - trigger: state
+    id: finished
+    entity_id: !input session_status
+    to: finished
+  - trigger: state
+    id: update
+    entity_id: !input session_status
+    to: ~  # state changes only, not attribute updates
+  - trigger: state
+    id: update
+    entity_id: !input track_status
+    to: ~  # state changes only, not attribute updates
+  - trigger: state
+    id: update
+    entity_id: !input tv_players
+    to: ~  # state changes only, not attribute updates
+  - trigger: time_pattern
+    id: update
+    minutes: /1
+  - trigger: homeassistant
+    id: update
+    event: start
+
+variables:
+  prefix: !input mqtt_prefix
+  topic: "{{ prefix }}/takeover/set"
+  takeover_entity: !input takeover_entity
+  brightness: !input brightness
+  priority: !input priority
+  session_status: !input session_status
+  track_status: !input track_status
+  session_clock: !input session_clock
+  top_three_p1: !input top_three_p1
+  live_delay: !input live_delay
+  green: !input green
+  yellow: !input yellow
+  vsc: !input vsc
+  sc: !input sc
+  red: !input red
+  winner_fallback: !input winner_fallback
+  ttl: 180
+  tv_on: >-
+    {{ tv_players | reject('is_state', ['off', 'unavailable', 'unknown', 'standby']) | list | count > 0 }}
+  session_name: "{{ (state_attr(calendar, 'message') or '').split(' - ') | last }}"
+  watched: "{{ is_state(calendar, 'on') and session_name in sessions }}"
+  status: "{{ states(session_status) }}"
+  track: "{{ states(track_status) }}"
+  clock: "{{ state_attr(session_clock, 'clock_running') == true }}"
+  # The tree is showing (or holding underneath) this automation's takeover.
+  owned: "{{ is_state(takeover_entity, 'on') and state_attr(takeover_entity, 'id') == 'f1' }}"
+  showing: "{{ state_attr(takeover_entity, 'effect') if owned else none }}"
+  # What the track says the tree should show now, or none.
+  # Red needs only a live (or red-flag suspended) session; the rest also
+  # need the session clock running, as the room-light automations do.
+  flag: >-
+    {%- if track == 'RED' and status in ['live', 'suspended'] -%}
+      {{ {'effect': 'f1_red', 'params': {'color': red}} }}
+    {%- elif status == 'live' and clock and track == 'CLEAR' -%}
+      {{ {'effect': 'f1_start', 'params': {'color': green}} }}
+    {%- elif status == 'live' and clock and track == 'YELLOW' -%}
+      {{ {'effect': 'f1_yellow', 'params': {'color': yellow}} }}
+    {%- elif status == 'live' and clock and track == 'VSC' -%}
+      {{ {'effect': 'lighthouse', 'params': {'color': vsc, 'speed': 1.0, 'width': 70}} }}
+    {%- elif status == 'live' and clock and track == 'SC' -%}
+      {{ {'effect': 'lighthouse', 'params': {'color': sc, 'speed': 2.0, 'width': 70}} }}
+    {%- else -%}
+      {{ none }}
+    {%- endif -%}
+
+actions:
+  - choose:
+      # TV off for a minute: give the tree back. (Ending a takeover that
+      # isn't there does nothing.)
+      - conditions:
+          - condition: trigger
+            id: tv_off
+          - "{{ owned or watched }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "{{ topic }}"
+              payload: '{"id": "f1", "action": "end"}'
+      # Otherwise nothing happens while the TV is off; an unrefreshed
+      # takeover ends by itself.
+      - conditions: "{{ not tv_on }}"
+        sequence:
+          - stop: The TV is off
+
+      # Formation lap: dark until lights-out. The calendar's start isn't
+      # delayed, so wait out F1 Sensor's live delay; race control messages
+      # ("FORMATION LAP", "EXTRA FORMATION LAP") already are, and catch
+      # delayed starts.
+      - conditions:
+          - condition: trigger
+            id: [formation, race_control]
+          - condition: template
+            value_template: >-
+              {%- if trigger.id == 'formation' -%}
+                {%- set s = trigger.calendar_event.summary.split(' - ') | last -%}
+                {{ s in ['Race', 'Sprint'] and s in sessions }}
+              {%- else -%}
+                {{ 'FORMATION LAP' in (trigger.to_state.state | upper) and watched
+                   and session_name in ['Race', 'Sprint'] }}
+              {%- endif -%}
+        sequence:
+          - if: "{{ trigger.id == 'formation' }}"
+            then:
+              - delay: "{{ states(live_delay) | int(0) }}"
+          - condition: template
+            value_template: "{{ states(session_status) == 'pre' }}"
+          - action: mqtt.publish
+            data:
+              topic: "{{ topic }}"
+              # 15 minutes at most, and not refreshed: a start that's put
+              # off for longer gives the tree back until the next message.
+              payload: >-
+                {{ {'id': 'f1', 'effect': 'off', 'priority': priority | int, 'ttl_s': 900} | tojson }}
+
+      # Chequered flag: the finish sequence, then hand the tree back.
+      - conditions:
+          - condition: trigger
+            id: finished
+          # The tree refuses it if the user dismissed F1 this session; the
+          # final "end" lifts that for the next one.
+          - "{{ owned or watched }}"
+        sequence:
+          - variables:
+              winner: >-
+                {% set c = state_attr(top_three_p1, 'team_color_rgb') %}
+                {{ c if c is sequence and c | count == 3 else winner_fallback }}
+          - action: mqtt.publish
+            data:
+              topic: "{{ topic }}"
+              payload: >-
+                {{ {'id': 'f1', 'effect': 'f1_chequered', 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
+          - delay: 15
+          - action: mqtt.publish
+            data:
+              topic: "{{ topic }}"
+              payload: >-
+                {{ {'id': 'f1', 'effect': 'f1_winner', 'color': winner, 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
+          - delay: 20
+          - action: mqtt.publish
+            data:
+              topic: "{{ topic }}"
+              payload: >-
+                {{ {'id': 'f1', 'effect': 'spiral_3d', 'params': {'color': winner, 'color2': [255, 255, 255]}, 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
+          - delay: 15
+          - action: mqtt.publish
+            data:
+              topic: "{{ topic }}"
+              payload: '{"id": "f1", "action": "end"}'
+
+      # Anything else: show the flag, or keep what's showing alive.
+      - conditions:
+          - condition: trigger
+            id: [update, clock_start]
+          - "{{ watched or owned }}"
+        sequence:
+          - choose:
+              # Over without a finish sequence here (HA restarted during the
+              # chequered flag, say). "finished" itself is the finish branch's.
+              - conditions: "{{ owned and status in ['finalised', 'ended'] }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ topic }}"
+                      payload: '{"id": "f1", "action": "end"}'
+              - conditions: "{{ flag is mapping }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ topic }}"
+                      # The tree ignores a repeat of what it's showing (it only
+                      # extends the TTL); when the clock starts again
+                      # (lights-out, a restart, the next qualifying part),
+                      # restart replays the green sweep.
+                      payload: >-
+                        {{ {'id': 'f1', 'effect': flag.effect, 'params': flag.params, 'brightness': brightness | int,
+                            'priority': priority | int, 'ttl_s': ttl, 'restart': trigger.id == 'clock_start'} | tojson }}
+              - conditions: "{{ owned and showing != 'off' }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ topic }}"
+                      payload: "{{ {'id': 'f1', 'action': 'refresh', 'ttl_s': ttl} | tojson }}"
