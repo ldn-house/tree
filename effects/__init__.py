@@ -24,6 +24,10 @@ EFFECTS = [
     "level_up",
     "beacon",
     "tetris",
+    "portal",
+    "fire",
+    "lightning",
+    "storm",
 ]
 
 DISABLED = [
