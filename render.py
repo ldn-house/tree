@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import effects  # noqa: E402
-from effects import _coords, _output  # noqa: E402
+from effects import _coords, _output, _util  # noqa: E402
 
 LED_COUNT = 500
 DEFAULT_COORDS = ("coordinates/coords.txt", "coordinates/coords_compact.txt")
@@ -83,7 +83,13 @@ def build_params(module, overrides):
     spec = getattr(module, "PARAMS", {})
     warnings = []
     for key, value in overrides.items():
-        if key in spec:
+        if key in spec and _util.is_rgb(spec[key]):
+            try:
+                value = _util.parse_rgb(value)
+            except ValueError as e:
+                warnings.append(f"param {key}={value!r}: {e}")
+                continue
+        elif key in spec:
             lo, hi = spec[key][1], spec[key][2]
             if isinstance(value, (int, float)) and not lo <= value <= hi:
                 warnings.append(f"param {key}={value} outside [{lo}, {hi}]")
@@ -489,7 +495,7 @@ def parse_args(argv=None):
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--param", action="append", default=[], metavar="K=V",
-                    help="override an effect param (repeatable)")
+                    help="override an effect param (repeatable; colours as #RRGGBB or R,G,B)")
     ap.add_argument("--brightness", type=float, default=1.0,
                     help="0-1 (default 1); non-zero maps onto floor..1 as on the tree")
     ap.add_argument("--floor", type=float, default=_output.FLOOR_PCT,

@@ -51,8 +51,8 @@ def test_discovery_payloads(mdev, bus):
                 assert c[k].startswith(P + "/"), (topic, k)
     light = cfgs["homeassistant/light/xmas_tree/config"]
     assert light["unique_id"] == "xmas_tree_pico"  # same entity as the old firmware
-    assert light["schema"] == "json" and light["supported_color_modes"] == ["brightness"]
-    assert light["effect_list"] == ["auto", "solid", "chase", "height"]
+    assert light["schema"] == "json" and light["supported_color_modes"] == ["rgb"]
+    assert light["effect_list"] == ["auto", "solid", "chase", "height", "tint"]
     have = {t.split("/")[1] + "." + (t.split("/")[3] if t.count("/") == 4 else "light") for t in cfgs}
     want = {
         "light.light", "number.speed", "number.auto_cycle", "number.param_solid_level", "number.param_chase_speed",
@@ -78,7 +78,7 @@ def test_discovery_payloads(mdev, bus):
     assert "command_topic" not in upd  # no UPDATE_KEY, so no install button
 
     # Published state the templates read from.
-    assert json.loads(bus.wait(P + "/state", timeout=10)) == {"state": "ON", "brightness": 128, "effect": "auto", "color_mode": "brightness"}
+    assert json.loads(bus.wait(P + "/state", timeout=10)) == {"state": "ON", "brightness": 128, "effect": "auto", "color_mode": "rgb"}
     s = bus.wait(P + "/settings")
     assert json.loads(s)["params"]["chase"]["speed"] == 1.0
     diag = json.loads(bus.wait(P + "/diag"))
@@ -288,7 +288,7 @@ def test_running_effect_is_published_on_change(mdev, bus):
     lag = [at for t, p, _r, at in bus.msgs if t == EFF and p == b"chase" and at >= t0][0] - t0
     assert lag < 3, lag  # on change (~0.2-1 s here), not on the 30 s diagnostics tick it used to wait for
     attrs = json.loads(bus.last(EFF + "/attributes"))
-    assert attrs == {"mode": "locked", "selected": "chase", "next_switch_s": None}
+    assert attrs == {"mode": "locked", "selected": "chase", "next_switch_s": None, "takeover": None}
     # Auto mode advances by itself (fixture effects run 4 s each) and says so.
     t0 = time.time()
     d.post("/state", {"effect": "auto"})

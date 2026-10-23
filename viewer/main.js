@@ -142,7 +142,23 @@ function showError(err) {
   if (err) console.error(err);
 }
 
-function paramControl(key, [def, lo, hi], value) {
+function colorControl(key, value) {
+  const hex = (v) => "#" + v.toString(16).padStart(6, "0");
+  const label = document.createElement("label");
+  label.innerHTML = `${key} <output></output><input type="color">`;
+  const input = label.querySelector("input");
+  const out = label.querySelector("output");
+  input.value = out.textContent = hex(value);
+  input.addEventListener("input", async () => {
+    out.textContent = input.value;
+    await call("param", { key, value: parseInt(input.value.slice(1), 16) }).catch(showError);
+  });
+  return label;
+}
+
+function paramControl(key, [def, lo, hi, kind], value) {
+  // Colour params (docs/effect-api.md): a packed 0xRRGGBB int.
+  if (kind === "rgb") return colorControl(key, value);
   const isInt = [def, lo, hi].every(Number.isInteger);
   const step = isInt ? 1 : Math.pow(10, Math.floor(Math.log10((hi - lo) / 100)));
   const label = document.createElement("label");
