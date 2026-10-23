@@ -192,13 +192,19 @@ def test_legacy_single_file_update_is_refused(device):
 
 
 class FakeReleases:
-    """Serves bundles like GitHub Releases: a redirect to the asset host."""
+    """Serves bundles like GitHub Releases: a redirect to the asset host.
+    github=True sends a head shaped like github.com's real one (measured
+    2026-10-23: ~11 KB, a 9,243-byte Content-Security-Policy line, session
+    cookies and a ~920-byte signed absolute Location); sig_len sets the
+    length of the Location's signature."""
 
-    def __init__(self, files):
+    def __init__(self, files, github=False):
         import http.server
         import threading
 
         self.files = files  # {(channel, asset): bytes}
+        self.github = github
+        self.sig_len = 800
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -209,9 +215,24 @@ class FakeReleases:
                 parts = self.path.strip("/").split("/")
                 if parts[0] == "download" and len(parts) == 3:
                     self.send_response(302)
-                    self.send_header("Location", f"/assets/{parts[1]}/{parts[2]}")
+                    if not outer.github:
+                        self.send_header("Location", f"/assets/{parts[1]}/{parts[2]}")
+                        self.end_headers()
+                        return
+                    port = self.server.server_address[1]
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Vary", "X-PJAX, X-PJAX-Container, Turbo-Visit, Turbo-Frame, " * 3)
+                    self.send_header("Location", f"http://127.0.0.1:{port}/assets/{parts[1]}/{parts[2]}"
+                                                 f"?sp=r&sv=2018-11-09&sig={'S' * outer.sig_len}")
+                    self.send_header("Content-Security-Policy",
+                                     "default-src 'none'; " + "connect-src github.com *.github.com; " * 266)
+                    for name in ("_gh_sess", "_octo", "logged_in"):
+                        self.send_header("Set-Cookie", f"{name}={'c' * 360}; path=/; secure; HttpOnly")
+                    self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
+                if parts[0] == "assets" and len(parts) == 3:
+                    parts[2] = parts[2].partition("?")[0]
                 data = outer.files.get(tuple(parts[1:3])) if parts[0] == "assets" else None
                 if data is None:
                     self.send_response(404)
@@ -258,6 +279,33 @@ def test_self_update_from_releases(make_device, bundles):
         assert code == 202
         st = running(d, "v2-signed", timeout=60, confirmed=True)
         assert st["boot"]["previous"] == "a"
+    finally:
+        rel.close()
+
+
+def test_self_update_through_github_sized_headers(make_device, bundles):
+    """github.com's redirect head is ~11 KB with one 9 KB line, which the
+    client used to refuse ("response headers too large") on every check."""
+    signed = bundles["v2-signed"]
+    files = {
+        ("main", "tree-firmware.bin"): signed.read_bytes(),
+        ("main", "manifest.json"): (signed.parent / "manifest.json").read_bytes(),
+    }
+    rel = FakeReleases(files, github=True)
+    try:
+        d = make_device(bundles["v1"], UPDATE_KEY=SIGNING_KEY, UPDATE_URL=rel.url())
+        running(d, "v1", confirmed=True)
+        auth = ("-H", f"Authorization: Bearer {d.token}")
+        code, res = curl(*auth, d.url("/update/github/check?channel=main"))
+        assert code == 200 and res["error"] is None and res["latest"] == "v2-signed", res
+        # A header the client needs is still bounded, with an error that says which.
+        rel.sig_len = 5000
+        code, res = curl(*auth, d.url("/update/github/check?channel=main"))
+        assert code == 200 and "location too long" in res["error"], res
+        rel.sig_len = 800
+        code, res = curl("-X", "POST", *auth, d.url("/update/github?channel=main"))
+        assert code == 202
+        running(d, "v2-signed", timeout=60, confirmed=True)
     finally:
         rel.close()
 
