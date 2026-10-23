@@ -47,7 +47,7 @@ class Host:
         self.params[key] = value
 
     def limits(self):
-        return [_output.LIMIT_A, _output.MA_PER_CHANNEL]
+        return [_output.LIMIT_A, _output.MA_PER_CHANNEL, self.stage.floor]
 
     def set_limit(self, limit_a):
         self.stage.budget = _output.budget_for_current(limit_a)
@@ -56,9 +56,9 @@ class Host:
         self.effect.render(int(t_ms), self.raw)
         self.stage.process(self.raw, self.out, int(brightness))
         out_total = sum(self.out)
-        # Estimated current, computed the way the firmware reports it.
-        b = int(brightness)
-        amps = _output.current_a(self.stage.raw_total * self.stage.factor // 4096 * b // 255)
+        # Estimated current from the bytes actually output (after gamma,
+        # white balance and dithering), as the firmware reports it.
+        amps = _output.current_a(out_total)
         limit = _output.current_a(self.stage.budget)
         return (bytes(self.out), bytes(self.raw), self.stage.capped, self.stage.factor,
                 self.stage.raw_total, out_total, self.stage.budget, amps, limit)
@@ -131,7 +131,7 @@ const handlers = {
     py.globals.set("H", host);
     const pos = py.runPython("None if H.coords is None else [list(c) if c else None for c in H.coords]");
     const limits = host.limits().toJs();
-    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1] };
+    return { names, coordsPath: coords.path, positions: pos ? pos.toJs() : null, limitA: limits[0], maPerChannel: limits[1], floorPct: limits[2] };
   },
   async select({ name, seed, params }) {
     const proxy = host.select(name, seed, py.toPy(params || {}));

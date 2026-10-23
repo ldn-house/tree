@@ -72,6 +72,22 @@ def test_legacy_endpoints_go_through_the_power_cap(device):
     wait_for(lambda: d.get("/")[1]["effect"]["running"], 5)
 
 
+def test_calibration_frames_ignore_the_brightness_floor(device):
+    """Calibration frames are exact whatever the floor and brightness."""
+    d = device
+    d.post("/state", {"floor": 25, "brightness": 3})
+    d.get("/calibrate/start", token=True)
+    d.get("/calibrate/led?n=7", token=True)
+    f = wait_for(lambda: (lambda f: f if f[21:24] == bytes([255, 255, 255]) else None)(frame(d)), 5, what="LED 7")
+    assert sum(f) == 765
+    lit = [i % 3 == 0 for i in range(N)]
+    code, res = d.post("/calibrate/frame", seq([mono(1000, 40, lit)]))
+    assert code == 200, res
+    want = b"".join(bytes([40, 40, 40]) if x else bytes(3) for x in lit)
+    wait_for(lambda: frame(d) == want, 5, what="static calibration frame, exact")
+    d.get("/calibrate/stop", token=True)
+
+
 def test_ttl_expiry_and_power_off_unlock(device):
     d = device
     d.post("/calibrate/start?ttl_s=2")

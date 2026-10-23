@@ -64,6 +64,12 @@ LED_MA_PER_CHANNEL = get("LED_MA_PER_CHANNEL", 8)
 # Deprecated: a cap as % of all pixels at full white; overrides POWER_LIMIT_A.
 POWER_BUDGET_PERCENT = get("POWER_BUDGET_PERCENT")
 GAMMA = get("GAMMA")
+# Output dithering, so dim colours keep their hue instead of collapsing to
+# red: "spatial" (fixed per LED, no flicker; the default), "temporal" (opt-in;
+# flickers visibly at low levels at the tree's frame rate) or False.
+LED_DITHER = get("LED_DITHER", "spatial")
+# Optional per-channel white balance (r, g, b), each 0..1, e.g. (1.0, 0.85, 0.7).
+WHITE_BALANCE = get("WHITE_BALANCE")
 FPS = get("FPS", 40)
 
 # Health needed before a freshly installed update is confirmed.

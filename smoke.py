@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 import effects  # noqa: E402
 import render  # noqa: E402
+from effects import _output  # noqa: E402
 
 
 class Report:
@@ -78,14 +79,24 @@ def check_imports(rep, name):
 
 
 def check_power(rep, name, m, label=""):
-    """The output stage must hold every frame within the current cap."""
+    """The output stage must hold the current cap: on average over the run,
+    and within 1 LSB per lit channel on any single frame (the most temporal
+    dithering can add)."""
     p = m["power"]
     peak = p["current_a"]["peak"]
     suffix = f" with {label}" if label else ""
-    rep.check(peak is None or peak <= p["limit_a"], name,
-              f"peak current {peak} A above the {p['limit_a']} A cap{suffix}")
+    n = m["led_count"]
+    one_lsb_a = _output.current_a(3 * n, p["ma_per_channel"])
+    rep.check(peak is None or peak <= p["limit_a"] + one_lsb_a, name,
+              f"peak current {peak} A above the {p['limit_a']} A cap (+1 LSB per channel){suffix}")
     rep.check(p["over_budget_frames"] == 0, name,
-              f"{p['over_budget_frames']} frames above the {p['budget_channel_sum']} channel-sum budget{suffix}")
+              f"{p['over_budget_frames']} frames more than 1 LSB per lit channel above the "
+              f"{p['budget_channel_sum']} channel-sum budget{suffix}")
+    # Over a run, dithering's remainders can add at most 1 per channel in total.
+    slack = 3 * n / max(1, m["frames"]) + 1
+    mean_over = p.get("mean_over_budget")
+    rep.check(mean_over is None or mean_over <= slack, name,
+              f"mean output {mean_over} above the channel-sum budget{suffix}")
 
 
 def check_render(rep, name, mod, coords, seconds, fps):
@@ -153,6 +164,13 @@ def check_micropython(rep, exe, required, only):
         if not only or line.split(" ")[0] in only or not line[:1].isalpha():
             print("  " + line)
     rep.check(r.returncode == 0, "micropython", "allocation/compat check failed")
+    print(f"micropython: {exe} tools/output_check.py")
+    r = subprocess.run([exe, "tools/output_check.py"], cwd=ROOT, capture_output=True, text=True)
+    out = r.stdout + r.stderr
+    for line in out.splitlines():
+        if not line.endswith(" ok") and not line.endswith(" 0 bytes"):
+            print("  " + line)
+    rep.check(r.returncode == 0, "micropython", "output stage parity/allocation check failed")
 
 
 def main():

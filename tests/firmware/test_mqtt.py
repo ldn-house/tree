@@ -118,6 +118,47 @@ def test_commands_and_malformed_payloads(mdev, bus):
     assert len(d.boots) == 0
 
 
+def test_brightness_floor_from_home_assistant(mdev, bus):
+    """HA's light at 1% (brightness 3) lands on the floor; the "Brightness
+    floor" number changes it, and the settings payload reports it."""
+    import base64
+
+    d = mdev
+    c = json.loads(bus.wait("homeassistant/number/xmas_tree/brightness_floor/config", timeout=20))
+    assert c["command_topic"] == P + "/cmd/brightness_floor" and c["state_topic"] == P + "/settings"
+    assert c["value_template"] == "{{ value_json.floor }}" and (c["min"], c["max"], c["unit_of_measurement"]) == (0, 25, "%")
+    assert json.loads(bus.wait(P + "/settings", timeout=10))["floor"] == 4
+    budget = status(d)["power_budget"]
+
+    def frame_sum():
+        return sum(base64.b64decode(d.get("/frame")[1]["frame"]))
+
+    t0 = time.time()
+    bus.pub(P + "/set", '{"state":"ON","brightness":3,"effect":"solid"}')
+    bus.wait(P + "/state", lambda p: json.loads(p)["brightness"] == 3, 10, after=t0)
+    wait_for(lambda: frame_sum() == 1500, 10, what="1% at the 4% floor: 1 on every channel")
+    # Higher HA steps are brighter (neighbouring steps at the bottom can give
+    # the same whole levels: 2% and 3% are both 2 here).
+    sums = []
+    for pct in (1, 5, 50, 100):
+        b = round(pct * 255 / 100)
+        bus.pub(P + "/set", '{"brightness":%d}' % b)
+        bus.wait(P + "/state", lambda p, b=b: json.loads(p)["brightness"] == b, 10, after=time.time() - 0.05)
+        time.sleep(0.6)
+        sums.append(frame_sum())
+    assert sums[:2] == [1500, 3000] and sums == sorted(sums) and len(set(sums)) == len(sums), sums
+    t0 = time.time()
+    bus.pub(P + "/set", '{"brightness":3}')
+    bus.pub(P + "/cmd/brightness_floor", "5")
+    bus.wait(P + "/settings", lambda p: json.loads(p)["floor"] == 5, 10, after=t0)
+    wait_for(lambda: frame_sum() == 3000, 10, what="5% floor: 1.6, so 2 on every channel")
+    bus.pub(P + "/cmd/brightness_floor", "abc")
+    bus.pub(P + "/cmd/brightness_floor", "80")  # clamped to 25
+    bus.wait(P + "/settings", lambda p: json.loads(p)["floor"] == 25, 10, after=t0)
+    assert status(d)["state"]["floor"] == 25
+    assert len(d.boots) == 0
+
+
 def test_retained_commands_do_not_override_flash(make_device, bundles, broker, bus):
     d = make_device(bundles["v1"], start=False, MQTT_BROKER="127.0.0.1", MQTT_PORT=broker.port, MQTT_KEEPALIVE=5)
     (d.root / "state.json").write_text(json.dumps({"power": True, "brightness": 50, "effect": "solid"}))

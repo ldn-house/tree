@@ -8,9 +8,9 @@ broken.
 """
 
 try:
-    from effects._output import Output, budget_for
+    from effects._output import Output, budget_for, NATIVE, FLOOR_PCT
 except Exception:
-    from app._output_fallback import Output, budget_for
+    from app._output_fallback import Output, budget_for, NATIVE, FLOOR_PCT
 
 
 def channel_budget(n, limit_a, ma_per_channel, percent=None):
@@ -35,5 +35,8 @@ def estimated_a(channel_sum, ma_per_channel):
     return channel_sum * ma_per_channel / 255000
 
 
-def create(n, budget, gamma, order):
-    return Output(n, budget, gamma, order)
+def create(n, budget, gamma, order, dither="spatial", white=None, floor=FLOOR_PCT):
+    """dither: "spatial" (default), "temporal" or False (calibration frames
+    pass False). white: optional (r, g, b) balance, each 0..1. floor:
+    brightness floor in percent (calibration frames pass 0)."""
+    return Output(n, budget, gamma, order, dither, white, floor)

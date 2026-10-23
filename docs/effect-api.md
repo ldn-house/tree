@@ -10,7 +10,7 @@ This document is the contract between the effects in `effects/`, the firmware ru
 effects/
   __init__.py      # EFFECTS (ordered), load(name), defaults(module), Ctx
   _util.py         # shared helpers: fixed-point tables, Layout, Param, Phase
-  _output.py       # the output stage (power cap, brightness, gamma, colour order)
+  _output.py       # the output stage (power cap, brightness and its floor, gamma, colour order)
   _coords.py       # coordinate loading and the legacy-coordinates adapter
   rainbow_cycle.py # one effect per module, imported lazily by name
   ...
@@ -84,17 +84,27 @@ class Effect:
 The runtime applies this to every frame, effect or calibration pattern, in this order:
 
 ```
-raw RGB frame -> power cap (on the raw frame) -> brightness -> gamma (optional) -> colour order -> driver
+raw RGB frame -> power cap (on the raw frame) -> brightness (above the floor)
+  -> white balance (optional) -> gamma (optional) -> rounding / dithering -> colour order -> driver
 ```
 
-`effects/_output.py` is the reference implementation, used unchanged by the renderer and viewer. The firmware should use it too, or a faster version that produces byte-identical output.
+`effects/_output.py` is the reference implementation, used unchanged by the renderer, the viewer and the firmware (which also vendors a byte-identical copy as `firmware/app/_output_fallback.py`).
 
-- **Power cap**: a current limit. If the raw frame's channel sum exceeds the budget, every channel is scaled by `budget / sum`. The strip is 12 V WS2811 bullets on a single feed, which binds at about 1.5 A, so the default is `LIMIT_A = 1.5`. `budget_for_current(limit_a, ma_per_channel)` converts amps to the channel-sum budget `Output(budget=...)` takes: 47,812 at the defaults. `Output(n)` with no budget uses that. `budget_for(n, percent)`, the original firmware's 13% of full white, remains for compatibility.
-- **Brightness**: 0-255, applied after the cap. Brightness 255 means "as bright as the budget allows" and lower values dim proportionally; previously the cap clipped dense effects above about 13-40% brightness (review H7).
-- **Gamma**: off by default (linear, as before). `Output(n, gamma=2.2)` enables it.
-- **Colour order**: `Output(n, order="RGB")` emits channels in the given order. The renderer and viewer use RGB. The firmware passes what its driver needs. Per review M8, the 12V WS2811 string is wired RGB, and the old code only worked because two GRB swaps cancelled out.
-- `Output.process(src, dst, brightness)` is integer-only, does not allocate, and sets `raw_total`, `capped` and `factor` (cap factor in 1/4096) for telemetry.
-- Current estimate: `_output.current_a(channel_sum, ma_per_channel)` assumes `MA_PER_CHANNEL = 8` mA per channel at 255 for a 12 V WS2811 bullet. The 20 mA used previously is a 5 V WS2812 figure. The firmware and the renderer estimate a frame's current the same way: `current_a(raw_total * factor // 4096 * brightness // 255)`.
+`Output(n, budget=None, gamma=None, order="RGB", dither="spatial", white=None, floor=FLOOR_PCT, dither_min=DITHER_MIN)`:
+
+- **Power cap**: a current limit. If the raw frame's channel sum exceeds the budget, every channel is scaled by `budget / sum`. The strip is 12 V WS2811 bullets on a single feed, which binds at about 1.5 A, so the default is `LIMIT_A = 1.5`. `budget_for_current(limit_a, ma_per_channel)` converts amps to the channel-sum budget `Output(budget=...)` takes: 47,812 at the defaults. `Output(n)` with no budget uses that. `budget_for(n, percent)`, the original firmware's 13% of full white, remains for compatibility. The cap holds on every frame: when rounding or dithering could take a frame over the budget (only near the cap at high brightness), the excess is trimmed off lit channels in rotation.
+- **Brightness**: 0-255, applied after the cap. Brightness 255 means "as bright as the budget allows" and lower values dim proportionally (review H7).
+- **Brightness floor** (`floor=`, percent of full brightness, default `FLOOR_PCT = 4`; `set_floor()` changes it, `level(brightness)` returns the effective level in 1/256 units): below a few levels no rounding can show a colour. Brightness 3..255 (Home Assistant's 1..100%) maps linearly onto floor..100%; 1 and 2, which HA's slider can't pick, also give the floor, and 0 stays dark. 4% is the lowest level at which warm white (tone 2) keeps its hue: (3, 1, 0) on every LED under the 1.5 A cap (at 3% it would be (2, 1, 0), too yellow). `floor=0` is exactly the unfloored stage. Calibration frames use `floor=0` (and brightness 255, which no floor changes). In the firmware the floor is a persisted state setting (`floor` in `POST /state`, HA's "Brightness floor" number), not a config key, so it works on any recovery layer.
+- **No dithering at a few levels** (`dither_min=`, default `DITHER_MIN = 9`): a channel whose target is below 9 levels is rounded to nearest on every LED, so a solid colour is one colour on the whole tree. On the tree a one-level split in a small channel shows as two tints (blue 0 next to blue 1 reads as yellow next to white; green 3 next to 4 at red 7 was visible too), while splits where the step is at most about 1/9 of the channel didn't show (red 9/10, green 4/5 at red 10, blue 1/2 at red 28). Nearest rounding is the closest whole-number colour to the target, which keeps the hue as close as integers allow, but the low end moves in whole levels: neighbouring slider steps can give the same colour. It's applied in the per-frame lookup table (a level below `dither_min` is rounded to a whole level there, which every rounding threshold then leaves alone), so the kernels and their cost are unchanged. `dither_min=0` dithers at every level.
+- **Spatial dithering** (`dither="spatial"`, the default; `True` means the same; firmware `LED_DITHER`), from `dither_min` up: each LED has a fixed rounding threshold, shared by its three channels and spread evenly along the string by a low-discrepancy sequence (an additive recurrence with a golden-ratio step). A target of 9.6 is therefore sent as 10 on about 60% of LEDs and as 9 on the rest. Every LED stays within 1 of its exact value, the tree-wide average matches the target, and a static frame produces identical bytes on every frame, so nothing flickers.
+- **Temporal dithering** (`dither="temporal"`, opt-in): carries each channel's remainder to the next frame instead, so every LED averages exactly over time. At the tree's 35-40 fps this flickers visibly at low levels (seen on the tree), so it is off by default.
+- **No dithering** (`dither=False`): rounds to nearest. Calibration frames use this, for steady camera levels.
+- **White balance** (`white=(r, g, b)`, firmware `WHITE_BALANCE`, default off): per-source-channel scale, each 0..1, applied with brightness. It only ever lowers channels, so the cap still holds.
+- **Gamma**: off by default (linear). `Output(n, gamma=2.2)` applies `out = 255 * (lin / 255) ** gamma` through a 2041-entry table (1/8-level input steps); dithering keeps the low end usable. Gamma >= 1 never raises a channel above its linear value.
+- **Colour order**: `Output(n, order="RGB")` emits channels in the given order. The renderer and viewer use RGB. Per review M8, the 12V WS2811 string is wired RGB.
+- `Output.process(src, dst, brightness)` does not allocate. It sets `raw_total`, `capped` and `factor` (cap factor in 1/4096) for telemetry.
+- **Speed**: on MicroPython the per-frame loops are viper code compiled at import from a source string (mpy-cross can't emit native code without `-march`). Elsewhere, or if that fails, plain-Python versions run; `_output.NATIVE` says which. Both produce identical bytes, which `tools/output_check.py` checks under MicroPython. On the native 32-bit MicroPython 1.27 build the stage costs about 0.3 ms per frame (the Python fallback about 1.9 ms; the old stage 1.2 ms).
+- **Current estimate**: `_output.current_a(channel_sum, ma_per_channel)` assumes `MA_PER_CHANNEL = 8` mA per channel at 255 for a 12 V WS2811 bullet. Estimate a frame's current from the bytes actually sent, `current_a(sum(dst))`, as the firmware, renderer and viewer do; it accounts for gamma, white balance and dithering.
 
 ## Coordinates
 
@@ -120,9 +130,11 @@ Effects use `ctx.random` only, so `./render.py <effect> --seed N` is reproducibl
 
 | Command | Purpose |
 |---|---|
-| `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --limit-a --ma-per-channel --gamma --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
+| `./render.py <effect>` | Headless render: `renders/<effect>/{anim.gif,sheet.png,metrics.json}`. Options: `--seconds --fps --seed --param k=v --brightness --floor --limit-a --ma-per-channel --gamma --dither spatial|temporal|none --white R,G,B --view raw --mp4 --watch`. `metrics.json` reports the cap (`limit_a`, `budget_channel_sum`, `capped`, `cap_engaged_rate`) and estimated current in amps (`current_a` mean and peak, `uncapped_peak_a`), plus `per_frame.current_a` and `per_frame.capped`. |
 | `./render.py all` | Every effect, plus `renders/overview.png` and `renders/summary.json`. |
 | `micropython tools/mp_check.py` | Allocation check under MicroPython. |
+| `micropython tools/output_check.py` | Output stage: native vs Python parity, allocation, timing. |
+| `uv run --with pytest pytest tests/effects` | Output stage behaviour (the brightness floor, no split below `DITHER_MIN`, cap, rounding, dithering). |
 | `./new_effect.py <name> [--flat]` | Scaffold `effects/<name>.py` from a template, register it in `EFFECTS` and render it once. |
 | `./render.py <effect> --watch` | Re-render on every save in `effects/`. |
 | `./serve.py` | Browser viewer (`viewer/`), hot-reloads changed effect files. |

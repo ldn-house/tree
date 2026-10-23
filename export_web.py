@@ -133,7 +133,10 @@ def export(out, archive=None):
         "encoding": "rgb8",
         "frame_stage": "raw",
         "output": {"applied": False, "brightness": round(BRIGHTNESS * 255), "limit_a": _output.LIMIT_A,
-                   "ma_per_channel": _output.MA_PER_CHANNEL, "gamma": None},
+                   "ma_per_channel": _output.MA_PER_CHANNEL, "gamma": None,
+                   # A player that dims should map brightness 1..255 onto
+                   # floor..100% as the tree does (effects/_output.py).
+                   "brightness_floor_pct": _output.FLOOR_PCT},
         "coords": [None if c is None else [round(v, 4) for v in c] for c in coords],
         "effects": [],
     }
