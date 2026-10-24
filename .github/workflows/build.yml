@@ -130,7 +130,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/micropython-bin
-          key: micropython-unix-${{ env.MICROPYTHON_VERSION }}-32bit
+          key: micropython-unix-${{ env.MICROPYTHON_VERSION }}-32bit-gil
 
       - name: Build the MicroPython unix port
         if: steps.mp-cache.outputs.cache-hit != 'true'
@@ -138,13 +138,15 @@ jobs:
           git clone --depth 1 --branch "$MICROPYTHON_VERSION" https://github.com/micropython/micropython /tmp/mp
           make -C /tmp/mp/mpy-cross -j"$(nproc)"
           make -C /tmp/mp/ports/unix submodules
-          make -C /tmp/mp/ports/unix -j"$(nproc)"
+          # The default unix SIGINT handler can longjmp out of GC and leave
+          # the heap locked. Use cooperative Ctrl-C delivery, like the Pico.
+          make -C /tmp/mp/ports/unix MICROPY_PY_THREAD_GIL=1 -j"$(nproc)"
           mkdir -p ~/micropython-bin
           cp /tmp/mp/ports/unix/build-standard/micropython ~/micropython-bin/
           # 32-bit build: objects the size they are on the RP2350, for the
           # board-sized heap test (tests/firmware/test_heap.py).
           sudo apt-get install -y gcc-multilib
-          make -C /tmp/mp/ports/unix MICROPY_FORCE_32BIT=1 MICROPY_PY_FFI=0 BUILD=build-32 -j"$(nproc)"
+          make -C /tmp/mp/ports/unix MICROPY_PY_THREAD_GIL=1 MICROPY_FORCE_32BIT=1 MICROPY_PY_FFI=0 BUILD=build-32 -j"$(nproc)"
           cp /tmp/mp/ports/unix/build-32/micropython ~/micropython-bin/micropython32
 
       - name: Firmware tests (unix port, simulated hardware, local broker)
