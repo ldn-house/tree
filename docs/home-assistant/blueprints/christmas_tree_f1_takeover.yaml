@@ -317,18 +317,23 @@ actions:
               payload: >-
                 {{ {'id': 'f1', 'effect': 'f1_chequered', 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
           - delay: 15
-          - action: mqtt.publish
-            data:
-              topic: "{{ topic }}"
-              payload: >-
-                {{ {'id': 'f1', 'effect': 'f1_winner', 'color': winner, 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
-          - delay: 20
-          - action: mqtt.publish
-            data:
-              topic: "{{ topic }}"
-              payload: >-
-                {{ {'id': 'f1', 'effect': 'spiral_3d', 'params': {'color': winner, 'color2': [255, 255, 255]}, 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
-          - delay: 15
+          # No winner after practice. The session name comes from F1
+          # Sensor's clock: by now the calendar can already show the next
+          # session (the finish comes after the slot plus the live delay).
+          - if: "{{ state_attr(session_clock, 'session_name') not in ['Practice 1', 'Practice 2', 'Practice 3'] }}"
+            then:
+              - action: mqtt.publish
+                data:
+                  topic: "{{ topic }}"
+                  payload: >-
+                    {{ {'id': 'f1', 'effect': 'f1_winner', 'color': winner, 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 90} | tojson }}
+              - delay: 60
+              - action: mqtt.publish
+                data:
+                  topic: "{{ topic }}"
+                  payload: >-
+                    {{ {'id': 'f1', 'effect': 'spiral_3d', 'params': {'color': winner, 'color2': [255, 255, 255]}, 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
+              - delay: 15
           - action: mqtt.publish
             data:
               topic: "{{ topic }}"

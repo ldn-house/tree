@@ -65,7 +65,7 @@ What it does, only while the TV is on and the F1 calendar's current session is o
 | Lights-out, or the session clock starting | `f1_start`: a green sweep up the tree, then a steady green |
 | Track status CLEAR / YELLOW / VSC / SC | `f1_start` green / `f1_yellow` / amber `lighthouse` / faster orange `lighthouse` |
 | RED (session live or suspended) | `f1_red`, a slow red pulse |
-| Chequered flag (session finished) | `f1_chequered` for 15 s, `f1_winner` in P1's team colour for 20 s, `spiral_3d` in the team colour and white for 15 s, then back to what the tree was doing |
+| Chequered flag (session finished) | `f1_chequered` for 15 s, `f1_winner` in P1's team colour for 60 s, `spiral_3d` in the team colour and white for 15 s, then back to what the tree was doing. After practice, only `f1_chequered` |
 | TV off for a minute | Back to what the tree was doing |
 
 Flags (except red) only change while the session is live and its clock is running. When the clock starts again (lights-out, a restart after a red flag, the next part of qualifying) the current flag is applied again, and the green sweep replays. Otherwise the tree keeps what it last showed, and the automation refreshes it every minute (TTL 3 minutes).
