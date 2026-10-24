@@ -458,19 +458,21 @@ def test_stricter_accuracy_raises_the_floor(color):
     floors = []
     for acc in (0.05, 0.02, 0.01, 0.005):
         o, cf = colour_floor(color, acc)
-        assert worst_drift(o, color) <= acc
+        # (worst_drift's targets are in 1/256 levels: within 1%.)
+        assert worst_drift(o, color) <= _output.tolerance(color, acc) * 1.01
         floors.append(cf.pct)
     assert floors == sorted(floors) and floors[0] < floors[-1], floors
 
 
 def test_floor_values_for_warm_white():
     """Pinned: the floor each warm_white tone gets under the 1.5 A cap (red
-    at 100% is 55-74 levels), at 0.02 and 0.01."""
+    at 100% is 55-74 levels), at 0.02 and 0.01. Tone 3, more orange than
+    COLOUR_HUE_FROM, gets a little more tolerance (lower at 0.02)."""
     got = {}
     for tone in ((255, 140, 50), (255, 119, 35), TONE2, (255, 68, 7)):
         got[tone] = tuple(colour_floor(tone, acc)[1].pct for acc in (0.02, 0.01))
     assert got == {(255, 140, 50): (8.31, 15.52), (255, 119, 35): (6.09, 16.18),
-                   TONE2: (10.95, 15.79), (255, 68, 7): (12.69, 22.85)}, got
+                   TONE2: (10.95, 15.79), (255, 68, 7): (7.61, 22.85)}, got
 
 
 @pytest.mark.parametrize("color", [(255, 0, 0), (0, 255, 0), (0, 0, 40), (255, 255, 255), (9, 9, 9)])
@@ -590,8 +592,12 @@ def test_matches_brute_force(kw):
             exact = [o.gtab[(v * x) >> 13] if o.gamma else (v * x + 128) >> 8 for v, x in zip(color, sc)]
             out = [a if a >= o.umax else ((a + 128) >> 8) << 8 for a in exact]
             drifts.append(_output.drift(out, exact))
-        for acc in (0.02, 0.01, 0.005):
-            o, cf = colour_floor(color, acc, **kw)
+        t = color if o.white is None else [v * w for v, w in zip(color, o.white)]
+        if o.gamma:
+            t = [v ** o.gamma for v in t]
+        for acc0 in (0.02, 0.01, 0.005):
+            o, cf = colour_floor(color, acc0, **kw)
+            acc = _output.tolerance(t, acc0)
             # The brute force's targets are the stage's 1/256-level ones and
             # the search uses exact targets, so compare within 2% of acc.
             need = (f * cf.level + 2032) // 4080 if cf.level else 1
@@ -600,3 +606,46 @@ def test_matches_brute_force(kw):
             if cf.level:
                 # (A level maps to a scale within a couple of steps.)
                 assert max(drifts[max(1, need - 3):need]) > acc * 0.98 or cf.level == lmax, (kw, color, acc)
+
+
+def test_saturated_colours_get_a_hue_angle(monkeypatch):
+    """Beyond COLOUR_HUE_FROM from white the allowed drift grows with the
+    distance: the warm whites keep the fixed threshold (tones 0-2), and a
+    nearly pure rainbow hue, which a fixed distance held at about 30-40%,
+    gets a much lower floor."""
+    acc = _output.COLOUR_ACCURACY
+    assert _output.tolerance(TONE2, acc) == acc and _output.tolerance((255, 140, 50), acc) == acc
+    assert _output.tolerance((255, 255, 255), acc) == acc and _output.tolerance((0, 0, 0), acc) == acc
+    assert _output.tolerance((240, 15, 0), acc) > 1.8 * acc
+    hue = {c: colour_floor(c)[1].pct for c in ((240, 15, 0), (0, 18, 237), TONE2, (255, 140, 50))}
+    monkeypatch.setattr(_output, "COLOUR_HUE_FROM", 10)  # a fixed distance everywhere
+    fixed = {c: colour_floor(c)[1].pct for c in hue}
+    assert hue[TONE2] == fixed[TONE2] and hue[(255, 140, 50)] == fixed[(255, 140, 50)]
+    assert fixed[(240, 15, 0)] > 25 and hue[(240, 15, 0)] < 15, (hue, fixed)
+    assert fixed[(0, 18, 237)] > 30 and hue[(0, 18, 237)] < 15, (hue, fixed)
+
+
+def test_step_with_a_time_limit_matches_all_at_once():
+    """step(us=) stops once the time is up: with 1 us each call scans one
+    chunk of pixels or analyses one new colour, and the result is the same
+    as add()'s."""
+    frame = bytearray()
+    for i in range(N):
+        frame += bytes(((i * 7) & 255, (i * 13 + 90) & 255, (255 - i) & 255))
+    a = _output.ColourFloor(_output.Output(N))
+    a.add(frame)
+    b = _output.ColourFloor(_output.Output(N))
+    b.start(frame)
+    calls = 1
+    while not b.step(us=1):
+        calls += 1
+    assert (b.level, b.pixels) == (a.level, a.pixels) and a.level > 0
+    # N / 50 scan chunks, then one call per distinct colour.
+    assert calls >= N // 50 + a.pixels - 1, calls
+    # The previous floor stays until a started frame is done.
+    b.reset()
+    b.start(bytearray((255, 0, 0) * N))
+    assert b.step(us=1) is False and b.stage.colour_floor == a.pct
+    while not b.step(us=1):
+        pass
+    assert b.stage.colour_floor == 0
