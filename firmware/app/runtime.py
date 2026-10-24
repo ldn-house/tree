@@ -90,7 +90,7 @@ class Runtime:
             "native" if outstage.NATIVE else "python", cfg.LED_DITHER, cfg.GAMMA, cfg.WHITE_BALANCE,
             self.state.get("floor")))
         # Calibration frames: exact, steady levels for the camera.
-        self.cal_out = outstage.create(self.n, budget, None, cfg.COLOR_ORDER, False, None, 0)
+        self._cal_out = None
         self.engine = engine.Engine(self.n, self.state, self.fx, self.out, self.driver, cfg.FPS)
         self.engine.colour = outstage.ColourFloor(self.out, self.state.get("colour_accuracy"))
         self.engine.coords = coords.load(self.n, self.slot_dir)
@@ -139,6 +139,12 @@ class Runtime:
             self.sup.heartbeat("ha", self.ha, 20000)
         self.sup.watch("http", lambda: None if self.http.alive() else "server stopped")
         self.sup.watch("tasks", self._tasks_check)
+
+    @property
+    def cal_out(self):
+        if self._cal_out is None:
+            self._cal_out = outstage.create(self.n, self.out.budget, None, cfg.COLOR_ORDER, False, None, 0)
+        return self._cal_out
 
     # -- shared operations --
 
