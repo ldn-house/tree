@@ -40,13 +40,26 @@ def install():
         (calib.Calib, 'lock', 'calib.lock'),
         (calib.Calib, 'default_sequence', 'calib.load_validate'),
         (calib.Calib, 'play', 'calib.play'),
-        (calib.Sequence, 'prewarm', 'calib.prewarm'),
         (fx.Effects, 'load', 'effect.import'),
         (engine.Engine, '_start', 'effect.start'),
         (ha.HA, '_light', 'mqtt.light'),
         (ha.HA, '_calibrate', 'mqtt.calibrate'),
     ):
         wrap(cls, method, label)
+
+    # calibseq is imported on the first sequence request; importing it here
+    # would hide that cost, so its prewarm is wrapped once it has loaded.
+    get_sequence = calib.Calib._get_sequence
+
+    def _get_sequence(self, name):
+        seq = get_sequence(self, name)
+        cls = type(seq)
+        if not getattr(cls, '_latency_wrapped', False):
+            wrap(cls, 'prewarm', 'calib.prewarm')
+            cls._latency_wrapped = True
+        return seq
+
+    calib.Calib._get_sequence = _get_sequence
 
     original = driver.Driver.write
 
