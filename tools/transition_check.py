@@ -87,7 +87,6 @@ b.apply(p, 500, out.budget)
 class Display:
     owner = None
     blend = b
-    off_level = 0
 
 display = Display()
 for i in range(100):
@@ -117,25 +116,5 @@ for style in ('fade', 'wipe', 'dissolve'):
         Engine.process(display, c, out, p, r.step(500), 500)
     total_us = time.ticks_diff(time.ticks_us(), t) // 1000
     print(style, us, 'us blend/ramp;', total_us, 'us output + blend/ramp; native:', NATIVE)
-# The frozen OFF path also must allocate nothing and preserve wire hue.
-b.begin(bytearray((68, 23, 4) * 500), 'none', 0, 0)
-display.off_level = 65280
-out.set_floor(25)
-r = Ramp(255)
-r.set(1, 0, 1000)
-check_allocations()
-Engine.process(display, c, out, p, 1, 0)
-assert p[:3] == bytearray((17, 6, 1))
-assert all(p[k] <= b.old[k] for k in range(len(p)))
-# Check the selected dim kernel against independent upward-rounding maths.
-b.old[:] = a
-for level in (0, 1, 256, 16320, 32768, 65279, 65280):
-    b.dim(p, level, 65280)
-    q = min(16384, level * 16384 // 65280)
-    assert all(p[k] == (b.old[k] * q + 16383) // 16384 for k in range(len(p)))
-t = time.ticks_us()
-for i in range(1000):
-    Engine.process(display, c, out, p, r.step(500), 500)
-print('frozen OFF', time.ticks_diff(time.ticks_us(), t) // 1000, 'us output + ramp; native:', NATIVE)
 print('kernel comparison:', 'native vs Python PASS' if NATIVE else 'Python vs reference PASS; native parity NOT VERIFIED')
-print('transition maths, output + ramp + blend + frozen OFF allocation: PASS')
+print('transition maths, output + ramp + blend allocation: PASS')

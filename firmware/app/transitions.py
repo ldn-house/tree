@@ -80,11 +80,6 @@ class Blend:
         self.at = now
         self.pending = bool(self.ms)
 
-    def dim(self, wire, level, start):
-        # A wire snapshot is already capped, balanced and gamma corrected.
-        # Round upward so quantising the snapshot cannot undercut its floor.
-        _dim(self.old, wire, len(wire), min(16384, level * 16384 // start))
-
     def apply(self, wire, now, budget):
         if not self.ms:
             return
@@ -100,13 +95,6 @@ class Blend:
         _mix(self.old, wire, order, len(order), q, int(self.style == "fade"), budget)
 
 _KERNEL = """
-@micropython.viper
-def _dim_v(old: ptr8, wire: ptr8, n: int, q: int):
-    k = 0
-    while k < n:
-        wire[k] = (old[k] * q + 16383) >> 14
-        k += 1
-
 @micropython.viper
 def _mix_v(old: ptr8, wire: ptr8, order: ptr8, n: int, q: int, fade: int, budget: int):
     i = 0
@@ -143,13 +131,11 @@ try:
     _ns = {"micropython": micropython}
     exec(_KERNEL, _ns)
     _mix = _ns["_mix_v"]
-    _dim = _ns["_dim_v"]
     NATIVE = True
 except Exception:
     _ns = {}
     exec(_KERNEL.replace("@micropython.viper\n", "").replace(": ptr8", "").replace(": int", ""), _ns)
     _mix = _ns["_mix_v"]
-    _dim = _ns["_dim_v"]
 
 del _ns
 del _KERNEL

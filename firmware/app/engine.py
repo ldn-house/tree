@@ -76,7 +76,6 @@ class Engine:
         self.last = self.bufs[1]
         self.blend = Blend(n)
         self.displayed = False
-        self.off_level = 0
         self.ramp = Ramp(state.get("brightness") if state.get("power") else 0)
         self.coords = None
         self.name = None
@@ -174,17 +173,17 @@ class Engine:
             if ms is None and "power" in changed:
                 ms = 1000
             now = time.ticks_ms()
-            if not self.state.get("power") and self.off_level == 0:
-                self.blend.begin(self.last, "none", 0, now)
-                self.off_level = max(1, self.out.level(self.ramp.value))
-            elif self.state.get("power") and self.off_level:
-                self.off_level = 0
-                self.blend.begin(self.last, "none" if self.dark else "fade", ms if ms is not None else 1000, now)
+            if not self.state.get("power") and self.blend.ms:
+                # Wire blends cannot be dimmed without changing low-channel
+                # hue and speckle. OFF during a blend cuts on the next frame.
+                self.blend.ms = 0
+                ms = 0
             self.ramp.set(target, now, ms)
             if self.state.get("power") and self.blend.ms:
-                # An old wire snapshot must not outlive a new brightness
-                # deadline. Power off uses the frozen composition above.
-                self.blend.begin(self.last, "fade", self.ramp.ms, now)
+                # Finish the blend at its displayed brightness, then start
+                # the new ramp through Output, including instant commands.
+                self.ramp.value = self.ramp.start
+                self.ramp.pending = True
         if "effect" in changed:
             eff = changed["effect"]
             # Reselecting an effect gives it another chance.
@@ -378,9 +377,6 @@ class Engine:
 
     def process(self, raw, out, buf, brightness, now):
         """Synchronous per-frame output path; allocation-checked on MicroPython."""
-        if self.owner is None and self.off_level:
-            self.blend.dim(buf, out.level(brightness), self.off_level)
-            return
         out.process(raw, buf, brightness)
         if self.owner is None:
             self.blend.apply(buf, now, out.budget)
@@ -422,7 +418,6 @@ class Engine:
             self.hb = now
             if self.owner is not None:
                 self.blend.ms = 0
-                self.off_level = 0
                 self.displayed = False
                 target = self.state.get("brightness") if self.state.get("power") else 0
                 self.ramp.set(target, now, 0)
@@ -431,7 +426,7 @@ class Engine:
                 self.fps = 0
                 await asyncio.sleep_ms(50)
                 continue
-            bri = self.ramp.step(now)
+            bri = self.ramp.value if self.blend.ms and self.ramp.pending else self.ramp.step(now)
             if not self.state.get("power") and bri == 0:
                 if self.inst is not None:
                     self._unload()
@@ -442,11 +437,6 @@ class Engine:
                 continue
             self.dark = False
             self._black_at = None
-            if self.off_level:
-                await self.present(self.raw, self.out, bri)
-                self._tick_fps(now)
-                await asyncio.sleep_ms(self.period_ms)
-                continue
             want = self._target(now) if self.state.get("power") or self.name is None else self.name
             if self.reload or want != self.name or self.inst is None:
                 self.reload = False
