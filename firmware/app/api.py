@@ -94,7 +94,8 @@ def register(rt, srv):
     async def h_state(req):
         body = await req.json()
         changes = {}
-        for k in ("power", "brightness", "floor", "colour_accuracy", "effect", "speed", "auto_s", "params"):
+        for k in ("power", "brightness", "floor", "colour_accuracy", "effect", "speed", "auto_s", "params",
+                  "transition_style", "transition_s", "transition"):
             if k in body:
                 changes[k] = body[k]
         try:

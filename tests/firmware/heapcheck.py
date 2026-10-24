@@ -198,6 +198,9 @@ finally:
 console = d.console()
 result["memory_errors"] = console.count("MemoryError")
 result["boots"] = d.boots
+# Include the TLS window and calibration, not only the two checkpoints.
+result["steps"]["floor_overall"] = (result["heap_low_uncollected"] is not None
+                                     and result["heap_low_uncollected"] >= args.floor)
 ok = all(result["steps"].values()) and not result["errors"] and result["memory_errors"] == 0
 result["ok"] = ok
 Path(args.out).write_text(json.dumps(result, indent=1))

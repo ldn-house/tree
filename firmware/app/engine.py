@@ -30,6 +30,7 @@ import time
 import asyncio
 
 from app import fallback, hw, trace
+from app.transitions import Blend, Ramp
 from app.log import log
 
 PROBE = "fx_probe.txt"
@@ -73,6 +74,8 @@ class Engine:
         self.bufs = (bytearray(3 * n), bytearray(3 * n))
         self.bi = 0
         self.last = self.bufs[1]
+        self.blend = Blend(n)
+        self.ramp = Ramp(state.get("brightness") if state.get("power") else 0)
         self.coords = None
         self.name = None
         self.mod = None
@@ -151,6 +154,7 @@ class Engine:
 
     def set_coords(self, coords):
         self.coords = coords
+        self.blend.coords(coords)
         self.reload = True
 
     def reload_effect(self, name=None):
@@ -162,6 +166,17 @@ class Engine:
             self.quarantined.discard(name)
 
     def _on_state(self, changed, source):
+        if "power" in changed or "brightness" in changed:
+            target = self.state.get("brightness") if self.state.get("power") else 0
+            ms = changed.get("transition_ms")
+            if ms is None and "power" in changed:
+                ms = 1000
+            now = time.ticks_ms()
+            self.ramp.set(target, now, ms)
+            if self.blend.ms:
+                # An old wire snapshot must not outlive a new brightness
+                # deadline (especially a power-off during a long blend).
+                self.blend.begin(self.last, "fade", self.ramp.ms, now)
         if "effect" in changed:
             eff = changed["effect"]
             # Reselecting an effect gives it another chance.
@@ -286,7 +301,17 @@ class Engine:
             params[k] = self.state.param(name, k, spec[0])
         return params
 
-    def _start(self, name):
+    def transition(self, style=None, duration=None):
+        """Freeze the last wire frame; explicit none/0 supports instant owners."""
+        if style is None:
+            style = self.state.get("transition_style")
+        if duration is None:
+            duration = self.state.get("transition_s")
+        self.blend.begin(self.last, style, int(duration * 1000), time.ticks_ms())
+
+    def _start(self, name, transition_style=None, transition_s=None):
+        if self.inst is not None and name != self.name:
+            self.transition(transition_style, transition_s)
         self._unload()
         trace.at(trace.EFFECT_START)
         try:
@@ -340,11 +365,17 @@ class Engine:
 
     # -- output --
 
+    def process(self, raw, out, buf, brightness, now):
+        """Synchronous per-frame output path; allocation-checked on MicroPython."""
+        out.process(raw, buf, brightness)
+        if self.owner is None:
+            self.blend.apply(buf, now, out.budget)
+
     async def present(self, raw, out, brightness):
         """Run raw through the output stage and send it (double-buffered)."""
         buf = self.bufs[self.bi]
         trace.at(trace.OUTPUT)
-        out.process(raw, buf, brightness)
+        self.process(raw, out, buf, brightness, time.ticks_ms())
         while self.driver.busy():
             await asyncio.sleep_ms(1)
         self.driver.write(buf)
@@ -354,6 +385,7 @@ class Engine:
             self.cap_frames += 1
 
     async def _black(self, now):
+        self.blend.ms = 0
         if self._black_at is None or time.ticks_diff(now, self._black_at) >= BLACK_REFRESH_MS:
             for i in range(len(self.raw)):
                 self.raw[i] = 0
@@ -373,12 +405,16 @@ class Engine:
             now = time.ticks_ms()
             self.hb = now
             if self.owner is not None:
+                self.blend.ms = 0
+                target = self.state.get("brightness") if self.state.get("power") else 0
+                self.ramp.set(target, now, 0)
                 if self.inst is not None:
                     self._unload()
                 self.fps = 0
                 await asyncio.sleep_ms(50)
                 continue
-            if not self.state.get("power"):
+            bri = self.ramp.step(now)
+            if not self.state.get("power") and bri == 0:
                 if self.inst is not None:
                     self._unload()
                 self.dark = True
@@ -388,7 +424,7 @@ class Engine:
                 continue
             self.dark = False
             self._black_at = None
-            want = self._target(now)
+            want = self._target(now) if self.state.get("power") or self.name is None else self.name
             if self.reload or want != self.name or self.inst is None:
                 self.reload = False
                 if not self._start(want):
@@ -435,7 +471,7 @@ class Engine:
             self.proven.add(self.name)
             if self.probing:
                 self.clear_probe()
-        await self.present(self.raw, self.out, self.state.get("brightness"))
+        await self.present(self.raw, self.out, self.ramp.value)
         self._tick_fps(now)
 
     def status(self):

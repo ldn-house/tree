@@ -273,7 +273,7 @@ def test_hot_push_validation(device):
     code, res = _put(d, "blue", GOOD)
     assert code == 200 and res["params"] == {"level": [100, 0, 255]}
     wait_for(lambda: status(d)["effect"]["running"] == "blue", 10)
-    f = wait_for(lambda: (lambda f: f if f[2] > 0 else None)(frame_sum(d)[1]), 5, what="blue frame")
+    f = wait_for(lambda: (lambda f: f if f[2] > 0 and f[0] == 0 and f[1] == 0 else None)(frame_sum(d)[1]), 5, what="blue frame")
     assert f[0] == 0 and f[1] == 0
     effects = {e["name"]: e for e in d.get("/effects")[1]["effects"]}
     assert effects["blue"]["overlay"] and effects["blue"]["error"] is None

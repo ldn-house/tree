@@ -36,6 +36,8 @@ def defaults():
         "colour_accuracy": outstage.COLOUR_ACCURACY,
         "effect": "auto",
         "speed": 1.0,
+        "transition_style": "fade",
+        "transition_s": 0.5,
         "auto_s": 0,  # 0: use each effect's DURATION_MS
         "params": {},
         "ha_params": [],  # param entities last published to HA discovery
@@ -113,6 +115,16 @@ class State:
             if effects is not None and v != "auto" and v not in effects:
                 raise ValueError("unknown effect: " + v)
             applied["effect"] = v
+        if "transition_style" in changes:
+            from app.transitions import STYLES
+            if changes["transition_style"] not in STYLES:
+                raise ValueError("bad transition style")
+            applied["transition_style"] = changes["transition_style"]
+        if "transition_s" in changes:
+            applied["transition_s"] = float(clamp(_num(changes["transition_s"]), 0, 60))
+        transition_ms = None
+        if "transition" in changes:
+            transition_ms = int(clamp(_num(changes["transition"]), 0, 60) * 1000)
         if "speed" in changes:
             applied["speed"] = float(clamp(_num(changes["speed"]), SPEED_MIN, SPEED_MAX))
         if "auto_s" in changes:
@@ -147,6 +159,8 @@ class State:
             if save:
                 self._dirty_at = time.ticks_ms()
             if notify:
+                if transition_ms is not None:
+                    changed["transition_ms"] = transition_ms
                 for fn in self.listeners:
                     try:
                         fn(changed, source)
