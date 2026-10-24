@@ -61,6 +61,10 @@ for active in (False, True):
     e.blend.apply(wire, 10000, 765)
     assert wire == e.last  # first replacement frame starts at the snapshot
     assert e.blend.ms == 500
+# Same-effect coordinate reloads retain their immediate behavior.
+e.blend.ms = 0
+assert e._start('good')
+assert e.blend.ms == 0
 # Boot-time coordinates also reach the first spatial transition.
 e.coords = [(0, 1, 0)]
 e.transition('wipe', 1)

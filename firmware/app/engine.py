@@ -321,7 +321,7 @@ class Engine:
         self.blend.begin(self.last, style, int(duration * 1000), time.ticks_ms())
 
     def _start(self, name, transition_style=None, transition_s=None):
-        if self.displayed and self.owner is None:
+        if self.displayed and self.owner is None and name != self.name:
             self.transition(transition_style, transition_s)
         self._unload()
         trace.at(trace.EFFECT_START)
