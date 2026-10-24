@@ -132,7 +132,7 @@ resize();
 // ─── State and UI ─────────────────────────────────────────────────────────────
 
 const state = {
-  effect: null, t0: performance.now(), brightness: 255, floorPct: 0, showRaw: false, spin: false,
+  effect: null, t0: performance.now(), brightness: 255, floorPct: 0, userFloorPct: 0, colourPct: 0, showRaw: false, spin: false,
   frames: 0, fpsT: performance.now(), fps: 0, ready: false, busy: false,
 };
 window.viewer = state; // handy for automation: viewer.last holds the latest frame stats
@@ -193,13 +193,15 @@ $("spin").addEventListener("click", (e) => {
 });
 for (const b of document.querySelectorAll("[data-view]")) b.addEventListener("click", () => setView(b.dataset.view));
 // Non-zero brightness maps onto floor..100% in the output stage
-// (effects/_output.py), as on the tree; show both.
+// (effects/_output.py), as on the tree; show both. The floor is the higher
+// of the brightness floor and the effect's colour floor.
 function showBrightness() {
   const b = state.brightness;
   const f = state.floorPct;
   // 3 is Home Assistant's 1%: it and below give the floor.
   const level = b <= 0 ? 0 : f === 0 ? (b * 100) / 255 : b <= 3 ? f : f + ((b - 3) * (100 - f)) / 252;
-  $("bri-out").textContent = `${b} (${Math.round((b / 255) * 100)}%; ${level.toFixed(1)}% after the ${state.floorPct}% floor)`;
+  const why = state.colourPct > state.userFloorPct ? `colour floor; brightness floor ${state.userFloorPct}%` : "brightness floor";
+  $("bri-out").textContent = `${b} (${Math.round((b / 255) * 100)}%; ${level.toFixed(1)}% with the ${f.toFixed(1)}% ${why})`;
 }
 $("bri").addEventListener("input", (e) => {
   state.brightness = parseInt(e.target.value, 10);
@@ -208,6 +210,11 @@ $("bri").addEventListener("input", (e) => {
 $("limit").addEventListener("input", async (e) => {
   $("limit-out").textContent = `${parseFloat(e.target.value).toFixed(1)} A`;
   await call("limit", { amps: parseFloat(e.target.value) }).catch(showError);
+});
+$("acc").addEventListener("input", async (e) => {
+  const v = parseFloat(e.target.value);
+  $("acc-out").textContent = v > 0 ? v.toFixed(3) : "off";
+  await call("accuracy", { value: v }).catch(showError);
 });
 $("bri").dispatchEvent(new Event("input"));
 $("limit-out").textContent = `${parseFloat($("limit").value).toFixed(1)} A`;
@@ -222,6 +229,11 @@ async function requestFrame() {
     const f = await call("frame", { t, brightness: state.brightness });
     state.last = { t: Math.round(t), capped: f.capped, factor: f.factor, rawTotal: f.rawTotal, outTotal: f.outTotal, budget: f.budget, amps: f.amps, limitA: f.limitA };
     setColors(state.showRaw ? f.raw : f.out);
+    if (f.effectivePct !== state.floorPct || f.colourPct !== state.colourPct) {
+      state.floorPct = f.effectivePct;
+      state.colourPct = f.colourPct;
+      showBrightness();
+    }
     const meter = $("meter");
     meter.firstElementChild.style.width = `${Math.min(100, (100 * f.amps) / f.limitA)}%`;
     meter.classList.toggle("capped", f.capped);
@@ -289,9 +301,12 @@ function fillPicker(names) {
 
 (async () => {
   try {
-    const { names, coordsPath, positions: pos, limitA, maPerChannel, floorPct } = await call("init", { n: N });
+    const { names, coordsPath, positions: pos, limitA, maPerChannel, floorPct, accuracy } = await call("init", { n: N });
     state.floorPct = floorPct;
+    state.userFloorPct = floorPct;
     showBrightness();
+    $("acc").value = accuracy;
+    $("acc-out").textContent = accuracy > 0 ? accuracy.toFixed(3) : "off";
     $("limit").value = limitA;
     $("limit-out").textContent = `${limitA.toFixed(1)} A`;
     $("limit").title = `Estimated at ${maPerChannel} mA per channel (effects/_output.py)`;

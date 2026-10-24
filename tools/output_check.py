@@ -8,7 +8,10 @@
   for every combination of dither mode (spatial, temporal, off), gamma,
   white balance, colour order, brightness and cap;
 - allocation: process() must not allocate (MicroPython only);
-- timing: ms per process() call for 500 LEDs, both kernels.
+- timing: ms per process() call for 500 LEDs, both kernels; and the
+  colour floor (ColourFloor): ms to analyse one frame at once, and the
+  heap it allocates doing so (MicroPython), for a solid warm white, a
+  rainbow and noise at each accuracy.
 
 Exits 1 on any failure.
 """
@@ -130,7 +133,40 @@ def main():
         if native:
             line += "  native %.3f ms" % timing(native, cfg, raw)
         print(line)
+    for name, raw in colour_frames():
+        for acc in (0.02, 0.01, 0.005):
+            ms, alloc, pct = colour_timing(raw, acc)
+            print("colour %-10s accuracy %.3f  %.2f ms  %s  floor %.2f%%" % (
+                name, acc, ms, "%d bytes allocated" % alloc if MP else "", pct))
     sys.exit(1 if failed else 0)
+
+
+def colour_frames():
+    """Solid warm white (one colour), a rainbow along the string and noise
+    (every analysed pixel different)."""
+    rainbow = bytearray(3 * N)
+    for i in range(N):
+        h = i * 768 // N
+        seg, x = h // 256, h % 256
+        c = ((255 - x, x, 0), (0, 255 - x, x), (x, 0, 255 - x))[seg]
+        rainbow[3 * i:3 * i + 3] = bytes(c)
+    return [("warm", bytearray((255, 87, 14) * N)), ("rainbow", rainbow), ("noise", frames(1, 7)[0])]
+
+
+def colour_timing(raw, accuracy):
+    best = None
+    alloc = 0
+    for _ in range(3):
+        cf = _output.ColourFloor(_output.Output(N), accuracy)
+        gc.collect()
+        before = gc.mem_alloc() if MP else 0
+        t = ticks_us()
+        cf.add(raw)
+        us = ticks_us() - t
+        if MP:
+            alloc = gc.mem_alloc() - before
+        best = us if best is None else min(best, us)
+    return best / 1000, alloc, cf.pct
 
 
 main()

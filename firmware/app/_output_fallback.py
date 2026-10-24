@@ -46,6 +46,39 @@ white (tone 2) is still its own hue, (3, 1, 0); at 3% it would be (2, 1, 0),
 too yellow. Calibration frames use floor=0 (and brightness 255, which the
 floor never changes).
 
+Colour floor. Whether a few levels still show a colour depends on the
+colour: a pure red or green is itself at any level, but warm white
+(255, 87, 14) at red 3-8 has no blue and reads as yellow, and only from
+about red 11, (11, 4, 1), does it look warm white again. ColourFloor finds,
+for the frame an effect is showing, the lowest level from which every step
+up the slider keeps the colours within a threshold (accuracy=, default
+COLOUR_ACCURACY = 0.01), and the stage uses the higher of that and the
+user's floor (set_colour_floor(); floor_pct() is the result):
+- drift is the distance in CIE 1976 u'v' between a pixel's wire colour and
+  its exact target, treating wire values as linear light (the WS2811 dims
+  by PWM) with sRGB primaries. On the tree, (3, 1, 0) for warm white is
+  0.012 and looked yellow, (22, 8, 1) is 0.005 and looked warm white; every
+  blue-less step of warm white is about 0.012-0.016, so 0.01 means "never
+  the yellow". Rounding to all-dark isn't drift (the user's floor is for
+  that), so pure single-channel colours never hold the floor up;
+- the wire colour is what this stage sends: channels below dither_min are
+  rounded to a whole level, and dithered channels count at their exact
+  value (dithering is unbiased, and its one-level splits there weren't
+  visible);
+- levels are checked in half-level steps of each pixel's brightest channel,
+  up to COLOUR_FLOOR_MAX (50%): a drift higher up can't be fixed by a floor,
+  and the floor never goes above that;
+- in a mixed frame, pixels dimmer than 1/COLOUR_DIM of the frame's
+  brightest are skipped (fades and tails, which would otherwise need many
+  times the level), up to COLOUR_SAMPLES of the rest are analysed, evenly
+  spread along the string, and the floor is the level that COLOUR_PCT
+  (90%) of them need;
+- an animated effect changes colour, so frames are analysed at
+  COLOUR_AT_MS (0, 1, 3 and 6 s) after the effect, its params, the
+  coordinates or the threshold change, pooling the pixels: the first
+  frame's floor applies at once and the later ones refine it. Nothing runs
+  per frame otherwise.
+
 On MicroPython the per-frame loops run as viper code compiled at import
 (it is kept as source because mpy-cross can't emit native code without
 -march); everywhere else, and if that fails, the plain-Python versions run.
@@ -70,6 +103,35 @@ FLOOR_PCT = 4
 DITHER_MIN = 9
 # The brightness that lands on the floor: Home Assistant's 1%.
 _FLOOR_AT = 3
+
+# Colour floor (see the docstring). Accuracy is the u'v' drift allowed at
+# every level above the floor; 0 turns the colour floor off, and other
+# settings are kept within COLOUR_MIN..COLOUR_MAX.
+COLOUR_ACCURACY = 0.01
+COLOUR_MIN = 0.005
+COLOUR_MAX = 0.05
+COLOUR_FLOOR_MAX = 50  # percent of full brightness
+COLOUR_PCT = 90  # share of the analysed pixels kept within the threshold
+COLOUR_SAMPLES = 32  # pixels analysed per frame, at most
+COLOUR_DIM = 2  # pixels below 1/COLOUR_DIM of the frame's brightest are skipped
+COLOUR_AT_MS = (0, 1000, 3000, 6000)  # when to analyse, after a change
+
+# CIE 1976 u'v' from linear sRGB (X, Y, Z = M . rgb):
+# u' = 4X / D, v' = 9Y / D, D = X + 15Y + 3Z.
+_M = ((0.4124, 0.3576, 0.1805), (0.2126, 0.7152, 0.0722), (0.0193, 0.1192, 0.9505))
+_U = tuple(4 * _M[0][c] for c in range(3))
+_V = tuple(9 * _M[1][c] for c in range(3))
+_D = tuple(_M[0][c] + 15 * _M[1][c] + 3 * _M[2][c] for c in range(3))
+# The same in integers, for ColourFloor (floats allocate on MicroPython):
+# coefficients x 32 and channels scaled to at most 8191 (u'v' doesn't
+# depend on scale) give u', v' in 1/32768 with every intermediate, and the
+# squared distance, below 2^30 (a small int). The rounded coefficients put
+# the distance within about 5% of the exact one, so ColourFloor decides
+# within 6% of the threshold in floats.
+_KU0, _KU1, _KU2 = (int(c * 32 + 0.5) for c in _U)
+_KV0, _KV1, _KV2 = (int(c * 32 + 0.5) for c in _V)
+_KD0, _KD1, _KD2 = (int(c * 32 + 0.5) for c in _D)
+_UVQ = 32768
 
 # Fixed-point precision of the combined cap x brightness scale.
 _Q = 12
@@ -200,6 +262,54 @@ except Exception:
     pass
 
 
+def colour_accuracy(v):
+    """A colour accuracy setting within its bounds: 0 (or less) is off."""
+    if not v > 0:
+        return 0
+    return min(COLOUR_MAX, max(COLOUR_MIN, v))
+
+
+def uv(rgb):
+    """CIE 1976 (u', v') of a linear RGB colour, or None for black."""
+    r, g, b = rgb
+    d = _D[0] * r + _D[1] * g + _D[2] * b
+    if not d:
+        return None
+    return ((_U[0] * r + _U[1] * g + _U[2] * b) / d, (_V[0] * r + _V[1] * g + _V[2] * b) / d)
+
+
+def drift(out, target):
+    """u'v' distance between a wire colour and its target (both linear).
+    All-dark output is 0: it is no colour rather than a wrong one."""
+    a = uv(out)
+    b = uv(target)
+    if a is None or b is None:
+        return 0.0
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _uvq(x0, x1, x2):
+    """(u', v') in 1/32768 of a linear colour (non-negative ints), in
+    integers. ColourFloor._over() has the same inline."""
+    m = max(x0, x1, x2)
+    while m > 8191:
+        x0 = (x0 + 1) >> 1
+        x1 = (x1 + 1) >> 1
+        x2 = (x2 + 1) >> 1
+        m = (m + 1) >> 1
+    d = _KD0 * x0 + _KD1 * x1 + _KD2 * x2
+    n = (_KU0 * x0 + _KU1 * x1 + _KU2 * x2) << 7
+    q = n // d
+    n = (n - q * d) << 6
+    r = n // d
+    u = (((q << 6) + r) << 2) + (((n - r * d) << 2) // d)
+    n = (_KV0 * x0 + _KV1 * x1 + _KV2 * x2) << 7
+    q = n // d
+    n = (n - q * d) << 6
+    r = n // d
+    return u, (((q << 6) + r) << 2) + (((n - r * d) << 2) // d)
+
+
 def budget_for_current(limit_a=LIMIT_A, ma_per_channel=MA_PER_CHANNEL):
     """Channel-sum budget for a current limit (what Output(budget=...) takes)."""
     return int(limit_a * 1000 * 255) // ma_per_channel
@@ -234,7 +344,9 @@ class Output:
       the source channels with brightness (e.g. (1.0, 0.85, 0.7)).
     - floor: brightness floor, percent of full (0 = none); brightness
       3..255 (HA's 1..100%) maps linearly onto floor..100%, 1 and 2 give
-      the floor, 0 stays dark. set_floor() changes it.
+      the floor, 0 stays dark. set_floor() changes it. A ColourFloor can
+      raise it (set_colour_floor()); the higher of the two applies, and
+      floor_pct() returns it.
     - dither_min: channel targets below this many levels are rounded to
       nearest on every LED instead of dithered (0 dithers everything).
 
@@ -247,6 +359,8 @@ class Output:
     def __init__(self, n, budget=None, gamma=None, order="RGB", dither="spatial", white=None,
                  floor=FLOOR_PCT, dither_min=DITHER_MIN):
         self.n = n
+        self._cq = 0
+        self.colour_floor = 0
         self.set_floor(floor)
         self.dither_min = dither_min
         self.umax = min(65280, max(0, int(dither_min * 256)))
@@ -310,7 +424,19 @@ class Output:
         floor = min(100, max(0, floor))
         self.floor = floor
         # In 1/256 brightness units (65280 = 255).
-        self._fq = int(floor * 652.8 + 0.5)
+        self._uq = int(floor * 652.8 + 0.5)
+        self._fq = max(self._uq, self._cq)
+
+    def set_colour_floor(self, level):
+        """level: the colour floor in 1/256 brightness units (0..65280), as
+        ColourFloor finds it; the higher of it and the floor applies."""
+        self._cq = min(65280, max(0, int(level)))
+        self.colour_floor = round(self._cq / 652.8, 2)
+        self._fq = max(self._uq, self._cq)
+
+    def floor_pct(self):
+        """The floor in effect, percent: the higher of floor and colour floor."""
+        return round(self._fq / 652.8, 2)
 
     def level(self, brightness):
         """Effective brightness after the floor, in 1/256 units (0..65280)."""
@@ -370,3 +496,331 @@ class Output:
             if out > self.budget:
                 # Always from the same place, so a static frame stays static.
                 _trim(dst, n3, out - self.budget, 0)
+
+
+class ColourFloor:
+    """Finds the colour floor for an effect from a few of its raw frames and
+    sets it on the stage (see the docstring). Call reset() whenever the
+    effect, its params, the coordinates or the accuracy change; then, when
+    due(ms since the reset) says so, either add(raw) to analyse a frame at
+    once, or start(raw) and step() a few pixels at a time until it returns
+    True. Nothing else runs per frame. accuracy: u'v' drift allowed, 0 for
+    no colour floor.
+
+    After each analysed frame: pct (the colour floor, percent), level (1/256
+    units), pixels (analysed since the reset), us (time spent on the frame,
+    where the platform has ticks_us)."""
+
+    def __init__(self, stage, accuracy=COLOUR_ACCURACY):
+        self.stage = stage
+        self.accuracy = colour_accuracy(accuracy)
+        n = stage.n
+        self.raw = bytearray(3 * n)
+        self.lit = array("H", bytes(2 * n))
+        self.needs = []
+        self.seen = {}
+        self.at = 0
+        self.busy = False
+        self._j = 0
+        self._take = 0
+        self._count = 0
+        self._f = 1 << _Q
+        self.level = 0
+        self.pct = 0
+        self.pixels = 0
+        self.us = 0
+
+    def set_accuracy(self, accuracy):
+        self.accuracy = colour_accuracy(accuracy)
+        self.reset()
+
+    def reset(self):
+        """Start over: the next due() is at 0 ms. The stage keeps the current
+        colour floor until the next frame is analysed."""
+        self.needs = []
+        self.at = 0
+        self.busy = False
+
+    def due(self, ms):
+        return not self.busy and self.at < len(COLOUR_AT_MS) and ms >= COLOUR_AT_MS[self.at]
+
+    def add(self, raw):
+        """Analyse a raw frame (before the cap, as the effect rendered it) at
+        once. Returns the colour floor in percent."""
+        self.start(raw)
+        self.step(self._take)
+        return self.pct
+
+    def start(self, raw):
+        """Take a copy of a raw frame and pick the pixels to analyse."""
+        t0 = _ticks_us()
+        self.at += 1
+        self.busy = True
+        self._j = 0
+        self._take = 0
+        self.seen = {}
+        st = self.stage
+        if self.accuracy > 0:
+            src = self.raw
+            src[:] = raw
+            total = sum(src)
+            if total:
+                self._f = (st.budget << _Q) // total if total > st.budget else 1 << _Q
+            if total and self._f > 0:
+                dim = max(src) // COLOUR_DIM
+                lit = self.lit
+                count = 0
+                for i in range(st.n):
+                    k = 3 * i
+                    if src[k] > dim or src[k + 1] > dim or src[k + 2] > dim:
+                        lit[count] = i
+                        count += 1
+                self._count = count
+                self._take = min(count, COLOUR_SAMPLES)
+        self.us = _ticks_diff(_ticks_us(), t0)
+
+    def step(self, pixels):
+        """Analyse up to this many more pixels of the started frame. Returns
+        True when the frame is done and the colour floor is set."""
+        if not self.busy:
+            return True
+        t0 = _ticks_us()
+        lmax = COLOUR_FLOOR_MAX * 65280 // 100
+        thr2 = self.accuracy * self.accuracy
+        src = self.raw
+        lit = self.lit
+        seen = self.seen
+        needs = self.needs
+        count = self._count
+        take = self._take
+        f = self._f
+        j = self._j
+        end = min(take, j + pixels)
+        while j < end:
+            k = 3 * lit[j * count // take]
+            key = src[k] << 16 | src[k + 1] << 8 | src[k + 2]
+            need = seen.get(key)
+            if need is None:
+                need = self._need(src[k], src[k + 1], src[k + 2], f, lmax, thr2)
+                seen[key] = need
+            needs.append(need)
+            j += 1
+        self._j = j
+        done = j >= take
+        if done:
+            self.busy = False
+            self.seen = {}
+            level = 0
+            if self.accuracy > 0 and needs:
+                needs.sort()
+                level = needs[(len(needs) * COLOUR_PCT + 99) // 100 - 1]
+            self.pixels = len(needs)
+            self.level = level
+            self.stage.set_colour_floor(level)
+            self.pct = self.stage.colour_floor
+        self.us += _ticks_diff(_ticks_us(), t0)
+        return done
+
+    def _need(self, r, g, b, f, lmax, thr2):
+        """Lowest level (1/256 units) from which this colour stays within the
+        threshold at every level up to lmax.
+
+        The wire colour only changes where a channel crosses a rounding
+        boundary (k + 0.5 levels) or dither_min, so the levels split into
+        intervals of one rounded colour. Within one, a dithered (exact)
+        channel moves the colour along a straight line in u'v' towards the
+        fixed target, so the drift is largest at an end: checking both ends
+        of every interval, from the top down, finds the highest level that
+        drifts. (With gamma the target moves too; a grid of extra checks
+        stands in for that.)"""
+        if (r > 0) + (g > 0) + (b > 0) < 2:
+            return 0  # a single channel never changes colour
+        st = self.stage
+        self._px = (r, g, b)
+        self._thr = thr2 ** 0.5
+        self._lo2 = int(thr2 * 0.88 * _UVQ * _UVQ)
+        self._mid2 = int(thr2 * _UVQ * _UVQ)
+        self._hi2 = int(thr2 * 1.13 * _UVQ * _UVQ) + 1
+        if st.gamma is None:
+            # The target's chromaticity doesn't depend on the level.
+            w = st.white
+            if w is None:
+                self._t = (r, g, b)
+                self._tuv = _uvq(r << 5, g << 5, b << 5)
+            else:
+                self._t = (r * w[0], g * w[1], b * w[2])
+                self._tuv = _uvq(r * w[0], g * w[1], b * w[2])
+        smax = (f * lmax + 2032) // 4080
+        # Scales (s, as process() computes it) at which a channel's output
+        # changes: every rounding boundary below dither_min, and dither_min.
+        cuts = []
+        umax = st.umax
+        for c in range(3):
+            v = self._px[c]
+            if not v:
+                continue
+            a = 128
+            while True:
+                if a > umax:
+                    a = umax
+                sc = self._scale_for(c, v, a)
+                if sc >= smax:
+                    break
+                if sc > 0:
+                    cuts.append(sc)
+                if a >= umax:
+                    break
+                a += 256
+        if st.gamma is not None:
+            step = max(1, smax >> 6)
+            cuts.extend(range(step, smax, step))
+        cuts.append(smax + 1)
+        cuts.sort()
+        hi = smax
+        i = len(cuts) - 1
+        while hi > 0:
+            while i >= 0 and cuts[i] > hi:
+                i -= 1
+            lo = cuts[i] if i >= 0 else 1
+            # [lo, hi] has one rounded colour.
+            x = self._over(hi)
+            if x == 1:
+                return lmax if hi >= smax else self._level(hi + 1, f, lmax)
+            # x == 2: no channel is dithered, so the colour is the same at lo.
+            if lo < hi and x == 0 and self._over(lo) == 1:
+                # Passing levels within an interval are contiguous (the drift
+                # is convex along it): find where they start (to within the
+                # integer drift's precision, without floats).
+                while hi - lo > 1:
+                    mid = (lo + hi) >> 1
+                    if self._over(mid, False) == 1:
+                        lo = mid
+                    else:
+                        hi = mid
+                return self._level(hi, f, lmax)
+            hi = lo - 1
+            i -= 1
+        return 0
+
+    def _scale_for(self, c, v, a):
+        """Smallest scale s at which channel c of value v outputs at least a
+        (8.8 fixed point) before rounding."""
+        st = self.stage
+        if st.gamma is None:
+            sc = ((a << 8) - 128 + v - 1) // v
+        else:
+            gt = st.gtab
+            lo = 0
+            hi = _GSIZE - 1
+            if gt[hi] < a:
+                return 1 << 30
+            while lo < hi:
+                mid = (lo + hi) >> 1
+                if gt[mid] >= a:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            sc = ((lo << 13) + v - 1) // v
+        w = st.white
+        if w is None or not w[c]:
+            return sc
+        return ((sc << _Q) - 2048 + w[c] - 1) // w[c]
+
+    def _over(self, s, exact=True):
+        """1 if the colour at scale s drifts beyond the threshold, else 0,
+        or 2 when it is within it and no channel is dithered there. exact:
+        decide close calls in floats (otherwise within about 5%)."""
+        st = self.stage
+        r, g, b = self._px
+        w = st.white
+        if w is None:
+            s0 = s1 = s2 = s
+        else:
+            s0 = (s * w[0] + 2048) >> _Q
+            s1 = (s * w[1] + 2048) >> _Q
+            s2 = (s * w[2] + 2048) >> _Q
+        gt = st.gtab if st.gamma is not None else None
+        if gt is None:
+            a0 = (r * s0 + 128) >> 8
+            a1 = (g * s1 + 128) >> 8
+            a2 = (b * s2 + 128) >> 8
+        else:
+            a0 = gt[(r * s0) >> 13]
+            a1 = gt[(g * s1) >> 13]
+            a2 = gt[(b * s2) >> 13]
+        umax = st.umax
+        # With gamma the target moves within an interval as well.
+        whole = 2 if gt is None else 0
+        if a0 >= umax:
+            o0 = a0
+            whole = 0
+        else:
+            o0 = ((a0 + 128) >> 8) << 8
+        if a1 >= umax:
+            o1 = a1
+            whole = 0
+        else:
+            o1 = ((a1 + 128) >> 8) << 8
+        if a2 >= umax:
+            o2 = a2
+            whole = 0
+        else:
+            o2 = ((a2 + 128) >> 8) << 8
+        if (o0 == a0 and o1 == a1 and o2 == a2) or not (o0 or o1 or o2):
+            return whole
+        if gt is None:
+            tu, tv = self._tuv
+        else:
+            tu, tv = _uvq(a0, a1, a2)
+        # _uvq(o0, o1, o2), inline: no tuple to allocate.
+        m = o0 if o0 > o1 else o1
+        if o2 > m:
+            m = o2
+        x0 = o0
+        x1 = o1
+        x2 = o2
+        while m > 8191:
+            x0 = (x0 + 1) >> 1
+            x1 = (x1 + 1) >> 1
+            x2 = (x2 + 1) >> 1
+            m = (m + 1) >> 1
+        d = _KD0 * x0 + _KD1 * x1 + _KD2 * x2
+        n = (_KU0 * x0 + _KU1 * x1 + _KU2 * x2) << 7
+        q = n // d
+        n = (n - q * d) << 6
+        r = n // d
+        du = (((q << 6) + r) << 2) + (((n - r * d) << 2) // d) - tu
+        n = (_KV0 * x0 + _KV1 * x1 + _KV2 * x2) << 7
+        q = n // d
+        n = (n - q * d) << 6
+        r = n // d
+        dv = (((q << 6) + r) << 2) + (((n - r * d) << 2) // d) - tv
+        e = du * du + dv * dv
+        if not exact:
+            return 1 if e > self._mid2 else whole
+        if e < self._lo2:
+            return whole
+        if e > self._hi2:
+            return 1
+        # Close to the threshold: decide exactly, in floats (rare).
+        if gt is None:
+            t = self._t
+        else:
+            t = (a0, a1, a2)
+        return 1 if drift((o0, o1, o2), t) > self._thr else whole
+
+    @staticmethod
+    def _level(s, f, lmax):
+        """Lowest level (1/256 units) at which process() reaches scale s."""
+        return min(lmax, max(0, (s * 4080 - 2032 + f - 1) // f))
+
+try:
+    from time import ticks_us as _ticks_us, ticks_diff as _ticks_diff
+except ImportError:
+    from time import perf_counter as _pc
+
+    def _ticks_us():
+        return int(_pc() * 1000000)
+
+    def _ticks_diff(a, b):
+        return a - b

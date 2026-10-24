@@ -7,7 +7,9 @@
 
 Runs an effect from effects/ under CPython through the same output stage as
 the firmware (power cap -> brightness above the floor -> white balance ->
-gamma -> dithering) and writes, per effect:
+gamma -> dithering) and writes, per effect (the floor is the higher of
+--floor and the effect's colour floor, found as on the tree from the frames
+at 0, 1, 3 and 6 s; see effects/_output.py):
 
     renders/<effect>/anim.gif    front | side | top views of the real coordinates
     renders/<effect>/sheet.png   contact sheet of evenly spaced frames, plus an
@@ -94,7 +96,7 @@ def build_params(module, overrides):
 def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0,
                limit_a=_output.LIMIT_A, ma_per_channel=_output.MA_PER_CHANNEL, gamma=None,
                coords=None, n=LED_COUNT, keep_raw=False, dither="spatial", white=None,
-               floor=_output.FLOOR_PCT):
+               floor=_output.FLOOR_PCT, colour_accuracy=_output.COLOUR_ACCURACY):
     """Render an effect headlessly. Returns a dict with output frames
     (uint8 array frames x n x 3, after the output stage) and metrics."""
     module = effects.load(name)
@@ -106,6 +108,8 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
         ma_per_channel = int(ma_per_channel)
     budget = int(_output.budget_for_current(limit_a, ma_per_channel))
     stage = _output.Output(n, budget=budget, gamma=gamma, dither=dither, white=white, floor=floor)
+    colour = _output.ColourFloor(stage, colour_accuracy)
+    colour_floors = []
     bri = max(0, min(255, round(brightness * 255)))
     count = max(1, round(seconds * fps))
     raw = bytearray(3 * n)
@@ -138,6 +142,8 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
                                "error": traceback.format_exc(limit=8)})
             break
         render_s.append(time.perf_counter() - t0)
+        if colour.due(t_ms):
+            colour_floors.append(colour.add(raw))
         stage.process(raw, out, bri)
         outs[f] = np.frombuffer(out, np.uint8).reshape(n, 3)
         if keep_raw:
@@ -178,6 +184,10 @@ def run_effect(name, seconds=6.0, fps=20, seed=0, overrides=None, brightness=1.0
         "params": params,
         "brightness": round(bri / 255, 4),
         "brightness_floor_pct": floor,
+        "colour_accuracy": colour.accuracy,
+        # After each analysed frame (the last one is what stays).
+        "colour_floor_pct": colour_floors,
+        "effective_floor_pct": stage.floor_pct(),
         "brightness_level": round(stage.level(bri) / 65280, 4),
         "gamma": gamma,
         "dither": dither or None,
@@ -417,7 +427,7 @@ def render_one(name, args, coords, coords_src, overrides, out_root):
     result = run_effect(name, args.seconds, args.fps, args.seed, overrides, args.brightness,
                         args.limit_a, args.ma_per_channel, args.gamma, coords, keep_raw=args.view == "raw",
                         dither=None if args.dither == "none" else args.dither, white=args.white,
-                        floor=args.floor)
+                        floor=args.floor, colour_accuracy=args.colour_accuracy)
     if args.view == "raw" and result["raw"] is not None:
         result["frames"] = result["raw"]
     result["metrics"]["coords_source"] = coords_src
@@ -484,6 +494,8 @@ def parse_args(argv=None):
                     help="0-1 (default 1); non-zero maps onto floor..1 as on the tree")
     ap.add_argument("--floor", type=float, default=_output.FLOOR_PCT,
                     help=f"brightness floor, percent (default {_output.FLOOR_PCT}; 0 for none)")
+    ap.add_argument("--colour-accuracy", type=float, default=_output.COLOUR_ACCURACY,
+                    help=f"u'v' drift allowed above the colour floor (default {_output.COLOUR_ACCURACY}; 0 for none)")
     ap.add_argument("--limit-a", type=float, default=_output.LIMIT_A,
                     help=f"power cap in amps at 12 V (default {_output.LIMIT_A})")
     ap.add_argument("--ma-per-channel", type=float, default=_output.MA_PER_CHANNEL,

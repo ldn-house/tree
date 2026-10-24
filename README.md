@@ -48,7 +48,7 @@ The firmware has two slots. An update is staged, verified (sizes, SHA-256 hashes
 
 The tree integrates with Home Assistant via MQTT discovery, as one device with:
 - A light: power, brightness (with automatic power limiting) and effect (auto-cycle or lock to one effect)
-- Settings: speed, auto-cycle duration, brightness floor and each effect's parameters
+- Settings: speed, auto-cycle duration, brightness floor, colour accuracy and each effect's parameters
 - A firmware update entity, plus reboot and calibration buttons
 - Diagnostics: Wi-Fi signal, free memory, uptime, frame rate, power cap, last reset cause, boot status
 - Availability: shown unavailable as soon as the tree drops off (MQTT last will)
@@ -64,7 +64,7 @@ The tree remembers its power, brightness and effect across reboots and network o
 
 ### Power Limiting (HDR)
 
-The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. The light's 1% is a brightness floor (4% by default, the "Brightness floor" setting): below that, LEDs can't show a colour at all, so the slider maps 1-100% onto floor-100%. At the dim end every LED shows the same colour; the lowest few steps move in whole levels, so neighbouring steps can look the same. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
+The tree limits total power draw per frame to prevent PSU brownouts. The limit is applied before brightness, so 100% brightness means "as bright as the power budget allows" and lower settings always dim. The light's 1% is a brightness floor (4% by default, the "Brightness floor" setting): below that, LEDs can't show a colour at all, so the slider maps 1-100% onto floor-100%. At the dim end every LED shows the same colour; the lowest few steps move in whole levels, so neighbouring steps can look the same. A few levels can't show every colour, though: warm white's blue rounds to nothing below about red 10, and it looks yellow. So each effect also gets a colour floor, the lowest level from which its colours stay within the "Colour accuracy" setting (0.01 by default, 0 turns it off), and 1% is whichever floor is higher. Warm white's 1% is about 16%, a rainbow's about 22% and fire's about 27%, while red and green (christmas) stay at 4%. The "Brightness floor in effect" and "Colour floor" sensors show where 1% is. Sparse animations (plane sweep) can be brighter than dense ones (rainbow).
 
 ## Animations
 

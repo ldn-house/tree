@@ -7,6 +7,11 @@ take the runtime down:
 - An exception in import, __init__ or render() marks that effect failed and
   the scheduler moves on. After MAX_FAILS it is skipped until reboot or
   until it is reselected.
+- The colour floor (effects/_output.py, ColourFloor) is found from the
+  first frame after an effect starts, its params change or the coordinates
+  change (at once, so it applies to that frame), then refined from frames
+  1, 3 and 6 s later, COLOUR_STEP pixels per frame. Nothing runs per frame
+  otherwise.
 - An effect that hangs the event loop starves the watchdog. Two records say
   which effect it was: watchdog scratch 0 (set whenever an effect starts,
   survives the reset) and /fx_probe.txt (written before an effect's first
@@ -33,6 +38,7 @@ SLOW_US = 500000
 FALLBACK = "fallback"
 BLACK_REFRESH_MS = 2000
 T_RESTART_MS = 1 << 29  # ~6 days
+COLOUR_STEP = 4  # colour floor: pixels analysed per frame after the first sample
 
 
 class Ctx:
@@ -91,6 +97,10 @@ class Engine:
         self.cap_frames = 0
         self.dark = False
         self._black_at = None
+        self.colour = None  # ColourFloor for out, set by the runtime
+        self.colour_t0 = time.ticks_ms()
+        self.colour_call_us = 0  # longest single colour floor call (one frame's stall)
+        self.on_colour = None  # called when the colour floor changes
         state.listeners.append(self._on_state)
 
     # -- boot-time quarantine --
@@ -159,9 +169,43 @@ class Engine:
         if "params" in changed and self.ctx is not None and self.name:
             vals = changed["params"].get(self.name)
             if vals:
+                moved = False
                 for k, v in vals.items():
                     if k in self.ctx.params:
+                        if self.ctx.params[k] != v:
+                            moved = True
                         self.ctx.params[k] = v
+                if moved:
+                    self.colour_reset()
+        if "colour_accuracy" in changed and self.colour is not None:
+            self.colour.set_accuracy(changed["colour_accuracy"])
+            self.colour_reset()
+
+    def colour_reset(self):
+        """Find the colour floor again, from the next frame on."""
+        if self.colour is not None:
+            self.colour.reset()
+            self.colour_t0 = time.ticks_ms()
+
+    def _colour(self, now):
+        cf = self.colour
+        busy = cf.busy
+        if not busy and not cf.due(time.ticks_diff(now, self.colour_t0)):
+            return
+        trace.at(trace.COLOUR)
+        before = cf.pct
+        t0 = time.ticks_us()
+        n = COLOUR_STEP
+        if not busy:
+            cf.start(self.raw)
+            if cf.at == 1:
+                n = 1 << 16  # the first frame at once: its floor applies to this frame
+        done = cf.step(n)
+        us = time.ticks_diff(time.ticks_us(), t0)
+        if us > self.colour_call_us:
+            self.colour_call_us = us
+        if done and cf.pct != before and self.on_colour is not None:
+            self.on_colour()
 
     def eligible(self, name):
         if name == FALLBACK:
@@ -272,6 +316,7 @@ class Engine:
         self.t_last = time.ticks_ms()
         self.frames_ok = 0
         self.slow = 0
+        self.colour_reset()
         # Drop the constructor's garbage (per-LED tables are built from
         # floats) now, and log what is really free with this effect loaded.
         gc.collect()
@@ -384,6 +429,8 @@ class Engine:
         else:
             self.slow = 0
         self.frames_ok += 1
+        if self.colour is not None:
+            self._colour(now)
         if self.frames_ok == PROVE_FRAMES and self.name not in self.proven:
             self.proven.add(self.name)
             if self.probing:

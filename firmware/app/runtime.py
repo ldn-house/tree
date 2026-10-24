@@ -92,6 +92,7 @@ class Runtime:
         # Calibration frames: exact, steady levels for the camera.
         self.cal_out = outstage.create(self.n, budget, None, cfg.COLOR_ORDER, False, None, 0)
         self.engine = engine.Engine(self.n, self.state, self.fx, self.out, self.driver, cfg.FPS)
+        self.engine.colour = outstage.ColourFloor(self.out, self.state.get("colour_accuracy"))
         self.engine.coords = coords.load(self.n, self.slot_dir)
         bootmgr.feed()
         self.engine.boot_quarantine(info.get("reset_cause"))
@@ -121,6 +122,7 @@ class Runtime:
         self.updates = updates.Updates(self)
         if self.mqtt is not None:
             self.ha = ha.HA(self, self.mqtt)
+            self.engine.on_colour = lambda: self.ha.mark("diag")
         self.http = httpd.Server(cfg.HTTP_PORT, cfg.HTTP_TOKEN)
         from app import api
 
@@ -180,6 +182,23 @@ class Runtime:
         sent last (after cap, brightness and gamma; calibration frames too)."""
         return round(outstage.estimated_a(sum(self.engine.last), cfg.LED_MA_PER_CHANNEL), 3)
 
+    def brightness_floor(self):
+        """The bottom of the brightness slider and why: the user's floor,
+        the running effect's colour floor, and the higher of the two."""
+        out = self.out
+        cf = self.engine.colour
+        return {
+            "floor": out.floor,
+            "colour": out.colour_floor,
+            "effective": out.floor_pct(),
+            "colour_accuracy": cf.accuracy,
+            "colour_pixels": cf.pixels,
+            # Last analysed frame, all its steps; and the longest single
+            # call, which is how long one frame was held up.
+            "colour_ms": round(cf.us / 1000, 1),
+            "colour_call_ms_max": round(self.engine.colour_call_us / 1000, 1),
+        }
+
     def diag(self):
         es = self.engine.status()
         return {
@@ -190,6 +209,8 @@ class Runtime:
             "capped": es["power_capped"],
             "cap_pct": es["cap_factor"],
             "led_amps": self.led_amps(),
+            "floor": self.out.floor_pct(),
+            "floor_colour": self.out.colour_floor,
             "reset": (self.info.get("reset_cause") or "?") + (": " + self.reset_reason if self.reset_reason else ""),
             "boot": self.boot_status(),
             "ip": self.wifi.ip,
@@ -231,6 +252,7 @@ class Runtime:
             "driver": self.driver.mode,
             "led_timing_ns": self.driver.timing_ns,
             "power_budget": self.out.budget,
+            "brightness_floor": self.brightness_floor(),
             "power": {
                 "limit_a": round(outstage.estimated_a(self.out.budget, cfg.LED_MA_PER_CHANNEL), 3),
                 "ma_per_channel": cfg.LED_MA_PER_CHANNEL,

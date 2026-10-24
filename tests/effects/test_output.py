@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from array import array
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -389,3 +390,213 @@ def test_full_brightness_unchanged_by_floor():
     assert a == b
     _output.Output(N, budget=10**9).process(src, b, 255)
     assert b == src
+
+
+# ─── Colour floor ─────────────────────────────────────────────────────────────
+
+TONE2 = (255, 87, 14)  # warm_white's default tone
+
+
+def colour_floor(color, accuracy=_output.COLOUR_ACCURACY, **kw):
+    """(stage, ColourFloor) after analysing a solid frame of color."""
+    o = _output.Output(N, **kw)
+    cf = _output.ColourFloor(o, accuracy)
+    cf.add(solid(color))
+    return o, cf
+
+
+def bottom(o, color):
+    """The wire colours at Home Assistant's 1% (brightness 3)."""
+    (frame,) = frames_of(o, solid(color), 3, 1)
+    return {tuple(frame[k:k + 3]) for k in range(0, len(frame), 3)}
+
+
+def worst_drift(o, color, top_pct=_output.COLOUR_FLOOR_MAX):
+    """Largest drift at any brightness from the bottom up to top_pct, with
+    dithered channels at their exact value (the model ColourFloor uses)."""
+    luts = [array("H", bytes(512)), array("H", bytes(512))]
+    worst = 0
+    for b in range(1, 256):
+        if o.level(b) > top_pct * 652.8:
+            break
+        o.process(solid(color), bytearray(3 * N), b)
+        s = (o.factor * o.level(b) + 2032) // 4080
+        _output._lut_py(luts[0], s, o.gtab, 0, o.umax)
+        _output._lut_py(luts[1], s, o.gtab, 0, 0)
+        out = [luts[0][c] for c in color]
+        exact = [c * s / 256 for c in color]
+        worst = max(worst, _output.drift(out, exact))
+    return worst
+
+
+def test_drift_matches_the_tree():
+    """The model against what was seen on the tree (23 Oct): warm white tone
+    2 at (3, 1, 0) and (5, 2, 0) looked yellow, (22, 8, 1) warm white."""
+    assert _output.drift((3, 1, 0), TONE2) == pytest.approx(0.012, abs=0.0005)
+    assert _output.drift((5, 2, 0), TONE2) == pytest.approx(0.016, abs=0.0005)
+    assert _output.drift((22, 8, 1), TONE2) == pytest.approx(0.005, abs=0.0005)
+    assert _output.drift((0, 0, 0), TONE2) == 0  # dark is no colour
+    assert _output.drift((7, 0, 0), (255, 0, 0)) == pytest.approx(0)
+
+
+def test_warm_white_is_not_yellow_at_the_bottom():
+    """At the default accuracy, warm white's bottom keeps its blue: no more
+    of the blue-less yellow that #25's 4% floor gave, (3, 1, 0)."""
+    o, cf = colour_floor(TONE2)
+    assert cf.pct > _output.FLOOR_PCT and o.floor_pct() == cf.pct
+    colours = bottom(o, TONE2)
+    assert all(b == 1 and g == 4 and 10 <= r <= 11 for r, g, b in colours), colours
+    assert worst_drift(o, TONE2) <= _output.COLOUR_ACCURACY
+    # Nowhere dimmer would do: one step below the floor is still yellow.
+    o.set_colour_floor(cf.level - 64)
+    assert worst_drift(o, TONE2) > _output.COLOUR_ACCURACY
+
+
+@pytest.mark.parametrize("color", [TONE2, (255, 140, 50), (255, 119, 35), (255, 68, 7), (255, 60, 120),
+                                   (120, 0, 255), (40, 200, 90)])
+def test_stricter_accuracy_raises_the_floor(color):
+    floors = []
+    for acc in (0.05, 0.02, 0.01, 0.005):
+        o, cf = colour_floor(color, acc)
+        assert worst_drift(o, color) <= acc
+        floors.append(cf.pct)
+    assert floors == sorted(floors) and floors[0] < floors[-1], floors
+
+
+def test_floor_values_for_warm_white():
+    """Pinned: the floor each warm_white tone gets under the 1.5 A cap (red
+    at 100% is 55-74 levels), at 0.02 and 0.01."""
+    got = {}
+    for tone in ((255, 140, 50), (255, 119, 35), TONE2, (255, 68, 7)):
+        got[tone] = tuple(colour_floor(tone, acc)[1].pct for acc in (0.02, 0.01))
+    assert got == {(255, 140, 50): (8.31, 15.52), (255, 119, 35): (6.09, 16.18),
+                   TONE2: (10.95, 15.79), (255, 68, 7): (12.69, 22.85)}, got
+
+
+@pytest.mark.parametrize("color", [(255, 0, 0), (0, 255, 0), (0, 0, 40), (255, 255, 255), (9, 9, 9)])
+def test_single_channels_and_greys_never_hold_the_floor_up(color):
+    o, cf = colour_floor(color, 0.005)
+    assert cf.pct == 0 and o.floor_pct() == _output.FLOOR_PCT
+
+
+def test_christmas_frame_has_no_colour_floor():
+    o = _output.Output(N)
+    cf = _output.ColourFloor(o)
+    cf.add(bytearray((255, 0, 0, 0, 255, 0) * (N // 2)))
+    assert cf.pct == 0
+
+
+def test_mixed_frames():
+    """The floor is what 90% of the lit pixels need; pixels below half the
+    frame's brightest don't count."""
+    # Half warm white: it sets the floor, and keeps its blue at 1%.
+    o = _output.Output(N)
+    cf = _output.ColourFloor(o)
+    half = bytearray((TONE2 + (255, 0, 0)) * (N // 2))
+    cf.add(half)
+    assert cf.pct > 10
+    (frame,) = frames_of(o, half, 3, 1)
+    assert {frame[k + 2] for k in range(0, 3 * N, 6)} == {1}
+    # A few warm pixels among red ones (1 in 32 analysed): under 10%, so
+    # they don't.
+    cf.reset()
+    frame = bytearray((255, 0, 0) * N)
+    for i in range(3, N, 100):
+        frame[3 * i:3 * i + 3] = bytes(TONE2)
+    cf.add(frame)
+    assert cf.pct == 0
+    # Dim warm pixels (tails, fades) don't count either.
+    cf.reset()
+    cf.add(bytearray(((120, 41, 7) + (255, 0, 0)) * (N // 2)))
+    assert cf.pct == 0
+    # Black frame: nothing to analyse.
+    cf.reset()
+    cf.add(bytearray(3 * N))
+    assert cf.pct == 0 and cf.pixels == 0
+
+
+def test_animated_frames_are_pooled_and_reset_starts_over():
+    o = _output.Output(N)
+    cf = _output.ColourFloor(o)
+    assert cf.due(0) and not cf.due(-1)
+    cf.add(bytearray((255, 0, 0) * N))
+    assert cf.pct == 0 and not cf.due(999) and cf.due(1000)
+    cf.add(bytearray(TONE2 * N))  # half the pooled pixels are now warm
+    assert cf.pct > 10 and cf.pixels == 2 * _output.COLOUR_SAMPLES
+    cf.add(bytearray(TONE2 * N))
+    cf.add(bytearray(TONE2 * N))
+    assert not cf.due(10 ** 6)  # four frames, then nothing until a reset
+    cf.reset()
+    assert cf.due(0)
+    cf.add(bytearray((0, 255, 0) * N))
+    assert cf.pct == 0 and o.floor_pct() == _output.FLOOR_PCT
+
+
+def test_step_by_step_matches_all_at_once():
+    frame = bytearray()
+    for i in range(N):
+        frame += bytes(((i * 7) & 255, (i * 13 + 90) & 255, (255 - i) & 255))
+    a = _output.ColourFloor(_output.Output(N))
+    a.add(frame)
+    b = _output.ColourFloor(_output.Output(N))
+    b.start(frame)
+    steps = 1
+    while not b.step(3):
+        steps += 1
+    assert steps > 5 and (b.level, b.pixels) == (a.level, a.pixels) and a.level > 0
+
+
+def test_accuracy_bounds_and_off():
+    assert _output.colour_accuracy(0) == 0 and _output.colour_accuracy(-1) == 0
+    assert _output.colour_accuracy(0.001) == _output.COLOUR_MIN
+    assert _output.colour_accuracy(1) == _output.COLOUR_MAX
+    o, cf = colour_floor(TONE2, 0)
+    assert cf.pct == 0 and o.floor_pct() == _output.FLOOR_PCT
+    assert bottom(o, TONE2) == {(3, 1, 0)}  # #25's floor alone
+    cf.set_accuracy(0.01)
+    cf.add(solid(TONE2))
+    assert cf.pct > 10
+
+
+def test_user_floor_above_the_colour_floor_wins():
+    o, cf = colour_floor(TONE2)
+    o.set_floor(25)
+    assert o.floor_pct() == 25 and o.level(3) == int(25 * 652.8 + 0.5)
+    o.set_floor(0)
+    assert o.floor_pct() == cf.pct and o.level(1) == cf.level
+    assert o.level(0) == 0 and o.level(255) == 65280
+
+
+def test_never_above_the_maximum():
+    o, cf = colour_floor((255, 3, 1), 0.005)
+    assert 0 < cf.pct <= _output.COLOUR_FLOOR_MAX
+
+
+@pytest.mark.parametrize("kw", [{}, {"white": (1.0, 0.85, 0.7)}, {"gamma": 2.2}, {"dither_min": 0},
+                                {"budget": 200000}])
+def test_matches_brute_force(kw):
+    """The boundary search against every scale process() can use: no level
+    above the floor drifts, and the level just below it does."""
+    for color in (TONE2, (255, 60, 120), (120, 0, 255), (10, 20, 255)):
+        o = _output.Output(N, **kw)
+        total = sum(color) * N
+        f = (o.budget << 12) // total if total > o.budget else 4096
+        lmax = _output.COLOUR_FLOOR_MAX * 65280 // 100
+        smax = (f * lmax + 2032) // 4080
+        drifts = [0.0]
+        for s in range(1, smax + 1):
+            sc = [s] * 3 if o.white is None else [(s * w + 2048) >> 12 for w in o.white]
+            # As _lut_py() computes one entry, before and after rounding.
+            exact = [o.gtab[(v * x) >> 13] if o.gamma else (v * x + 128) >> 8 for v, x in zip(color, sc)]
+            out = [a if a >= o.umax else ((a + 128) >> 8) << 8 for a in exact]
+            drifts.append(_output.drift(out, exact))
+        for acc in (0.02, 0.01, 0.005):
+            o, cf = colour_floor(color, acc, **kw)
+            # The brute force's targets are the stage's 1/256-level ones and
+            # the search uses exact targets, so compare within 2% of acc.
+            need = (f * cf.level + 2032) // 4080 if cf.level else 1
+            if cf.level < lmax:
+                assert max(drifts[need:]) <= acc * 1.02, (kw, color, acc)
+            if cf.level:
+                # (A level maps to a scale within a couple of steps.)
+                assert max(drifts[max(1, need - 3):need]) > acc * 0.98 or cf.level == lmax, (kw, color, acc)
