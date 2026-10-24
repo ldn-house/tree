@@ -1,6 +1,7 @@
-"""MicroPython transition maths, native parity, allocation and 500 LED timing.
+"""MicroPython transition maths, kernel comparison, allocation and 500 LED timing.
 
-Run with the board's MicroPython 1.27 unix port from the repo root.
+Run with MicroPython 1.27 from the repo root. Native parity is verified only
+when NATIVE=True; timings describe the host running this tool, not the Pico.
 """
 import gc
 import sys
@@ -36,6 +37,8 @@ assert r.ms == 39 and r.step(0) == 100 and r.step(39) == 110
 one = Blend(1)
 one.begin(bytearray([0, 100, 255]), 'fade', 1000, 0)
 wire = bytearray([100, 0, 255])
+one.apply(wire, 0, 1000)
+wire[:] = bytearray([100, 0, 255])
 one.apply(wire, 250, 1000)
 assert wire == bytearray([25, 75, 255])
 one.begin(wire, 'fade', 0, 0)
@@ -61,7 +64,13 @@ for style in ('fade', 'wipe', 'dissolve'):
             assert sum(wire) <= 47812
         else:
             assert wire == c
+# Coordinate changes leave an active wipe's table and frame unchanged.
+b.begin(a, 'wipe', 1000, 0)
+b.apply(p, 0, 47812)
+thresholds = bytes(b.order)
 b.coords([(0, 1, 0), None, (0, 0, 0)])
+assert bytes(b.order) == thresholds
+b.apply(p, 1000, 47812)
 b.begin(a, 'wipe', 1000, 0)
 assert b.order[0] == 255 and b.order[2] == 0 and b.order[1] == 0
 b.begin(a, 'none', 1000, 0)
@@ -78,6 +87,7 @@ b.apply(p, 500, out.budget)
 class Display:
     owner = None
     blend = b
+    off_level = 0
 
 display = Display()
 for i in range(100):
@@ -96,6 +106,7 @@ def check_allocations():
 check_allocations()
 for style in ('fade', 'wipe', 'dissolve'):
     b.begin(a, style, 1000, 0)
+    b.apply(p, 0, out.budget)
     t = time.ticks_us()
     for i in range(1000):
         r.step(500)
@@ -106,4 +117,25 @@ for style in ('fade', 'wipe', 'dissolve'):
         Engine.process(display, c, out, p, r.step(500), 500)
     total_us = time.ticks_diff(time.ticks_us(), t) // 1000
     print(style, us, 'us blend/ramp;', total_us, 'us output + blend/ramp; native:', NATIVE)
-print('transition maths, parity, output + ramp + blend allocation: PASS')
+# The frozen OFF path also must allocate nothing and preserve wire hue.
+b.begin(bytearray((68, 23, 4) * 500), 'none', 0, 0)
+display.off_level = 65280
+out.set_floor(25)
+r = Ramp(255)
+r.set(1, 0, 1000)
+check_allocations()
+Engine.process(display, c, out, p, 1, 0)
+assert p[:3] == bytearray((17, 6, 1))
+assert all(p[k] <= b.old[k] for k in range(len(p)))
+# Check the selected dim kernel against independent upward-rounding maths.
+b.old[:] = a
+for level in (0, 1, 256, 16320, 32768, 65279, 65280):
+    b.dim(p, level, 65280)
+    q = min(16384, level * 16384 // 65280)
+    assert all(p[k] == (b.old[k] * q + 16383) // 16384 for k in range(len(p)))
+t = time.ticks_us()
+for i in range(1000):
+    Engine.process(display, c, out, p, r.step(500), 500)
+print('frozen OFF', time.ticks_diff(time.ticks_us(), t) // 1000, 'us output + ramp; native:', NATIVE)
+print('kernel comparison:', 'native vs Python PASS' if NATIVE else 'Python vs reference PASS; native parity NOT VERIFIED')
+print('transition maths, output + ramp + blend + frozen OFF allocation: PASS')

@@ -155,17 +155,23 @@ class State:
             if self.d.get(k) != v:
                 self.d[k] = v
                 changed[k] = v
-        if changed:
-            if save:
-                self._dirty_at = time.ticks_ms()
-            if notify:
-                if transition_ms is not None:
-                    changed["transition_ms"] = transition_ms
-                for fn in self.listeners:
-                    try:
-                        fn(changed, source)
-                    except Exception as e:
-                        log("state listener failed: %r" % (e,))
+        if changed and save:
+            self._dirty_at = time.ticks_ms()
+        # Commands can replace an in-flight display ramp without changing
+        # persisted targets. Keep command notifications separate from changes.
+        event = dict(changed)
+        if transition_ms is not None:
+            for k in ("power", "brightness"):
+                if k in applied:
+                    event[k] = applied[k]
+            if event:
+                event["transition_ms"] = transition_ms
+        if event and notify:
+            for fn in self.listeners:
+                try:
+                    fn(event, source)
+                except Exception as e:
+                    log("state listener failed: %r" % (e,))
         return changed
 
     def set_ha_params(self, ids):

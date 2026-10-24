@@ -75,6 +75,8 @@ class Engine:
         self.bi = 0
         self.last = self.bufs[1]
         self.blend = Blend(n)
+        self.displayed = False
+        self.off_level = 0
         self.ramp = Ramp(state.get("brightness") if state.get("power") else 0)
         self.coords = None
         self.name = None
@@ -172,10 +174,16 @@ class Engine:
             if ms is None and "power" in changed:
                 ms = 1000
             now = time.ticks_ms()
+            if not self.state.get("power") and self.off_level == 0:
+                self.blend.begin(self.last, "none", 0, now)
+                self.off_level = max(1, self.out.level(self.ramp.value))
+            elif self.state.get("power") and self.off_level:
+                self.off_level = 0
+                self.blend.begin(self.last, "none" if self.dark else "fade", ms if ms is not None else 1000, now)
             self.ramp.set(target, now, ms)
-            if self.blend.ms:
+            if self.state.get("power") and self.blend.ms:
                 # An old wire snapshot must not outlive a new brightness
-                # deadline (especially a power-off during a long blend).
+                # deadline. Power off uses the frozen composition above.
                 self.blend.begin(self.last, "fade", self.ramp.ms, now)
         if "effect" in changed:
             eff = changed["effect"]
@@ -307,10 +315,13 @@ class Engine:
             style = self.state.get("transition_style")
         if duration is None:
             duration = self.state.get("transition_s")
+        # Boot assigns coords directly; later uploads use set_coords().
+        if self.blend.points is not self.coords:
+            self.blend.coords(self.coords)
         self.blend.begin(self.last, style, int(duration * 1000), time.ticks_ms())
 
     def _start(self, name, transition_style=None, transition_s=None):
-        if self.inst is not None and name != self.name:
+        if self.displayed and self.owner is None:
             self.transition(transition_style, transition_s)
         self._unload()
         trace.at(trace.EFFECT_START)
@@ -367,6 +378,9 @@ class Engine:
 
     def process(self, raw, out, buf, brightness, now):
         """Synchronous per-frame output path; allocation-checked on MicroPython."""
+        if self.owner is None and self.off_level:
+            self.blend.dim(buf, out.level(brightness), self.off_level)
+            return
         out.process(raw, buf, brightness)
         if self.owner is None:
             self.blend.apply(buf, now, out.budget)
@@ -380,6 +394,7 @@ class Engine:
             await asyncio.sleep_ms(1)
         self.driver.write(buf)
         self.last = buf
+        self.displayed = self.owner is None
         self.bi ^= 1
         if out.capped:
             self.cap_frames += 1
@@ -390,6 +405,7 @@ class Engine:
             for i in range(len(self.raw)):
                 self.raw[i] = 0
             await self.present(self.raw, self.out, 0)
+            self.displayed = False
             self._black_at = now
 
     def _tick_fps(self, now):
@@ -406,6 +422,8 @@ class Engine:
             self.hb = now
             if self.owner is not None:
                 self.blend.ms = 0
+                self.off_level = 0
+                self.displayed = False
                 target = self.state.get("brightness") if self.state.get("power") else 0
                 self.ramp.set(target, now, 0)
                 if self.inst is not None:
@@ -424,6 +442,11 @@ class Engine:
                 continue
             self.dark = False
             self._black_at = None
+            if self.off_level:
+                await self.present(self.raw, self.out, bri)
+                self._tick_fps(now)
+                await asyncio.sleep_ms(self.period_ms)
+                continue
             want = self._target(now) if self.state.get("power") or self.name is None else self.name
             if self.reload or want != self.name or self.inst is None:
                 self.reload = False

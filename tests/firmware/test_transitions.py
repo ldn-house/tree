@@ -90,7 +90,7 @@ def test_power_fades_floor_and_reversal(device):
     up = samples(d, .45)
     assert all(b[1] >= a[1] for a, b in zip(up, up[1:]))
     assert 1500 <= up[0][1] < full // 4  # effective floor, never sub-floor
-    before = up[-1][1]
+    before = level(d)
     d.post('/state', {'power': False})
     after = level(d)
     assert abs(before - after) < 2000
@@ -200,3 +200,76 @@ def test_power_off_during_long_effect_blend(device):
     vals = samples(d, 1.3)
     assert vals[-1][1] == 0
     assert any(0 < n < before // 2 for _, n in vals)
+
+
+def test_off_during_dark_to_light_blend(device):
+    d = device
+    setup(d)
+    d.post('/state', {'params': {'solid': {'level': 0}}})
+    wait_for(lambda: level(d) == 0, 2)
+    d.post('/state', {'effect': 'height', 'transition_style': 'fade', 'transition_s': 60})
+    wait_for(lambda: d.get('/')[1]['effect']['running'] == 'height', 2)
+    before = level(d)
+    d.post('/state', {'power': False})
+    vals = samples(d, 1.3)
+    print('OFF dark-to-light: before=', before, 'peak=', max(n for _, n in vals), 'last=', vals[-1][1])
+    assert max(n for _, n in vals) <= before + 1000
+
+
+def test_same_target_can_finish_transition(device):
+    d = device
+    setup(d)
+    d.post('/state', {'brightness': 1, 'transition': 60})
+    wait_for(lambda: level(d) < 47000, 3)
+    d.post('/state', {'brightness': 1, 'transition': 0})
+    vals = samples(d, .3)
+    print('same-target instant:', [n for _, n in vals])
+    assert vals[-1][1] == 1500
+
+
+def test_off_blend_respects_floor(device):
+    from test_runtime import _put, GOOD
+    d = device
+    setup(d, floor=25)
+    d.post('/state', {'params': {'solid': {'tint': 1}}, 'brightness': 1, 'transition': 0})
+    floor_frame = wait_for(lambda: (lambda f: f if f[0] > f[1] else None)(frame(d)), 2)
+    floor_sum = sum(floor_frame)
+    d.post('/state', {'brightness': 255, 'transition': 0})
+    wait_for(lambda: level(d) > 47000, 2)
+    black = GOOD.replace(b'"blue"', b'"black"').replace(b'(100, 0, 255)', b'(0, 0, 255)')
+    assert _put(d, 'black', black, '')[0] == 200
+    d.post('/state', {'effect': 'black', 'transition_style': 'fade', 'transition_s': 60})
+    wait_for(lambda: d.get('/')[1]['effect']['running'] == 'black', 2)
+    d.post('/state', {'power': False})
+    observed = []
+    end = time.monotonic() + 1.3
+    while time.monotonic() < end:
+        f = frame(d)
+        observed.append((sum(f), tuple(f[:3])))
+        time.sleep(.02)
+    low = [(n, rgb) for n, rgb in observed if 0 < n < floor_sum]
+    print('floor=', floor_sum, tuple(floor_frame[:3]), 'sub-floor=', low)
+    assert not low
+    assert all(rgb[0] >= 17 and rgb[1] >= 6 and rgb[2] >= 1
+               for n, rgb in observed if n)
+    assert observed[-1][0] == 0
+
+
+def test_slow_start_preserves_first_blend_frame(device):
+    from test_runtime import _put, GOOD
+    d = device
+    setup(d)
+    slow = GOOD.replace(b'"blue"', b'"slowblue"').replace(b'self.ctx = ctx', b'import time\n        time.sleep_ms(600)\n        self.ctx = ctx')
+    assert _put(d, 'slowblue', slow, '')[0] == 200
+    d.post('/state', {'effect': 'slowblue', 'transition_style': 'fade', 'transition_s': .5})
+    wait_for(lambda: d.get('/')[1]['effect']['running'] == 'slowblue', 2, interval=.01)
+    f = frame(d)
+    print('first slow-start frame red sum=', sum(f[::3]), 'blue=', sum(f[2::3]))
+    assert sum(f[::3]) > 0
+
+
+def test_transition_review_lifecycle_and_same_target_state(tmp_path):
+    r = subprocess.run([devsim.MICROPYTHON,
+                        str(devsim.ROOT / 'tests/firmware/mp/transitions_review.py'),
+                        str(devsim.ROOT), str(tmp_path)], capture_output=True, text=True)
+    assert r.returncode == 0 and 'PASS' in r.stdout, r.stdout + r.stderr
