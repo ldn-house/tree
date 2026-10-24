@@ -163,7 +163,12 @@ try:
     h = ha.HA(Rt(), bus)
     h.settings_payload = lambda: {}  # later versions publish settings first
     configs = [("homeassistant/sensor/xmas_tree/e%d/config" % i, "{}", "e%d" % i) for i in range(4)]
-    h._configs = lambda: iter(configs)
+    if hasattr(h, "_configs"):  # the reviewed firmware kept discovery resident
+        h._configs = lambda: iter(configs)
+    else:
+        from app import ha_discovery
+        ha_discovery._configs = lambda _ha: iter(configs)
+        h.publish_discovery = lambda force=False: ha_discovery.publish(h, force)
     asyncio.run(h.publish_discovery())
     bus.fail_at = None
     bus.sent = 0

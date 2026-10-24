@@ -1044,6 +1044,53 @@ def calib_colour_frames_match_reference():
 
 
 @test
+def calib_out_of_memory_refuses_cleanly():
+    """Running out of memory while calibration allocates refuses the request
+    (503) and leaves it idle, never locked with nothing to recover it or
+    with half its playback buffers; a retry with memory allocates them all."""
+    from app import calib
+
+    class E:
+        owner = None
+
+    class Rt:
+        n = 10
+        fail_out = True
+        engine = E()
+
+        @property
+        def cal_out(self):
+            if self.fail_out:
+                raise MemoryError
+            return "out"
+
+    rt = Rt()
+    c = calib.Calib(rt)
+    raises(lambda: c.lock(), "not enough memory")
+    assert c.state == "idle" and rt.engine.owner is None
+    rt.fail_out = False
+    # The third allocation (the second playback buffer) fails.
+    calls = [0]
+    real = bytearray
+
+    def ba(n):
+        calls[0] += 1
+        if calls[0] == 3:
+            raise MemoryError
+        return real(n)
+
+    c.static = None
+    calib.bytearray = ba
+    try:
+        raises(lambda: c._allocate(playback=True), "not enough memory")
+    finally:
+        calib.bytearray = real
+    assert c.bufs is None and c.raw is None and c.state == "idle"
+    c._allocate(playback=True)
+    assert len(c.bufs) == 2 and len(c.bufs[1]) == 30 and len(c.raw) == 30
+
+
+@test
 def calib_validation():
     from app import calib, seqfile
 
@@ -1212,7 +1259,7 @@ def r3m3_interrupted_discovery_is_retried():
     the configs HA never got."""
     import asyncio
 
-    from app import ha
+    from app import ha, ha_discovery
 
     class Cfg:
         MQTT_PREFIX = "xmas_tree"
@@ -1251,7 +1298,9 @@ def r3m3_interrupted_discovery_is_retried():
     h = ha.HA(rt, bus)
     h.settings_payload = lambda: {}
     configs = [("homeassistant/sensor/xmas_tree/e%d/config" % i, "{}", "param_e%d" % i) for i in range(4)]
-    h._configs = lambda: iter(configs)
+    original_configs = ha_discovery._configs
+    ha_discovery._configs = lambda _ha: iter(configs)
+    h.publish_discovery = lambda force=False: ha_discovery.publish(h, force)
     assert asyncio.run(h.publish_discovery()) is False  # interrupted on the third config
     assert bus.sent == lead + [t for t, _j, _o in configs[:2]] and h.discovered is None and h.discoveries == 0
     assert rt.state.params == ["param_old_gone"]  # cleanup record untouched
@@ -1277,6 +1326,42 @@ def r3m3_interrupted_discovery_is_retried():
     bus.sent = []
     assert asyncio.run(h.publish_discovery()) is True
     assert "homeassistant/number/xmas_tree/param_gone2/config" in bus.sent
+
+    ha_discovery._configs = original_configs
+
+
+@test
+def discovery_module_released_on_every_exit():
+    import asyncio
+    import sys
+    import app
+    from app import ha
+
+    # Exercise the real wrapper on success, a dropped publish and an error.
+    # Each pass starts from a fresh import; neither module cache may keep it.
+    class Fake:
+        pass
+
+    async def check():
+        for result in (True, False, None):
+            from app import ha_discovery
+
+            async def publish(_ha, force):
+                assert force
+                if result is None:
+                    raise ValueError("interrupted discovery")
+                return result
+
+            ha_discovery.publish = publish
+            try:
+                got = await ha.HA.publish_discovery(Fake(), force=True)
+                assert got is result and result is not None
+            except ValueError:
+                assert result is None
+            assert "app.ha_discovery" not in sys.modules
+            assert not hasattr(app, "ha_discovery")
+
+    asyncio.run(check())
 
 
 @test
