@@ -76,6 +76,34 @@ def parse_value(text):
     return text
 
 
+def parse_rgb(v):
+    """A colour param value from an int, "#RRGGBB", "RRGGBB", "r,g,b" or an
+    (r, g, b) list. Raises ValueError otherwise."""
+    if isinstance(v, bool):
+        raise ValueError("not a colour")
+    if isinstance(v, int):
+        if not 0 <= v <= _util.RGB_MAX:
+            raise ValueError("colour out of range")
+        return v
+    if isinstance(v, float) and v == int(v):
+        return parse_rgb(int(v))
+    if isinstance(v, str):
+        t = v.strip()
+        if "," in t:
+            return parse_rgb([int(x) for x in t.split(",")])
+        if t[:1] == "#":
+            t = t[1:]
+        if len(t) != 6:
+            raise ValueError("colours are #RRGGBB")
+        return int(t, 16)
+    if isinstance(v, (list, tuple)) and len(v) == 3:
+        for c in v:
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or not 0 <= c <= 255:
+                raise ValueError("colour channels are 0-255")
+        return _util.rgb(v[0], v[1], v[2])
+    raise ValueError("not a colour")
+
+
 def build_params(module, overrides):
     """Merge --param overrides into the effect's defaults; returns
     (params, warnings)."""
@@ -85,7 +113,7 @@ def build_params(module, overrides):
     for key, value in overrides.items():
         if key in spec and _util.is_rgb(spec[key]):
             try:
-                value = _util.parse_rgb(value)
+                value = parse_rgb(value)
             except ValueError as e:
                 warnings.append(f"param {key}={value!r}: {e}")
                 continue

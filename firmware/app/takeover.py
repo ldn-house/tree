@@ -246,14 +246,23 @@ class Takeovers:
     # -- what shows --
 
     def expire(self, now):
-        for tid in list(self.active):
-            if time.ticks_diff(now, self.active[tid].expires) >= 0:
-                self.end(tid, "ttl expired")
+        # Remove outside the traversal; the normal per-frame check needs no
+        # snapshot list (including when no takeovers are running).
+        while self.active:
+            expired = None
+            for tid in self.active:
+                if time.ticks_diff(now, self.active[tid].expires) >= 0:
+                    expired = tid
+                    break
+            if expired is None:
+                break
+            self.end(expired, "ttl expired")
 
     def current(self):
         best = None
-        for tk in self.active.values():
-            if best is None or (tk.priority, tk.seq) > (best.priority, best.seq):
+        for tid in self.active:
+            tk = self.active[tid]
+            if best is None or tk.priority > best.priority or (tk.priority == best.priority and tk.seq > best.seq):
                 best = tk
         return best
 

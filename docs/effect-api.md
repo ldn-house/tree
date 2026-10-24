@@ -50,7 +50,7 @@ class Effect:
 A param whose spec is `(0xRRGGBB, 0, 0xFFFFFF, "rgb")` is a colour; build it with `_util.rgb_spec(r, g, b)`. Its value is a packed `0xRRGGBB` int, so reading it never allocates, and a tool that only knows `(default, min, max)` still sees a valid range.
 
 - In `render()`, read it through `_util.ColorParam(ctx, name, default)`: `update()` returns True when the value changed (and on the first call) and sets `.r`, `.g`, `.b`. Rebuild anything derived from the colour only then.
-- Values come in as `"#RRGGBB"`, `"r,g,b"`, `[r, g, b]` or the int (`_util.parse_rgb`); the runtime, `render.py --param color=#ff8000`, the viewer (a colour picker) and the firmware all store the int.
+- Values come in as `"#RRGGBB"`, `"r,g,b"`, `[r, g, b]` or the int (`parse_rgb` in `render.py` and `firmware/app/fx.py`); the runtime, `render.py --param color=#ff8000`, the viewer (a colour picker) and the firmware all store the int.
 - Home Assistant shows each colour param as a `text` entity that takes `#RRGGBB`. A param named `color` is the effect's main colour: picking a colour on the HA light sets it (firmware `app/ha.py`).
 - `GET /effects` marks colour params with `"type": "rgb"`.
 
