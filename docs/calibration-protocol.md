@@ -214,7 +214,7 @@ Legacy levels: `/calibrate/led` used (255, 255, 255) and `/calibrate/binary` use
 ### 7.1 Topics
 
 - `xmas_tree/calibrate/set` (command, not retained). JSON:
-  - `{"action": "play", "sequence": "default", "loops": 0, "delay_ms": 5000, "ttl_s": 300}`. Every field except `action` is optional.
+  - `{"action": "play", "sequence": "default", "loops": 0, "delay_ms": 0, "ttl_s": 300}`. Every field except `action` is optional.
   - `{"action": "halt"}`
   - `{"action": "unlock"}`
 - `xmas_tree/calibrate/state` (retained, published on every state change and once a second while PLAYING):
@@ -227,7 +227,7 @@ Legacy levels: `/calibrate/led` used (255, 255, 255) and `/calibrate/binary` use
 
 The firmware SHOULD publish these entities, attached to the existing tree device:
 
-- `button` "Play calibration sequence": command topic `xmas_tree/calibrate/set`, `payload_press` `{"action":"play","sequence":"default","loops":0,"delay_ms":5000,"ttl_s":300}`.
+- `button` "Play calibration sequence": command topic `xmas_tree/calibrate/set`, `payload_press` `{"action":"play","sequence":"default","loops":0,"delay_ms":0,"ttl_s":300}`. No lead: it loops until `ttl_s`, and a capture only needs about one loop of footage from anywhere in it.
 - `button` "Stop calibration": `payload_press` `{"action":"unlock"}`.
 - `binary_sensor` "Calibrating": `state_topic` `xmas_tree/calibrate/state`, `value_template` `{{ 'ON' if value_json.state != 'idle' else 'OFF' }}`.
 

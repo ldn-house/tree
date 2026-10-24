@@ -194,7 +194,7 @@ def _entities(self):
     yield "button", "calibrate_play", {
         "name": "Play calibration sequence",
         "command_topic": self.t_cal_set,
-        "payload_press": '{"action":"play","sequence":"default","loops":0,"delay_ms":5000,"ttl_s":300}',
+        "payload_press": '{"action":"play","sequence":"default","loops":0,"delay_ms":0,"ttl_s":300}',
         "icon": "mdi:play-box-outline",
     }
     yield "button", "calibrate_stop", {
