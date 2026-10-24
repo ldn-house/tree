@@ -56,19 +56,22 @@ class Effect:
         self.speed = Param(ctx, "speed", 1.0)
         self.rows = Param(ctx, "rows", 5, 1)
         self.wave = Phase(WAVE_MS)
-        self.drift = Phase(DRIFT_MS)
+        # Two rows per cycle: the board only repeats every two rows (white
+        # and dark swap places one row up), so a one-row cycle flipped every
+        # square when it wrapped.
+        self.drift = Phase(2 * DRIFT_MS)
 
     def render(self, t_ms, frame):
         speed = self.speed.get()
         wave = self.wave.update(t_ms, speed) >> 4  # 0..255
-        drift = self.drift.update(t_ms, speed)  # 0..ONE-1: one row
+        drift = self.drift.update(t_ms, speed)  # 0..ONE-1: two rows
         rows = self.rows.get()
         rows = 3 if rows < 3 else 9 if rows > 9 else rows
         row = ONE // rows
         amp = AMP * row >> 8
         white = self.white
         dark = white * DARK >> 8
-        off = row - (drift * row >> 12)  # keeps y positive
+        off = 2 * row - (drift * 2 * row >> 12)  # keeps y positive
         h = self.h
         ux = self.ux
         known = self.known
