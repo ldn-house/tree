@@ -42,6 +42,8 @@ RGB light commands are skipped: main's `HA._light` only handles state, brightnes
 
 After #48 (calibration buffers and output stage allocated on lock and play, the sequence decoder imported on the first sequence request, released on unlock), the same campaign was run back to back on `a1f4cee` and on `11d5d88`, seven repetitions each. Every scenario stayed within run-to-run noise: calibration play over HTTP 34.7 → 34.0 ms to the first frame, HA's button 5008.6 → 5003.6 ms, the play call itself 6.0 → 6.1 ms (HTTP) and 6.2 → 2.6 ms (HA), lock 0.2 → 0.1 ms; the lock's first frame, 59.5 → 72.3 ms median with the max 90 → 96 ms, is the 100 ms calibration poll's phase.
 
+Since #51, effect switches blend over `transition_s` (0.5 s by default), power fades over 1 s and brightness glides. The tool times the first frame that shows the change, which is the first frame of the blend or fade, not its end; with three repeats on `4bb1119` those stayed at 30-110 ms (brightness 46 ms median, effect switch 42 ms, power off 31 ms, power on 106 ms).
+
 Effect import alone measured 0.243 ms median / 0.390 ms max; `Effect.__init__` 0.014 / 0.020 ms. Complete `_start` took 3.100 / 4.994 ms. Most command-to-frame latency is waiting for the next tick and transferring the frame, rather than this effect's import or constructor.
 
 ## Why HA calibration waited
