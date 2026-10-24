@@ -192,9 +192,10 @@ def _apply_py(src, dst, res, l0, l1, l2, n3, o0, o1, o2, temporal):
             res[k + 2] = a & 255
     else:
         for k in range(0, n3, 3):
-            dst[k] = (l0[src[k + o0]] + res[k]) >> 8
-            dst[k + 1] = (l1[src[k + o1]] + res[k + 1]) >> 8
-            dst[k + 2] = (l2[src[k + o2]] + res[k + 2]) >> 8
+            threshold = res[k // 3]
+            dst[k] = (l0[src[k + o0]] + threshold) >> 8
+            dst[k + 1] = (l1[src[k + o1]] + threshold) >> 8
+            dst[k + 2] = (l2[src[k + o2]] + threshold) >> 8
 
 
 def _trim_py(dst, n3, excess, k):
@@ -243,9 +244,10 @@ def _apply_v(src: ptr8, dst: ptr8, res: ptr8, l0: ptr16, l1: ptr16, l2: ptr16,
             k += 3
     else:
         while k < n3:
-            dst[k] = (l0[src[k + o0]] + res[k]) >> 8
-            dst[k + 1] = (l1[src[k + o1]] + res[k + 1]) >> 8
-            dst[k + 2] = (l2[src[k + o2]] + res[k + 2]) >> 8
+            threshold = res[k // 3]
+            dst[k] = (l0[src[k + o0]] + threshold) >> 8
+            dst[k + 1] = (l1[src[k + o1]] + threshold) >> 8
+            dst[k + 2] = (l2[src[k + o2]] + threshold) >> 8
             k += 3
 
 
@@ -419,9 +421,9 @@ class Output:
                 g[i] = int(top * (i / (_GSIZE - 1)) ** gamma + 0.5)
             self.gamma = gamma
             self.gtab = g
-        # Per channel: temporal remainders (1/256 LSB, updated each frame)
-        # or fixed rounding thresholds (read only).
-        self.res = bytearray(3 * n)
+        # Temporal remainders are per channel (updated each frame).
+        # Fixed thresholds are shared by all three channels of each LED.
+        self.res = bytearray(3 * n if self.temporal else n)
         if dither == "temporal":
             # Each channel starts at a different (hashed) phase.
             for k in range(3 * n):
@@ -437,11 +439,9 @@ class Output:
             # on f/256 of the LEDs: unbiased, which keeps the hue at 1-2%.
             for i in range(n):
                 t = ((i * _ALPHA) & 0xFFFF) >> 8
-                self.res[3 * i] = t
-                self.res[3 * i + 1] = t
-                self.res[3 * i + 2] = t
+                self.res[i] = t
         else:
-            for k in range(3 * n):
+            for k in range(n):
                 self.res[k] = 128
         self.raw_total = 0
         self.capped = False
