@@ -9,9 +9,10 @@ take the runtime down:
   until it is reselected.
 - The colour floor (effects/_output.py, ColourFloor) is found from the
   first frame after an effect starts, its params change or the coordinates
-  change (at once, so it applies to that frame), then refined from frames
-  1, 3 and 6 s later, COLOUR_STEP pixels per frame. Nothing runs per frame
-  otherwise.
+  change, then refined from frames 1, 3 and 6 s later. Each analysis is
+  spread over the following frames, at most COLOUR_US per frame (beyond
+  one colour, which can't be split), and the previous floor stays until the
+  first is done. Nothing runs per frame otherwise.
 - An effect that hangs the event loop starves the watchdog. Two records say
   which effect it was: watchdog scratch 0 (set whenever an effect starts,
   survives the reset) and /fx_probe.txt (written before an effect's first
@@ -38,7 +39,9 @@ SLOW_US = 500000
 FALLBACK = "fallback"
 BLACK_REFRESH_MS = 2000
 T_RESTART_MS = 1 << 29  # ~6 days
-COLOUR_STEP = 4  # colour floor: pixels analysed per frame after the first sample
+# Colour floor: analysis time per frame, at most (a frame is 25 ms at 40 fps;
+# one colour takes about 10 ms on the Pico and isn't split).
+COLOUR_US = 4000
 
 
 class Ctx:
@@ -195,12 +198,9 @@ class Engine:
         trace.at(trace.COLOUR)
         before = cf.pct
         t0 = time.ticks_us()
-        n = COLOUR_STEP
         if not busy:
             cf.start(self.raw)
-            if cf.at == 1:
-                n = 1 << 16  # the first frame at once: its floor applies to this frame
-        done = cf.step(n)
+        done = cf.step(us=COLOUR_US)
         us = time.ticks_diff(time.ticks_us(), t0)
         if us > self.colour_call_us:
             self.colour_call_us = us

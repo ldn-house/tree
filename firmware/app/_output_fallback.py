@@ -61,6 +61,16 @@ user's floor (set_colour_floor(); floor_pct() is the result):
   blue-less step of warm white is about 0.012-0.016, so 0.01 means "never
   the yellow". Rounding to all-dark isn't drift (the user's floor is for
   that), so pure single-channel colours never hold the floor up;
+- for colours further from white than the warm whites (COLOUR_HUE_FROM,
+  just past warm_white tone 2's 0.104), the allowed drift grows with the
+  distance, so it is a hue angle rather than a distance (about 5.5 degrees
+  around white at 0.01): the same u'v' step is a much smaller change of
+  hue for a saturated colour, and a fixed distance held rainbow_cycle at
+  35% on the tree, visibly too bright for Home Assistant's 1%. warm_white
+  tones 0-2 (0.065-0.104) keep the fixed threshold, and the more orange
+  tone 3 (0.122) gets 16% more. On the tree, warm_white tone 0
+  (255, 140, 50) at (5, 3, 1) (0.006) looked right, at (4, 2, 1) and
+  (6, 4, 1) (0.011, 0.015) plain white, at (3, 1, 1) (0.045) pink;
 - the wire colour is what this stage sends: channels below dither_min are
   rounded to a whole level, and dithered channels count at their exact
   value (dithering is unbiased, and its one-level splits there weren't
@@ -75,9 +85,12 @@ user's floor (set_colour_floor(); floor_pct() is the result):
   (90%) of them need;
 - an animated effect changes colour, so frames are analysed at
   COLOUR_AT_MS (0, 1, 3 and 6 s) after the effect, its params, the
-  coordinates or the threshold change, pooling the pixels: the first
-  frame's floor applies at once and the later ones refine it. Nothing runs
-  per frame otherwise.
+  coordinates or the threshold change, pooling the pixels; each sample
+  sets the floor when it is done, and until the first one is, the previous
+  floor stays. On the device a sample is spread over the following frames,
+  at most a few milliseconds each (step(us=)): one colour took about 10 ms
+  on the Pico, so a rainbow analysed all at once held a frame for 320 ms.
+  Nothing runs per frame otherwise.
 
 On MicroPython the per-frame loops run as viper code compiled at import
 (it is kept as source because mpy-cross can't emit native code without
@@ -115,6 +128,10 @@ COLOUR_PCT = 90  # share of the analysed pixels kept within the threshold
 COLOUR_SAMPLES = 32  # pixels analysed per frame, at most
 COLOUR_DIM = 2  # pixels below 1/COLOUR_DIM of the frame's brightest are skipped
 COLOUR_AT_MS = (0, 1000, 3000, 6000)  # when to analyse, after a change
+# u'v' of the white point (D65) and the distance from it beyond which the
+# allowed drift grows with the distance (a hue angle).
+COLOUR_WHITE = (0.1978, 0.4683)
+COLOUR_HUE_FROM = 0.105
 
 # CIE 1976 u'v' from linear sRGB (X, Y, Z = M . rgb):
 # u' = 4X / D, v' = 9Y / D, D = X + 15Y + 3Z.
@@ -286,6 +303,17 @@ def drift(out, target):
     if a is None or b is None:
         return 0.0
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def tolerance(target, accuracy):
+    """The u'v' drift allowed for a target colour (linear): accuracy, or
+    for a colour further than COLOUR_HUE_FROM from white, accuracy times
+    its distance over COLOUR_HUE_FROM (a hue angle)."""
+    p = uv(target)
+    if p is None:
+        return accuracy
+    d = ((p[0] - COLOUR_WHITE[0]) ** 2 + (p[1] - COLOUR_WHITE[1]) ** 2) ** 0.5
+    return accuracy * d / COLOUR_HUE_FROM if d > COLOUR_HUE_FROM else accuracy
 
 
 def _uvq(x0, x1, x2):
@@ -503,7 +531,7 @@ class ColourFloor:
     sets it on the stage (see the docstring). Call reset() whenever the
     effect, its params, the coordinates or the accuracy change; then, when
     due(ms since the reset) says so, either add(raw) to analyse a frame at
-    once, or start(raw) and step() a few pixels at a time until it returns
+    once, or start(raw) and step() a little at a time until it returns
     True. Nothing else runs per frame. accuracy: u'v' drift allowed, 0 for
     no colour floor.
 
@@ -521,9 +549,11 @@ class ColourFloor:
         self.seen = {}
         self.at = 0
         self.busy = False
+        self._i = 0
         self._j = 0
         self._take = 0
         self._count = 0
+        self._dim = 0
         self._f = 1 << _Q
         self.level = 0
         self.pct = 0
@@ -548,45 +578,65 @@ class ColourFloor:
         """Analyse a raw frame (before the cap, as the effect rendered it) at
         once. Returns the colour floor in percent."""
         self.start(raw)
-        self.step(self._take)
+        self.step()
         return self.pct
 
     def start(self, raw):
-        """Take a copy of a raw frame and pick the pixels to analyse."""
+        """Take a copy of a raw frame to analyse (no per-pixel work)."""
         t0 = _ticks_us()
         self.at += 1
         self.busy = True
+        self._i = 0
         self._j = 0
+        self._count = 0
         self._take = 0
         self.seen = {}
         st = self.stage
-        if self.accuracy > 0:
+        src = self.raw
+        src[:] = raw
+        total = sum(src)
+        if total:
+            self._f = (st.budget << _Q) // total if total > st.budget else 1 << _Q
+        if self.accuracy > 0 and total and self._f > 0:
+            self._dim = max(src) // COLOUR_DIM
+        else:
+            self._i = st.n  # nothing to analyse
+        self.us = _ticks_diff(_ticks_us(), t0)
+
+    def step(self, pixels=1 << 30, us=0):
+        """Go on with the started frame: find its lit pixels, then analyse
+        up to `pixels` more of them, stopping early once `us` microseconds
+        have passed (0: no limit; each call makes some progress, and one
+        colour can't be split). Returns True when the frame is done and the
+        colour floor is set."""
+        if not self.busy:
+            return True
+        t0 = _ticks_us()
+        n = self.stage.n
+        i = self._i
+        if i < n:
             src = self.raw
-            src[:] = raw
-            total = sum(src)
-            if total:
-                self._f = (st.budget << _Q) // total if total > st.budget else 1 << _Q
-            if total and self._f > 0:
-                dim = max(src) // COLOUR_DIM
-                lit = self.lit
-                count = 0
-                for i in range(st.n):
+            lit = self.lit
+            dim = self._dim
+            count = self._count
+            while i < n:
+                end = min(n, i + 50)
+                while i < end:
                     k = 3 * i
                     if src[k] > dim or src[k + 1] > dim or src[k + 2] > dim:
                         lit[count] = i
                         count += 1
-                self._count = count
-                self._take = min(count, COLOUR_SAMPLES)
-        self.us = _ticks_diff(_ticks_us(), t0)
-
-    def step(self, pixels):
-        """Analyse up to this many more pixels of the started frame. Returns
-        True when the frame is done and the colour floor is set."""
-        if not self.busy:
-            return True
-        t0 = _ticks_us()
+                    i += 1
+                if us and _ticks_diff(_ticks_us(), t0) >= us:
+                    break
+            self._i = i
+            self._count = count
+            if i < n:
+                self.us += _ticks_diff(_ticks_us(), t0)
+                return False
+            self._take = min(count, COLOUR_SAMPLES)
         lmax = COLOUR_FLOOR_MAX * 65280 // 100
-        thr2 = self.accuracy * self.accuracy
+        acc = self.accuracy
         src = self.raw
         lit = self.lit
         seen = self.seen
@@ -600,11 +650,15 @@ class ColourFloor:
             k = 3 * lit[j * count // take]
             key = src[k] << 16 | src[k + 1] << 8 | src[k + 2]
             need = seen.get(key)
-            if need is None:
-                need = self._need(src[k], src[k + 1], src[k + 2], f, lmax, thr2)
-                seen[key] = need
-            needs.append(need)
             j += 1
+            if need is None:
+                need = self._need(src[k], src[k + 1], src[k + 2], f, lmax, acc)
+                seen[key] = need
+                needs.append(need)
+                if us and _ticks_diff(_ticks_us(), t0) >= us:
+                    break
+            else:
+                needs.append(need)
         self._j = j
         done = j >= take
         if done:
@@ -621,9 +675,9 @@ class ColourFloor:
         self.us += _ticks_diff(_ticks_us(), t0)
         return done
 
-    def _need(self, r, g, b, f, lmax, thr2):
-        """Lowest level (1/256 units) from which this colour stays within the
-        threshold at every level up to lmax.
+    def _need(self, r, g, b, f, lmax, acc):
+        """Lowest level (1/256 units) from which this colour stays within its
+        tolerance() at every level up to lmax.
 
         The wire colour only changes where a channel crosses a rounding
         boundary (k + 0.5 levels) or dither_min, so the levels split into
@@ -637,7 +691,14 @@ class ColourFloor:
             return 0  # a single channel never changes colour
         st = self.stage
         self._px = (r, g, b)
-        self._thr = thr2 ** 0.5
+        w = st.white
+        t = (r, g, b) if w is None else (r * w[0], g * w[1], b * w[2])
+        if st.gamma is not None:
+            # At full level, as gamma shapes it (the target moves with the
+            # level, but its distance from white hardly does).
+            t = (t[0] ** st.gamma, t[1] ** st.gamma, t[2] ** st.gamma)
+        self._thr = tolerance(t, acc)
+        thr2 = self._thr * self._thr
         self._lo2 = int(thr2 * 0.88 * _UVQ * _UVQ)
         self._mid2 = int(thr2 * _UVQ * _UVQ)
         self._hi2 = int(thr2 * 1.13 * _UVQ * _UVQ) + 1
