@@ -45,8 +45,10 @@ class Effect:
         # Horizontal position in tree heights (Layout's x is in radii), offset
         # so it's positive.
         self.ux = array("H", bytes(2 * n))
+        rmax = int(lay.rmax * 65536)
         for i in range(n):
-            self.ux[i] = ONE + int(lay.x[i] * lay.rmax)
+            x = lay.x[i] * rmax
+            self.ux[i] = ONE + (x // 65536 if x >= 0 else -(-x // 65536))
         count = lay.count or n
         # Per-channel white level for a lit LED, half the tree lit.
         w = int(SHARE * budget_for_current() / (count / 2) / 3)
