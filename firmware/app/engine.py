@@ -82,6 +82,10 @@ class Engine:
         self.auto_name = None
         self.auto_until = 0
         self.owner = None  # calibration session while it holds the strip
+        self.takeovers = None  # app.takeover.Takeovers, set by the runtime
+        self.tk = None  # the takeover the running effect belongs to
+        self.src = None  # (id, gen) of that takeover; None: the user's state
+        self.tk_params = None
         self.reload = False
         self.hb = time.ticks_ms()
         self.fps = 0
@@ -156,7 +160,7 @@ class Engine:
             self.quarantined.discard(eff)
             if eff == "auto":
                 self.auto_until = 0
-        if "params" in changed and self.ctx is not None and self.name:
+        if "params" in changed and self.ctx is not None and self.name and self.src is None:
             vals = changed["params"].get(self.name)
             if vals:
                 for k, v in vals.items():
@@ -180,6 +184,12 @@ class Engine:
         time left before auto mode moves on (None when locked)."""
         if self.owner is not None:
             return "calibration", "calibration", None
+        tk = self.showing()
+        if tk is not None:
+            if tk.effect == "off":
+                return "off", "takeover", None
+            if self.src is not None:
+                return self.name, "takeover", None
         if not self.state.get("power"):
             return "off", "off", None
         if self.name is None:
@@ -190,7 +200,14 @@ class Engine:
             nxt = max(0, time.ticks_diff(self.auto_until, time.ticks_ms()) // 1000)
         return self.name, mode, nxt
 
+    def showing(self):
+        """The takeover that owns the strip now (calibration aside)."""
+        return self.takeovers.current() if self.takeovers is not None else None
+
     def mode(self):
+        tk = self.showing()
+        if self.src is not None or (tk is not None and tk.effect == "off"):
+            return "takeover"
         eff = self.state.get("effect")
         if eff != "auto" and self.name == eff:
             return "locked"
@@ -217,7 +234,9 @@ class Engine:
         pick = FALLBACK
         for i in range(len(names)):
             cand = names[(start + i) % len(names)]
-            if self.eligible(cand):
+            # AUTO = False effects (docs/effect-api.md) are only shown when
+            # selected or by a takeover.
+            if self.eligible(cand) and self.fx.meta(cand).get("auto", True):
                 pick = cand
                 break
         self.auto_name = pick
@@ -228,6 +247,9 @@ class Engine:
 
     def _unload(self):
         name = self.name
+        self.tk = None
+        self.src = None
+        self.tk_params = None
         self.inst = None
         self.ctx = None
         self.mod = None
@@ -236,13 +258,18 @@ class Engine:
             self.fx.unload(name)
         gc.collect()
 
-    def _params(self, name, meta):
+    def _params(self, name, meta, tk=None):
         params = {}
         for k, spec in meta["params"].items():
-            params[k] = self.state.param(name, k, spec[0])
+            if tk is not None:
+                # A takeover's own values over the effect's defaults; the
+                # user's saved params are theirs, not the takeover's.
+                params[k] = tk.params.get(k, spec[0])
+            else:
+                params[k] = self.state.param(name, k, spec[0])
         return params
 
-    def _start(self, name):
+    def _start(self, name, tk=None):
         self._unload()
         trace.at(trace.EFFECT_START)
         try:
@@ -258,11 +285,14 @@ class Engine:
                     self.probing = True
                 mod = self.fx.load(name)
                 meta = self.fx.meta(name)
-            ctx = _ctx(self.n, self.coords, self._params(name, meta))
+            ctx = _ctx(self.n, self.coords, self._params(name, meta, tk))
             inst = mod.Effect(ctx)
         except Exception as e:
             self._fail(name, e)
             return False
+        self.tk = tk
+        self.src = (tk.id, tk.gen) if tk is not None else None
+        self.tk_params = tk.params if tk is not None else None
         self.name = name
         self.mod = mod
         self.ctx = ctx
@@ -333,22 +363,40 @@ class Engine:
                 self.fps = 0
                 await asyncio.sleep_ms(50)
                 continue
-            if not self.state.get("power"):
+            tk = None
+            if self.takeovers is not None:
+                self.takeovers.expire(now)
+                tk = self.takeovers.current()
+                if tk is not None and tk.effect != "off" and not self.eligible(tk.effect):
+                    tk = None  # failed, quarantined or no coordinates: the user's state shows
+            dark_tk = tk is not None and tk.effect == "off"
+            if dark_tk or (tk is None and not self.state.get("power")):
                 if self.inst is not None:
                     self._unload()
                 self.dark = True
                 self.fps = 0
                 await self._black(now)
-                await asyncio.sleep_ms(100)
+                await asyncio.sleep_ms(50 if dark_tk else 100)
                 continue
             self.dark = False
             self._black_at = None
-            want = self._target(now)
-            if self.reload or want != self.name or self.inst is None:
+            if tk is not None:
+                want = tk.effect
+                src = (tk.id, tk.gen)
+            else:
+                want = self._target(now)
+                src = None
+            if self.reload or want != self.name or src != self.src or self.inst is None:
                 self.reload = False
-                if not self._start(want):
+                if not self._start(want, tk):
                     await asyncio.sleep_ms(10)
                     continue
+            elif tk is not None and tk.params is not self.tk_params:
+                # Same effect, new values: in place, like the user's params.
+                self.tk_params = tk.params
+                meta = self.fx.meta(want)["params"]
+                for k, spec in meta.items():
+                    self.ctx.params[k] = tk.params.get(k, spec[0])
             await self._frame(now)
             elapsed = time.ticks_diff(time.ticks_ms(), now)
             await asyncio.sleep_ms(max(1, self.period_ms - elapsed))
@@ -359,7 +407,8 @@ class Engine:
         if dt < 0 or dt > 1000:
             dt = 0 if dt < 0 else 1000
         # Accumulate scaled time so t_ms stays monotonic when speed changes.
-        frac = self.t_frac + int(dt * 1000 * self.state.get("speed"))
+        speed = self.tk.speed if self.tk is not None else self.state.get("speed")
+        frac = self.t_frac + int(dt * 1000 * speed)
         t = self.t_ms + frac // 1000
         if t >= T_RESTART_MS:
             # Restart instead of rendering: render() never sees t_ms at or
@@ -388,13 +437,18 @@ class Engine:
             self.proven.add(self.name)
             if self.probing:
                 self.clear_probe()
-        await self.present(self.raw, self.out, self.state.get("brightness"))
+        if self.tk is not None:
+            bri = self.takeovers.brightness(self.tk)
+        else:
+            bri = self.state.get("brightness")
+        await self.present(self.raw, self.out, bri)
         self._tick_fps(now)
 
     def status(self):
         return {
             "running": self.name,
             "mode": self.mode() if self.owner is None else "calibration",
+            "takeover": self.tk.id if self.tk is not None else None,
             "fps": self.fps,
             "render_ms": self.render_us // 1000,
             "power_capped": bool(self.out.capped) and not self.dark,

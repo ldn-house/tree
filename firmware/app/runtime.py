@@ -20,7 +20,7 @@ import asyncio
 
 import bootmgr
 
-from app import calib, cfg, coords, driver, engine, fx, ha, hw, httpd, mqtt, net, outstage, recovery, state, supervisor, trace, updates
+from app import calib, cfg, coords, driver, engine, fx, ha, hw, httpd, mqtt, net, outstage, recovery, state, supervisor, takeover, trace, updates
 from app.log import log
 
 # Collect after every GC_THRESHOLD bytes allocated rather than only when the
@@ -93,6 +93,8 @@ class Runtime:
         self.cal_out = outstage.create(self.n, budget, None, cfg.COLOR_ORDER, False, None, 0)
         self.engine = engine.Engine(self.n, self.state, self.fx, self.out, self.driver, cfg.FPS)
         self.engine.coords = coords.load(self.n, self.slot_dir)
+        self.takeovers = takeover.Takeovers(self.fx, self.state)
+        self.engine.takeovers = self.takeovers
         bootmgr.feed()
         self.engine.boot_quarantine(info.get("reset_cause"))
 
@@ -153,7 +155,10 @@ class Runtime:
         """Apply user changes from MQTT or HTTP. Raises ValueError."""
         if changes.get("power") is False:
             self.calib.unlock("power off from " + source)
-        return self.state.update(changes, source, effects=self.fx.names(), param_specs=self.param_specs)
+        changed = self.state.update(changes, source, effects=self.fx.names(), param_specs=self.param_specs)
+        # After validation, so a malformed command never ends a takeover.
+        self.takeovers.user_change(changes, source)
+        return changed
 
     def request_reboot(self, reason, delay_ms=500):
         if self.reboot_at is None:
@@ -196,6 +201,7 @@ class Runtime:
             "error": self.last_error(),
             "effect": es["running"] or "off",
             "calib": self.calib.state,
+            "takeover": self.takeovers.current().id if self.takeovers.current() else None,
             "recovery": "outdated (USB install recommended)" if recovery.OUTDATED else "ok (API %d)" % recovery.API,
         }
 
@@ -246,6 +252,7 @@ class Runtime:
             "ha": {"discoveries": self.ha.discoveries, "offline_seen": self.ha.offline_seen} if self.ha else None,
             "http": {"requests": self.http.requests, "rejected": self.http.rejected, "auth": bool(cfg.HTTP_TOKEN)},
             "calibration": self.calib.state,
+            "takeover": self.takeovers.status(),
             "update": self.updates.status(),
             "supervisor": {"healthy": self.sup.healthy, "problems": self.sup.problems,
                            "heap_live": self.sup.heap_live, "heap_live_min": self.sup.heap_live_min,

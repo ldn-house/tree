@@ -5,9 +5,10 @@ are on the RP2350) with a heap the size the Pico 2 W actually has free
 (452,544 bytes idle at the REPL, measured on the user's board, minus margin
 for Wi-Fi), the real effects, the full coordinates file and TLS:
 
-1. cycle through every real effect (auto-cycle every few seconds), three
-   times over, with MQTT and Home Assistant connected to a local mosquitto
-   (--mosquitto): the free heap must never drop below --floor (64 KB), even
+1. cycle through every real effect (auto-cycle every few seconds, three
+   times over; then each AUTO = False effect, which the auto cycle skips,
+   locked for a few seconds), with MQTT and Home Assistant connected to a
+   local mosquitto (--mosquitto): the free heap must never drop below --floor (64 KB), even
    uncollected, and the MQTT session must never drop;
 2. meanwhile check for updates and then self-update over HTTPS (mbedtls on
    the MicroPython heap, as on the board) from a local TLS server that
@@ -136,6 +137,22 @@ def track(seconds):
     return seen
 
 
+def cycle(loops):
+    """Every effect: loops of the auto cycle, then each AUTO = False one
+    locked in turn (the cycle skips those). Returns (every effect was seen
+    running, the effects seen)."""
+    auto = {e["name"]: e.get("auto", True) for e in d.get("/effects", timeout=10)[1]["effects"]}
+    n = sum(1 for a in auto.values() if a)
+    d.post("/state", {"effect": "auto"})
+    seen = track(loops * 4 * n + 8)
+    for name, a in auto.items():
+        if not a:
+            d.post("/state", {"effect": name})
+            seen |= track(4)
+    d.post("/state", {"effect": "auto"})
+    return set(auto) <= seen, seen
+
+
 def checkpoint(name):
     """The boot's low-water marks so far (they include start-up and every MQTT
     publish), against the floor; and no MQTT session may have dropped."""
@@ -157,9 +174,8 @@ try:
     result["effects"] = names
     d.post("/state", {"auto_s": 4, "brightness": 255})
     if args.before:
-        seen = track(args.before * 4 * len(names) + 8)
+        result["steps"]["cycle_all_effects"], seen = cycle(args.before)
         result["effects_seen"] = sorted(x for x in seen if x)
-        result["steps"]["cycle_all_effects"] = set(names) <= seen
     checkpoint("floor_and_mqtt_before_update")
     code, chk = d.request("GET", "/update/github/check", timeout=60)
     result["steps"]["tls_check"] = code == 200 and chk.get("latest") is not None and not chk.get("error")
@@ -169,8 +185,7 @@ try:
     s = d.wait_http(180, pred=lambda s: s["slot"] == "b" and not s["boot"]["trial"])
     result["steps"]["tls_self_update"] = s["version"] != "" and s["slot"] == "b"
     if args.after:
-        seen = track(args.after * 4 * len(names) + 8)
-        result["steps"]["cycle_after_update"] = set(names) <= seen
+        result["steps"]["cycle_after_update"] = cycle(args.after)[0]
     checkpoint("floor_and_mqtt_after_update")
     if args.calib:
         (d.root / "fw" / "b" / "data" / "calib_default.tcal").write_bytes(Path(args.calib).read_bytes())

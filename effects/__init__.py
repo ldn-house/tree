@@ -4,6 +4,9 @@ EFFECTS is ordered: it drives the Home Assistant effect list and the auto
 cycle. Each name is a module in this package, imported lazily by load().
 Only EFFECTS is exposed to Home Assistant, the auto cycle and the tools.
 
+An effect module with AUTO = False is registered (Home Assistant can select
+it, takeovers can show it) but the auto cycle skips it.
+
 DISABLED lists modules kept in the package but not registered, so they can
 be re-enabled by moving the name back into EFFECTS. Nothing loads them.
 """
@@ -28,6 +31,7 @@ EFFECTS = [
     "fire",
     "lightning",
     "storm",
+    "solid",
 ]
 
 DISABLED = [

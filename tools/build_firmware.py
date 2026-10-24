@@ -115,11 +115,13 @@ def effect_meta(effects_dir: Path):
         meta = {}
         for name in pkg.EFFECTS:
             mod = importlib.import_module(f"{effects_dir.name}.{name}")
-            params = {k: list(v[:3]) for k, v in getattr(mod, "PARAMS", {}).items()}
+            # (default, min, max), plus "rgb" for a colour param.
+            params = {k: list(v[:4]) for k, v in getattr(mod, "PARAMS", {}).items()}
             meta[name] = {
                 "duration_ms": int(getattr(mod, "DURATION_MS", 20000)),
                 "params": params,
                 "needs_coords": bool(getattr(mod, "NEEDS_COORDS", False)),
+                "auto": bool(getattr(mod, "AUTO", True)),
             }
         return meta, set(getattr(pkg, "DISABLED", ()))
     finally:

@@ -49,15 +49,26 @@ def test_every_effect_runs_on_the_device(make_device, bundle):
     assert st["effects"] == effects.EFFECTS
     assert st["coords"] > 0  # the bundled legacy coordinates
     assert st["state"]["auto_s"] == 2 and st["state"]["effect"] == "auto"
+    auto = [n for n in effects.EFFECTS if getattr(effects.load(n), "AUTO", True)]
+    manual = [n for n in effects.EFFECTS if n not in auto]
+    listed = {e["name"]: e["auto"] for e in d.get("/effects")[1]["effects"]}
+    assert listed == {n: n in auto for n in effects.EFFECTS}
     seen = set()
 
     def all_seen():
         s = d.get("/")[1]
         seen.add(s["effect"]["running"])
         assert not s["effect"]["failed"], s["effect"]["failed"]
-        return set(effects.EFFECTS) <= seen
+        return set(auto) <= seen
 
-    wait_for(all_seen, 2.5 * len(effects.EFFECTS) + 20, interval=0.3, what="every effect")
+    wait_for(all_seen, 2.5 * len(auto) + 20, interval=0.3, what="every auto-cycled effect")
+    assert not seen & set(manual), "AUTO = False effects in the auto cycle"
+    # The rest run when selected.
+    for name in manual:
+        assert d.post("/state", {"effect": name})[0] == 200
+        wait_for(lambda: d.get("/")[1]["effect"]["running"] == name, 10, what=name)
+        wait_for(lambda: d.get("/")[1]["effect"]["fps"] > 0, 10, what=name + " frames")
+        assert not d.get("/")[1]["effect"]["failed"]
     assert len(d.boots) == 0
 
 

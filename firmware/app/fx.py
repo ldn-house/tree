@@ -17,6 +17,8 @@ from app.log import log
 
 OVERLAY = bootmgr.FX_DIR
 PREFIX = "fx_"
+RGB = "rgb"
+RGB_MAX = 0xFFFFFF
 
 
 def valid_name(name):
@@ -34,14 +36,54 @@ def module_meta(mod):
     params = {}
     for k, spec in getattr(mod, "PARAMS", {}).items():
         try:
-            params[k] = (spec[0], spec[1], spec[2])
+            if len(spec) > 3 and spec[3] == RGB:
+                params[k] = (spec[0], 0, RGB_MAX, RGB)
+            else:
+                params[k] = (spec[0], spec[1], spec[2])
         except Exception:
             pass
     return {
         "duration_ms": int(getattr(mod, "DURATION_MS", 20000)),
         "params": params,
         "needs_coords": bool(getattr(mod, "NEEDS_COORDS", False)),
+        "auto": bool(getattr(mod, "AUTO", True)),
     }
+
+
+def is_rgb(spec):
+    """A colour param: (0xRRGGBB, 0, 0xFFFFFF, "rgb") (effects/_util.py)."""
+    return len(spec) > 3 and spec[3] == RGB
+
+
+def parse_rgb(v):
+    """A colour param value (0xRRGGBB int) from an int, "#RRGGBB", "r,g,b"
+    or [r, g, b]; the same rules as effects/_util.parse_rgb. Raises
+    ValueError."""
+    if isinstance(v, bool):
+        raise ValueError("not a colour")
+    if isinstance(v, float) and v == int(v):
+        v = int(v)
+    if isinstance(v, int):
+        if not 0 <= v <= RGB_MAX:
+            raise ValueError("colour out of range")
+        return v
+    if isinstance(v, str):
+        t = v.strip()
+        if "," in t:
+            return parse_rgb([int(x) for x in t.split(",")])
+        if t[:1] == "#":
+            t = t[1:]
+        if len(t) != 6:
+            raise ValueError("colours are #RRGGBB")
+        return int(t, 16)
+    if isinstance(v, (list, tuple)) and len(v) == 3:
+        out = 0
+        for c in v:
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or not 0 <= c <= 255:
+                raise ValueError("colour channels are 0-255")
+            out = out << 8 | int(c)
+        return out
+    raise ValueError("not a colour")
 
 
 STAGING = "__new"
@@ -131,7 +173,7 @@ class Effects:
             mod = self.load(name)
         except Exception as e:
             log("fx: cannot read metadata for %s: %r" % (name, e))
-            return {"duration_ms": 20000, "params": {}, "needs_coords": False}
+            return {"duration_ms": 20000, "params": {}, "needs_coords": False, "auto": True}
         m = module_meta(mod)
         self._meta[name] = m
         return m
