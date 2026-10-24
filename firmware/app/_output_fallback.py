@@ -66,9 +66,9 @@ user's floor (set_colour_floor(); floor_pct() is the result):
   distance, so it is a hue angle rather than a distance (about 5.5 degrees
   around white at 0.01): the same u'v' step is a much smaller change of
   hue for a saturated colour, and a fixed distance held rainbow_cycle at
-  35% on the tree, visibly too bright for Home Assistant's 1%. warm_white
-  tones 0-2 (0.065-0.104) keep the fixed threshold, and the more orange
-  tone 3 (0.122) gets 16% more. On the tree, warm_white tone 0
+  35% on the tree, visibly too bright for Home Assistant's 1%. The
+  warm_white tones (0.065-0.104) keep the fixed threshold. On the tree,
+  warm_white tone 0
   (255, 140, 50) at (5, 3, 1) (0.006) looked right, at (4, 2, 1) and
   (6, 4, 1) (0.011, 0.015) plain white, at (3, 1, 1) (0.045) pink;
 - the wire colour is what this stage sends: channels below dither_min are

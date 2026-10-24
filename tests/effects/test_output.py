@@ -214,7 +214,7 @@ def test_brightness_zero_is_dark():
 # yellow), and the eye blends neighbouring LEDs differently depending on how
 # densely they sit in the tree. That needs the real tree.
 
-TONES = ((255, 140, 50), (255, 119, 35), (255, 87, 14), (255, 68, 7))
+from effects.warm_white import TONES  # noqa: E402
 TONE2 = TONES[2]  # warm_white's default
 
 
@@ -269,7 +269,7 @@ def test_set_floor():
     assert o.floor == 100 and o.level(1) == 65280
 
 
-@pytest.mark.parametrize("tone", range(4))
+@pytest.mark.parametrize("tone", range(len(TONES)))
 @pytest.mark.parametrize("dither", ["spatial", "temporal"])
 def test_no_spatial_split_below_dither_min(tone, dither):
     """For every warm white tone at every HA step, a channel whose target is
@@ -306,7 +306,7 @@ def test_warm_white_bottom_of_the_slider():
         _output.Output(N).process(solid(c), dst, hass(1))
         assert len(set(leds(dst))) == 1
         got.append(tuple(dst[:3]))
-    assert got == [(2, 1, 0), (2, 1, 0), (3, 1, 0), (3, 1, 0)]
+    assert got == [(2, 1, 0), (2, 1, 0), (3, 1, 0)]
     _output.Output(N, floor=3).process(solid(TONE2), dst, hass(1))
     assert tuple(dst[:3]) == (2, 1, 0)
 
@@ -466,13 +466,12 @@ def test_stricter_accuracy_raises_the_floor(color):
 
 def test_floor_values_for_warm_white():
     """Pinned: the floor each warm_white tone gets under the 1.5 A cap (red
-    at 100% is 55-74 levels), at 0.02 and 0.01. Tone 3, more orange than
-    COLOUR_HUE_FROM, gets a little more tolerance (lower at 0.02)."""
+    at 100% is 55-74 levels), at 0.02 and 0.01."""
     got = {}
-    for tone in ((255, 140, 50), (255, 119, 35), TONE2, (255, 68, 7)):
+    for tone in TONES:
         got[tone] = tuple(colour_floor(tone, acc)[1].pct for acc in (0.02, 0.01))
     assert got == {(255, 140, 50): (8.31, 15.52), (255, 119, 35): (6.09, 16.18),
-                   TONE2: (10.95, 15.79), (255, 68, 7): (7.61, 22.85)}, got
+                   TONE2: (10.95, 15.79)}, got
 
 
 @pytest.mark.parametrize("color", [(255, 0, 0), (0, 255, 0), (0, 0, 40), (255, 255, 255), (9, 9, 9)])
