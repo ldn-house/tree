@@ -96,7 +96,8 @@ def test_new_coordinates_reach_a_cached_coordinate_effect(make_device, bundle):
             time.sleep(0.05)
         return None
 
-    d.post("/state", {"effect": "plane_sweep", "brightness": 255, "speed": 1})
+    # Observe coordinate-driven output, without a frozen switch frame.
+    d.post("/state", {"effect": "plane_sweep", "brightness": 255, "speed": 1, "transition_style": "none"})
     low = first_lit(0.05)
     high = first_lit(0.95)
     low2 = first_lit(0.05)

@@ -821,6 +821,7 @@ def capped_line_reader_drops_long_lines_within_the_head_budget():
 def l11_render_never_sees_the_clock_limit():
     import asyncio
     from app.engine import Engine, T_RESTART_MS
+    from app.transitions import Ramp
 
     for speed in (0.1, 1.0, 5.0):
         seen = []
@@ -837,6 +838,7 @@ def l11_render_never_sees_the_clock_limit():
             t_last = 0
             t_frac = 0
             t_ms = T_RESTART_MS - 3
+            ramp = Ramp(255)
             state = State()
             inst = Effect()
             raw = bytearray(3)

@@ -115,6 +115,8 @@ raw RGB frame -> power cap (on the raw frame) -> brightness (above the floor)
 - **Speed**: on MicroPython the per-frame loops are viper code compiled at import from a source string (mpy-cross can't emit native code without `-march`). Elsewhere, or if that fails, plain-Python versions run; `_output.NATIVE` says which. Both produce identical bytes, which `tools/output_check.py` checks under MicroPython. On the native 32-bit MicroPython 1.27 build the stage costs about 0.3 ms per frame (the Python fallback about 1.9 ms; the old stage 1.2 ms).
 - **Current estimate**: `_output.current_a(channel_sum, ma_per_channel)` assumes `MA_PER_CHANNEL = 8` mA per channel at 255 for a 12 V WS2811 bullet. Estimate a frame's current from the bytes actually sent, `current_a(sum(dst))`, as the firmware, renderer and viewer do; it accounts for gamma, white balance and dithering.
 
+The firmware may freeze the last wire frame and blend it into the next effect's output (default 0.5 s; fade, height wipe or dissolve). It renders only the new effect during that interval; effects still write every raw RGB pixel, with no awareness of the transition. Power/brightness ramps run through this output stage, stay above its effective floor until cutting to black, and do not reset colour-floor analysis. Calibration output bypasses transitions. These display-only engine behaviours are not simulated by the single-effect renderer or viewer.
+
 ## Coordinates
 
 Per-LED `(x, y, z)` or `None`, in this frame:

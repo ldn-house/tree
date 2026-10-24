@@ -13,6 +13,9 @@
   heap it allocates doing so (MicroPython), for a solid warm white, a
   rainbow and noise at each accuracy.
 
+Without native kernels, parity is reported as unverified; allocation and
+fallback timing still run. Timings describe the current host, not the Pico.
+
 Exits 1 on any failure.
 """
 
@@ -117,6 +120,8 @@ def main():
             ok = a == b
             failed += not ok
             print("parity %-48s %s" % (repr(cfg), "ok" if ok else "MISMATCH"))
+    else:
+        print("native parity: NOT VERIFIED (native kernels unavailable)")
     if MP:
         raw = raws[0]
         dst = bytearray(3 * N)

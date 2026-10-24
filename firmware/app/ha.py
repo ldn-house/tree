@@ -89,7 +89,7 @@ class HA:
             self.dirty["light"] = True
         if "speed" in changed or "auto_s" in changed or "floor" in changed or "params" in changed:
             self.dirty["settings"] = True
-        if "colour_accuracy" in changed:
+        if "colour_accuracy" in changed or "transition_style" in changed or "transition_s" in changed:
             self.dirty["settings"] = True
 
     def mark(self, what):
@@ -136,6 +136,8 @@ class HA:
         if not isinstance(cmd, dict):
             raise ValueError("expected a JSON object")
         changes = {}
+        if "transition" in cmd:
+            changes["transition"] = cmd["transition"]
         if "state" in cmd:
             if cmd["state"] not in ("ON", "OFF"):
                 raise ValueError("state must be ON or OFF")
@@ -168,6 +170,10 @@ class HA:
             self.rt.apply({"floor": float(text)}, "mqtt")
         elif name == "colour_accuracy":
             self.rt.apply({"colour_accuracy": float(text)}, "mqtt")
+        elif name == "transition_style":
+            self.rt.apply({"transition_style": text}, "mqtt")
+        elif name == "transition_s":
+            self.rt.apply({"transition_s": float(text)}, "mqtt")
         elif name == "auto_cycle":
             self.rt.apply({"auto_s": int(float(text))}, "mqtt")
         elif name.startswith("param/"):
@@ -225,7 +231,7 @@ class HA:
             spec = self.rt.fx.meta(eff)["params"]
             if spec:
                 params[eff] = {k: st.param(eff, k, v[0]) for k, v in spec.items()}
-        return {"speed": st.get("speed"), "auto_s": st.get("auto_s"), "floor": st.get("floor"),
+        return {"transition_style": st.get("transition_style"), "transition_s": st.get("transition_s"), "speed": st.get("speed"), "auto_s": st.get("auto_s"), "floor": st.get("floor"),
                 "colour_accuracy": st.get("colour_accuracy"), "params": params}
 
     def diag_payload(self):

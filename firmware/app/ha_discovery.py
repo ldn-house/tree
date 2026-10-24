@@ -60,6 +60,8 @@ def _entities(self):
         "state_topic": self.t_state,
         "supported_color_modes": ["brightness"],
         "brightness_scale": 255,
+        # Explicit even though HA JSON lights default to supporting it.
+        "transition": True,
         "effect": True,
         "effect_list": ["auto"] + names,
         # The firmware before this one pointed the light's attributes at
@@ -67,6 +69,17 @@ def _entities(self):
         # name the topic (and how to parse it) explicitly.
         "json_attributes_topic": self.t_effect_attr,
         "json_attributes_template": "{{ value }}",
+    }
+    yield "select", "transition_style", {
+        "name": "Effect transition", "command_topic": self.t_cmd + "transition_style",
+        "state_topic": self.t_settings, "value_template": "{{ value_json.transition_style }}",
+        "options": ["none", "fade", "wipe", "dissolve"], "entity_category": "config",
+    }
+    yield "number", "transition_s", {
+        "name": "Effect transition duration", "command_topic": self.t_cmd + "transition_s",
+        "state_topic": self.t_settings, "value_template": "{{ value_json.transition_s }}",
+        "min": 0, "max": 60, "step": 0.1, "unit_of_measurement": "s",
+        "mode": "box", "entity_category": "config",
     }
     yield "number", "speed", {
         "name": "Speed",
