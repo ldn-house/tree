@@ -198,9 +198,12 @@ class HA:
         try:
             return await ha_discovery.publish(self, force)
         finally:
-            del sys.modules["app.ha_discovery"]
+            # Tolerates an overlapping pass (a reconnect during the run
+            # loop's) having dropped them already.
+            sys.modules.pop("app.ha_discovery", None)
             import app
-            delattr(app, "ha_discovery")
+            if hasattr(app, "ha_discovery"):
+                delattr(app, "ha_discovery")
             del ha_discovery
             gc.collect()
 
