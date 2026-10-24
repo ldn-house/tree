@@ -45,7 +45,7 @@ def test_mpremote_interrupt_and_reset_does_not_quarantine(device):
     wait_for(lambda: status(d)["effect"]["running"] == "fresh", 5)
     d.interrupt()
     wait_for(lambda: len(d.boots) >= 1, 20, what="reset")
-    assert d.boots[0] == "machine.reset()"
+    assert d.boots[0] == "machine.reset()", d.console()
     st = d.wait_http(30)
     assert st["effect"]["quarantined"] == [], st["effect"]
     assert st["boot"]["reset_cause"] == "reboot", st["boot"]
