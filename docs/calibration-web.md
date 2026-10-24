@@ -66,7 +66,7 @@ Two options, with the same algorithm as `calib/video.py`.
 ## 5. Flow, screen by screen
 
 1. **Connect.** Paste the HA URL and token (once). The page checks `GET /api/states/binary_sensor.xmas_tree_calibrating`.
-2. **Start.** "Start calibration" presses the HA button. The tree goes dark for 5 s (`delay_ms`), then loops. The page shows the loop length (6.6 s) and "Stand about 2 m from the tree, fit the whole tree in the frame, hold still".
+2. **Start.** "Start calibration" presses the HA button. The tree starts looping at once, each loop opening with 1 s of dark. The page shows the loop length (6.6 s) and "Stand about 2 m from the tree, fit the whole tree in the frame, hold still".
 3. **Capture view 1 to N.** For each spot the page waits for stillness, records 1.5 loops, decodes, and shows coverage. It recommends 4–6 spots spread around the tree. More views help occluded LEDs most.
 4. **Solve.** BA over all views, with the wire prior. It shows a 3D preview (three.js) with LEDs coloured by confidence, the median reprojection error, and how many LEDs were interpolated.
 5. **Verify (optional, recommended).** The page asks the tree, through HA, to play a "plane sweep" effect using the *new* coordinates, and films it. A correct calibration shows a flat plane moving up the tree. The decoder can check this automatically by comparing the lit-LED set per frame with the plane prediction. This catches mirrored or misindexed results before they're installed.
