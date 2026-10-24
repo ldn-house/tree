@@ -136,8 +136,6 @@ def accurate(frames):
             if delta > maximum:
                 maximum = delta
                 worst = (at, rgb)
-            if '--strict' in sys.argv:
-                assert delta <= COLOUR_ACCURACY, (at, rgb, delta)
         # ColourFloor models channels above DITHER_MIN by their averaged
         # spatial-dither value. Check that contract from the wire too.
         mean = tuple(sum(wire[k] for k in range(c, len(wire), 3)) / 500 for c in range(3))

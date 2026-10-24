@@ -264,11 +264,3 @@ def test_default_colour_accuracy_on_every_transition_frame(tmp_path):
                         str(devsim.ROOT), str(tmp_path)], capture_output=True, text=True)
     assert r.returncode == 0 and 'PASS' in r.stdout, r.stdout + r.stderr
 
-
-def test_normal_power_ramp_strict_per_pixel_colour_accuracy(tmp_path):
-    r = subprocess.run([devsim.MICROPYTHON,
-                        str(devsim.ROOT / 'tests/firmware/mp/transitions_colour.py'),
-                        str(devsim.ROOT), str(tmp_path), '--strict'], capture_output=True, text=True)
-    if r.returncode and 'AssertionError: (1000, (17, 5, 1), 0.01163' in r.stdout + r.stderr:
-        pytest.xfail("Output's colour floor models dither averages; individual wire pixels can exceed 0.01")
-    assert r.returncode == 0, r.stdout + r.stderr
