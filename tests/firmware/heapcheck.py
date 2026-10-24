@@ -14,6 +14,11 @@ for Wi-Fi), the real effects, the full coordinates file and TLS:
    redirects like github.com, with a head as large as its;
 3. after the reboot, cycle again and play the default calibration sequence.
 
+--before and --after set the loops on either side of the update, so the
+campaign can run as two halves in parallel (test_heap.py: cycles, then the
+update on the fragmented heap; test_heap_updated.py: the update, then cycles
+and calibration on the updated firmware).
+
 Stdlib only, so it runs inside a 32-bit container:
     python3 heapcheck.py --micropython micropython32 --bundle a.bin --update b.bin \
         --cert c.pem --key k.pem --heap 400K --out result.json
@@ -43,7 +48,8 @@ ap.add_argument("--calib", help="a .tcal to install as the default sequence")
 ap.add_argument("--out", default="heapcheck.json")
 ap.add_argument("--mosquitto", help="mosquitto binary: run with MQTT + Home Assistant connected")
 ap.add_argument("--floor", type=int, default=64 * 1024, help="lowest acceptable free heap, even uncollected")
-ap.add_argument("--loops", type=int, default=3, help="auto-cycle loops per boot")
+ap.add_argument("--before", type=int, default=3, help="auto-cycle loops before the self-update")
+ap.add_argument("--after", type=int, default=3, help="auto-cycle loops after it")
 args = ap.parse_args()
 
 os.environ["MICROPYTHON"] = args.micropython
@@ -150,10 +156,11 @@ try:
     names = s["effects"]
     result["effects"] = names
     d.post("/state", {"auto_s": 4, "brightness": 255})
-    seen = track(args.loops * 4 * len(names) + 8)
-    result["effects_seen"] = sorted(x for x in seen if x)
-    result["steps"]["cycle_all_effects"] = set(names) <= seen
-    checkpoint("floor_and_mqtt_after_cycles")
+    if args.before:
+        seen = track(args.before * 4 * len(names) + 8)
+        result["effects_seen"] = sorted(x for x in seen if x)
+        result["steps"]["cycle_all_effects"] = set(names) <= seen
+    checkpoint("floor_and_mqtt_before_update")
     code, chk = d.request("GET", "/update/github/check", timeout=60)
     result["steps"]["tls_check"] = code == 200 and chk.get("latest") is not None and not chk.get("error")
     result["check"] = chk
@@ -161,8 +168,9 @@ try:
     track(3)
     s = d.wait_http(180, pred=lambda s: s["slot"] == "b" and not s["boot"]["trial"])
     result["steps"]["tls_self_update"] = s["version"] != "" and s["slot"] == "b"
-    seen = track(args.loops * 4 * len(names) + 8)
-    result["steps"]["cycle_after_update"] = set(names) <= seen
+    if args.after:
+        seen = track(args.after * 4 * len(names) + 8)
+        result["steps"]["cycle_after_update"] = set(names) <= seen
     checkpoint("floor_and_mqtt_after_update")
     if args.calib:
         (d.root / "fw" / "b" / "data" / "calib_default.tcal").write_bytes(Path(args.calib).read_bytes())
