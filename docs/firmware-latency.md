@@ -34,7 +34,7 @@ Measured on 2026-10-24 at `a1f4ceef127a8f3f035e7ebee641fd22d45df128`, macOS, 64-
 | Calibration lock, POST /calibrate/start | 63.567 | 103.886 | 100 ms calibration polling + black wire transfer |
 | Calibration play, HTTP: first dark frame | 34.079 | 65.428 | Cold preparation + 25 ms minimum lead + 0.3 ms reset |
 | Calibration play, HTTP: first lit frame | 1034.075 | 1065.431 | Above + 1000 ms sequence dark lead |
-| Calibration play, HA: first dark frame | 5007.239 | 5008.751 | Cold preparation + explicit 5000 ms lead + 0.3 ms reset |
+| Calibration play, HA: first dark frame | 5007.239 | 5008.751 | Cold preparation + the button's 5000 ms lead (removed in #49) + 0.3 ms reset |
 | Calibration play, HA: first lit frame | 6007.235 | 6008.746 | Above + 1000 ms sequence dark lead |
 | MQTT command → state received | 96.022 | 197.196 | 200 ms HA publishing loop + local transport |
 
@@ -44,9 +44,9 @@ After #48 (calibration buffers and output stage allocated on lock and play, the 
 
 Effect import alone measured 0.243 ms median / 0.390 ms max; `Effect.__init__` 0.014 / 0.020 ms. Complete `_start` took 3.100 / 4.994 ms. Most command-to-frame latency is waiting for the next tick and transferring the frame, rather than this effect's import or constructor.
 
-## Why HA calibration waits
+## Why HA calibration waited
 
-The tool obtains the button configuration from actual retained HA discovery. On main, “Play calibration sequence” publishes to `xmas_tree/calibrate/set`:
+Since #49 the button sends `delay_ms: 0`, and with the same tool its first frame arrives in 28.7 ms median / 32.4 ms max and the first lit frame in 1,028.7 / 1,032.4 ms (three repeats), the same as an HTTP play. The rest of this section explains the baseline above. The tool obtains the button configuration from actual retained HA discovery. At `a1f4cee`, “Play calibration sequence” published to `xmas_tree/calibrate/set`:
 
 ```json
 {"action":"play","sequence":"default","loops":0,"delay_ms":5000,"ttl_s":300}
@@ -72,7 +72,7 @@ HTTP `/calibrate/start` only takes the lock and requests a static black frame; i
 - Normal engine cadence: 40 FPS, 25 ms per tick, plus rendering/output work. A previous DMA transfer can add a wait, polled at 1 ms.
 - Engine off state: 100 ms polling before it can notice power-on. Calibration ownership: 50 ms polling before normal effects resume.
 - Static calibration: 100 ms idle polling (20 ms when still dirty), 1000 ms refresh. Unlock shows black and waits 40 ms before releasing ownership.
-- Playback: minimum T0 lead is wire duration plus 10 ms (25 ms here); explicit delay up to 30 s. HA requests 5000 ms. The sequence adds its own 1000 ms dark lead. `_wait_until` yields for the bulk of a deadline and spins for the last roughly 2.5–3.5 ms.
+- Playback: minimum T0 lead is wire duration plus 10 ms (25 ms here); explicit delay up to 30 s. HA's button requested 5000 ms until #49 and now requests 0. The sequence adds its own 1000 ms dark lead. `_wait_until` yields for the bulk of a deadline and spins for the last roughly 2.5–3.5 ms.
 - Completed implicit playback holds its lock for 2 s; this is an **end** delay. Finite playback ignores lock TTL; HA's infinite playback uses a 300 s TTL (general default 180 s, maximum 900 s).
 - HA publishes dirty state on a 200 ms task loop. Running-effect publications are limited to one per second, calibration progress is once a second while playing, and diagnostics every 30 s. None gates command acceptance or wire output.
 - HA discovery waits up to 1 s for retained availability on connection; birth-triggered rediscovery is delayed 3 s, and online is reasserted after 1.5 s. Measurements begin after discovery completes.
@@ -87,4 +87,3 @@ Validation exercised all scenarios repeatedly, checked steady output against the
 
 - Wake the off-state and calibration-lock tasks when commands arrive, instead of waiting for 100 ms polling.
 - Update `GET /frame` during timed calibration playback so it reflects the output on the strip.
-- Consider HA's 5 s calibration lead: it is a deliberate filming lead, and whether to shorten it is the user's call.
