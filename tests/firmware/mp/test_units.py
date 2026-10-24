@@ -1044,6 +1044,53 @@ def calib_colour_frames_match_reference():
 
 
 @test
+def calib_out_of_memory_refuses_cleanly():
+    """Running out of memory while calibration allocates refuses the request
+    (503) and leaves it idle, never locked with nothing to recover it or
+    with half its playback buffers; a retry with memory allocates them all."""
+    from app import calib
+
+    class E:
+        owner = None
+
+    class Rt:
+        n = 10
+        fail_out = True
+        engine = E()
+
+        @property
+        def cal_out(self):
+            if self.fail_out:
+                raise MemoryError
+            return "out"
+
+    rt = Rt()
+    c = calib.Calib(rt)
+    raises(lambda: c.lock(), "not enough memory")
+    assert c.state == "idle" and rt.engine.owner is None
+    rt.fail_out = False
+    # The third allocation (the second playback buffer) fails.
+    calls = [0]
+    real = bytearray
+
+    def ba(n):
+        calls[0] += 1
+        if calls[0] == 3:
+            raise MemoryError
+        return real(n)
+
+    c.static = None
+    calib.bytearray = ba
+    try:
+        raises(lambda: c._allocate(playback=True), "not enough memory")
+    finally:
+        calib.bytearray = real
+    assert c.bufs is None and c.raw is None and c.state == "idle"
+    c._allocate(playback=True)
+    assert len(c.bufs) == 2 and len(c.bufs[1]) == 30 and len(c.raw) == 30
+
+
+@test
 def calib_validation():
     from app import calib, seqfile
 

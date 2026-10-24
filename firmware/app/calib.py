@@ -139,10 +139,26 @@ class Calib:
             if time.ticks_diff(t, self.expires) > 0:
                 self.expires = t
 
-    def lock(self, ttl_s=None, implicit=False):
-        if self.state == "idle":
+    def _allocate(self, playback=False):
+        """Everything a session needs, before any state changes: running out
+        of memory then refuses the request and leaves calibration idle (or
+        as it was), never locked or half-allocated with nothing to recover
+        it. Each set is assigned only once all of it exists."""
+        try:
             if self.static is None:
                 self.static = bytearray(3 * self.n)
+            self.rt.cal_out
+            if playback and self.bufs is None:
+                bufs = (bytearray(3 * self.n), bytearray(3 * self.n))
+                raw = bytearray(3 * self.n)
+                self.bufs, self.raw = bufs, raw
+        except MemoryError:
+            gc.collect()
+            raise HTTPError(503, "not enough memory for calibration")
+
+    def lock(self, ttl_s=None, implicit=False):
+        if self.state == "idle":
+            self._allocate()
             self.ttl_s = TTL_DEFAULT_S
             self.state = "locked"
             self.implicit = implicit
@@ -279,11 +295,9 @@ class Calib:
             raise HTTPError(400, "loops out of range")
         if not 0 <= delay_ms <= MAX_DELAY_MS:
             raise HTTPError(400, "delay_ms out of range")
+        self._allocate(playback=True)
         implicit = self.state == "idle"
         self.lock(ttl_s, implicit=implicit)
-        if self.bufs is None:
-            self.bufs = (bytearray(3 * self.n), bytearray(3 * self.n))
-            self.raw = bytearray(3 * self.n)
         seq.prewarm()
         # The first latch needs the frame on the wire first: T0 can't be
         # sooner than one write (plus margin) after the request.
