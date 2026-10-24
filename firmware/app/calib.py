@@ -177,6 +177,15 @@ class Calib:
         await asyncio.sleep_ms(40)
         if self.state == "idle":
             self.rt.engine.owner = None
+            # The final blank frame has latched and a cancelled player has
+            # unwound. Return the large allocations to ordinary effects;
+            # calibration sessions are infrequent, so retaining them would
+            # spend the heap margin long after calibration has ended.
+            self.static = None
+            self.bufs = None
+            self.raw = None
+            self.rt._cal_out = None
+            gc.collect()
 
     def _clear(self):
         s = self.static

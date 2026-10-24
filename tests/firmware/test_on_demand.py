@@ -60,11 +60,14 @@ def test_first_calibration_after_boot(flow, inspected_bundle, make_device, broke
         wait_for(lambda: d.get("/calibrate/log")[1]["frames_shown"] >= 2, 5, what="first sequence frames")
         assert resident(d) == dict(static=True, bufs=True, output=True, codec=True, discovery=False)
         wait_for(lambda: d.get("/")[1]["calibration"] == "idle", 6, what="TTL unlock")
-        # Reuse the retained buffers, including after the final blank frame.
+        wait_for(lambda: not resident(d)["static"] and not resident(d)["bufs"]
+                 and not resident(d)["output"], 5, what="calibration storage released")
+        # A new session must allocate fresh buffers after the blank latch.
         assert d.post("/calibrate/play?sequence=default&loops=0&ttl_s=2")[0] == 200
         wait_for(lambda: d.get("/calibrate/log")[1]["frames_shown"] >= 2, 5, what="second sequence")
     d.post("/calibrate/stop")
-    wait_for(lambda: d.get("/")[1]["effect"]["running"] is not None, 5, what="effects resumed")
+    wait_for(lambda: d.get("/")[1]["effect"]["running"] not in (None, "calibration"), 5, what="effects resumed")
+    assert not resident(d)["static"] and not resident(d)["bufs"] and not resident(d)["output"]
     assert not d.boots and "Traceback" not in d.console()
 
 
@@ -83,4 +86,22 @@ def test_discovery_reimports_after_birth_and_reconnect(inspected_bundle, make_de
     broker.start()  # no retained configs: a full pass is needed
     wait_for(lambda: d.get("/")[1]["ha"]["discoveries"] == 4, 70, what="reconnect discovery")
     assert not resident(d)["discovery"]
+    assert not d.boots and "Traceback" not in d.console()
+
+
+def test_relock_during_final_blank_hold_keeps_storage(inspected_bundle, make_device):
+    import base64
+
+    d = make_device(inspected_bundle)
+    d.wait_http(30, pred=lambda s: not s["boot"]["trial"])
+    for led in range(3):
+        assert d.post("/calibrate/start")[0] == 200
+        assert d.post("/calibrate/stop")[0] == 200
+        assert d.post("/calibrate/start")[0] == 200
+        assert d.get("/calibrate/led?n=%d" % led, token=True)[0] == 200
+        want = bytes(3 * led) + bytes([255] * 3) + bytes(1500 - 3 * led - 3)
+        wait_for(lambda: base64.b64decode(d.get("/frame")[1]["frame"]) == want, 5, what="relocked frame")
+        assert resident(d)["static"] and resident(d)["output"]
+        d.post("/calibrate/stop")
+        wait_for(lambda: not resident(d)["static"] and not resident(d)["output"], 5, what="final storage release")
     assert not d.boots and "Traceback" not in d.console()
