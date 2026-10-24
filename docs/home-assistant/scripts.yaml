@@ -1,0 +1,79 @@
+# Scripts for driving the tree from Home Assistant automations
+# (docs/home-assistant/README.md). Paste into scripts.yaml, or create each
+# one in Settings > Automations & scenes > Scripts > Edit in YAML.
+# Assumes the tree's MQTT_PREFIX is the default "xmas_tree".
+
+christmas_tree_takeover:
+  alias: Christmas tree - Take over
+  description: >-
+    Show an effect on the tree for a while, over whatever it's doing, then
+    go back to it. Send it again within ttl_s to keep it going.
+  mode: queued
+  fields:
+    id:
+      description: Name for this takeover; one takeover per name.
+      example: doorbell
+      required: true
+      selector:
+        text:
+    effect:
+      description: An effect name, or "off" for a dark tree.
+      example: f1_yellow
+      required: true
+      selector:
+        text:
+    color:
+      description: The effect's colour (if it has a "color" param).
+      selector:
+        color_rgb:
+    params:
+      description: 'Other effect params, for example {"speed": 2}.'
+      selector:
+        object:
+    brightness:
+      description: 1-255; the tree's own brightness if empty.
+      selector:
+        number:
+          min: 1
+          max: 255
+    priority:
+      description: 0-100, default 50. The highest active takeover shows.
+      selector:
+        number:
+          min: 0
+          max: 100
+    ttl_s:
+      description: Seconds until it ends by itself (1-3600, default 120).
+      selector:
+        number:
+          min: 1
+          max: 3600
+  sequence:
+    - action: mqtt.publish
+      data:
+        topic: xmas_tree/takeover/set
+        payload: >-
+          {% set cmd = {'id': id, 'effect': effect} %}
+          {% if color is defined and color %}{% set cmd = dict(cmd, color=color) %}{% endif %}
+          {% if params is defined and params %}{% set cmd = dict(cmd, params=params) %}{% endif %}
+          {% if brightness is defined and brightness %}{% set cmd = dict(cmd, brightness=brightness | int) %}{% endif %}
+          {% if priority is defined and priority is not none %}{% set cmd = dict(cmd, priority=priority | int) %}{% endif %}
+          {% if ttl_s is defined and ttl_s %}{% set cmd = dict(cmd, ttl_s=ttl_s | int) %}{% endif %}
+          {{ cmd | tojson }}
+
+christmas_tree_end_takeover:
+  alias: Christmas tree - End takeover
+  description: End one takeover; the tree goes back to what it was doing.
+  mode: queued
+  fields:
+    id:
+      description: The takeover's name.
+      example: doorbell
+      required: true
+      selector:
+        text:
+  sequence:
+    - action: mqtt.publish
+      data:
+        topic: xmas_tree/takeover/set
+        payload: "{{ {'id': id, 'action': 'end'} | tojson }}"
