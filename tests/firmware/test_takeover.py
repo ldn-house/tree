@@ -137,6 +137,41 @@ def test_colour_floor_follows_takeover_params(device):
     assert effect_starts(d, "solid") == starts
 
 
+def test_takeover_fades_in_and_out_over_a_tree_that_is_off(device):
+    """Transitions (app.transitions) apply to takeovers: one shown over a
+    tree that's off fades in over 1 s rather than snapping on, and fades
+    back to dark when it ends; a dark takeover fades the tree out."""
+    d = device
+    assert state(d, power=False, transition_style="none")[0] == 200
+    wait_for(lambda: sum(frame(d)) == 0, 10, what="dark tree")
+
+    def levels(seconds):
+        out = []
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            out.append(sum(frame(d)))
+            time.sleep(0.025)
+        return out
+
+    assert take(d, id="f1", effect="tint", color="#ffffff", brightness=255, ttl_s=60)[0] == 200
+    rising = levels(1.5)
+    top = max(rising)
+    assert top > 0 and any(0 < n < top * 3 // 4 for n in rising), rising
+    assert d.request("DELETE", "/takeover?id=f1")[0] == 200
+    falling = levels(1.5)
+    assert falling[-1] == 0 and any(0 < n < top * 3 // 4 for n in falling), falling
+    # A dark takeover over a lit tree fades it out too, and the user's
+    # state comes back when it ends.
+    assert state(d, power=True, effect="tint")[0] == 200
+    wait_for(lambda: sum(frame(d)) > 0, 10, what="lit tree")
+    lit = max(levels(1.2))
+    assert take(d, id="f1", effect="off", ttl_s=60)[0] == 200
+    dimming = levels(1.5)
+    assert dimming[-1] == 0 and any(0 < n < lit * 3 // 4 for n in dimming), dimming
+    assert take(d, id="f1", action="end")[0] == 200
+    wait_for(lambda: sum(frame(d)) > 0, 5, what="the user's state again")
+
+
 def test_bad_commands_change_nothing(device):
     d = device
     for bad in ({"effect": "nope"}, {"effect": "tint", "params": {"bogus": 1}}, {"effect": "tint", "color": "red"},
