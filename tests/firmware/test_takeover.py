@@ -172,6 +172,27 @@ def test_takeover_fades_in_and_out_over_a_tree_that_is_off(device):
     wait_for(lambda: sum(frame(d)) > 0, 5, what="the user's state again")
 
 
+def test_takeover_transition_none_switches_at_once(device):
+    """A takeover's own transition beats the user's: with "none" a flag
+    change shows on the next frames and a dark takeover goes black at once,
+    even though the user's transitions are a slow fade."""
+    d = device
+    assert state(d, power=True, effect="tint", transition_style="fade", transition_s=5)[0] == 200
+    assert take(d, id="f1", effect="tint", color="#ff0000", brightness=255, transition="none", ttl_s=60)[0] == 200
+    wait_running(d, "tint")
+    wait_for(lambda: pixel(d)[0] > 0 and pixel(d)[1] == 0, 5, what="red")
+    # A new effect (solid is white): no 5 s blend from red.
+    assert take(d, id="f1", effect="solid", brightness=255, transition="none", ttl_s=60)[0] == 200
+    wait_running(d, "solid")
+    wait_for(lambda: (lambda p: p[0] > 0 and p[0] == p[1] == p[2])(pixel(d)), 0.5, what="white at once")
+    assert take(d, id="f1", effect="off", transition="none", ttl_s=60)[0] == 200
+    wait_for(lambda: sum(frame(d)) == 0, 0.5, what="dark at once")
+    assert status(d)["takeover"]["showing"]["transition"] == "none"
+    # Bad values are refused.
+    assert take(d, id="f1", effect="solid", transition="sparkle")[0] == 400
+    assert take(d, id="f1", effect="solid", transition_s="x")[0] == 400
+
+
 def test_bad_commands_change_nothing(device):
     d = device
     for bad in ({"effect": "nope"}, {"effect": "tint", "params": {"bogus": 1}}, {"effect": "tint", "color": "red"},

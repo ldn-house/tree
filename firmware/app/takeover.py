@@ -5,7 +5,7 @@ doing. Commands come over MQTT (<prefix>/takeover/set) and HTTP
 
     {"id": "f1", "effect": "f1_yellow", "params": {"color": "#ffff00"},
      "color": [255, 255, 0], "brightness": 255, "speed": 1.0,
-     "priority": 50, "ttl_s": 180}
+     "priority": 50, "ttl_s": 180, "transition": "none"}
     {"id": "f1", "action": "refresh", "ttl_s": 180}   extend a running one's
                                          TTL, if it's still there
     {"id": "f1", "action": "end"}        end one (and lift its dismissal)
@@ -16,6 +16,10 @@ doing. Commands come over MQTT (<prefix>/takeover/set) and HTTP
   or 0xRRGGBB); unspecified ones take the effect's defaults, never the
   user's saved params. color is shorthand for params.color. brightness
   (0-255) defaults to the user's; speed (0.1-5) defaults to 1.0.
+- transition (none / fade / wipe / dissolve) and transition_s (0-60) set
+  how the tree changes into this takeover's effect and brightness (none:
+  at once, as flags want); they default to the user's transition settings.
+  Ending a takeover changes back with the user's settings.
 - ttl_s (1..TTL_MAX_S, default TTL_DEFAULT_S) is a dead man's switch: a
   takeover nobody refreshes ends by itself, so a crashed Home Assistant
   never leaves the tree stuck. Refresh by sending the same command again:
@@ -69,6 +73,8 @@ class Takeover:
         self.params = {}
         self.brightness = None
         self.speed = 1.0
+        self.transition = None  # None: the user's settings
+        self.transition_s = None
         self.priority = PRIORITY_DEFAULT
         self.ttl_s = TTL_DEFAULT_S
         self.expires = 0
@@ -80,7 +86,8 @@ class Takeover:
 
     def payload(self, now):
         return {"id": self.id, "effect": self.effect, "params": self.params, "brightness": self.brightness,
-                "speed": self.speed, "priority": self.priority, "ttl_s": self.left_s(now)}
+                "speed": self.speed, "transition": self.transition, "transition_s": self.transition_s,
+                "priority": self.priority, "ttl_s": self.left_s(now)}
 
 
 class Takeovers:
@@ -149,11 +156,14 @@ class Takeovers:
             tk.gen += 1
             log("takeover: %s now %s" % (tid, new["effect"]))
         changed = (tk.effect != new["effect"] or cmd.get("restart") is True or tk.params != new["params"] or tk.brightness != new["brightness"]
-                   or tk.speed != new["speed"] or tk.priority != new["priority"] or tk.seq == 0)
+                   or tk.speed != new["speed"] or tk.priority != new["priority"] or tk.seq == 0
+                   or tk.transition != new["transition"] or tk.transition_s != new["transition_s"])
         tk.effect = new["effect"]
         tk.params = new["params"]
         tk.brightness = new["brightness"]
         tk.speed = new["speed"]
+        tk.transition = new["transition"]
+        tk.transition_s = new["transition_s"]
         tk.priority = new["priority"]
         tk.ttl_s = new["ttl_s"]
         tk.expires = time.ticks_add(now, new["ttl_s"] * 1000)
@@ -193,11 +203,24 @@ class Takeovers:
         if isinstance(speed, bool) or not isinstance(speed, (int, float)) or speed != speed:
             raise ValueError("speed must be a number")
         speed = float(min(5.0, max(0.1, speed)))
+        style = cmd.get("transition")
+        if style is not None:
+            from app.transitions import STYLES
+
+            if style not in STYLES:
+                raise ValueError("transition must be one of " + ", ".join(STYLES))
+        tr_s = cmd.get("transition_s")
+        if tr_s is not None:
+            if isinstance(tr_s, bool) or not isinstance(tr_s, (int, float)) or tr_s != tr_s:
+                raise ValueError("transition_s must be a number")
+            tr_s = float(min(60.0, max(0.0, tr_s)))
         return {
             "effect": eff,
             "params": params,
             "brightness": bri,
             "speed": speed,
+            "transition": style,
+            "transition_s": tr_s,
             "priority": _int(cmd.get("priority", PRIORITY_DEFAULT), "priority", 0, 100),
             "ttl_s": _int(cmd.get("ttl_s", TTL_DEFAULT_S), "ttl_s", 1, TTL_MAX_S),
         }

@@ -481,7 +481,12 @@ class Engine:
             if goal != self.ramp.target:
                 # A takeover started, ended or changed brightness (the
                 # user's own power and brightness arrive through _on_state).
-                self._ramp_to(goal, now, None if goal and self.ramp.target else 1000)
+                ms = None if goal and self.ramp.target else 1000
+                if tk is not None and tk.transition == "none":
+                    ms = 0  # flags change at once
+                elif tk is not None and tk.transition_s is not None:
+                    ms = int(tk.transition_s * 1000)
+                self._ramp_to(goal, now, ms)
             bri = self.ramp.value if self.blend.ms and self.ramp.pending else self.ramp.step(now)
             dark_tk = tk is not None and tk.effect == "off"
             if goal == 0 and bri == 0:
@@ -509,7 +514,13 @@ class Engine:
                 show = self.tk
             if self.reload or want != self.name or src != self.src or self.inst is None:
                 self.reload = False
-                if not self._start(want, show):
+                # Into a takeover: its transition (None: the user's); out
+                # of one, or the user's own switches: the user's.
+                style = show.transition if show is not None else None
+                secs = show.transition_s if show is not None else None
+                if style == "none":
+                    secs = 0
+                if not self._start(want, show, style, secs):
                     await asyncio.sleep_ms(10)
                     continue
             elif show is not None and show.params is not self.tk_params:
