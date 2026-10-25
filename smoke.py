@@ -7,6 +7,7 @@
 
 Checks, per effect:
 - module metadata: NAME matches, DURATION_MS > 0, PARAMS are (default, min, max)
+  or colours (default, 0, 0xFFFFFF, "rgb"), AUTO (optional) is a bool
 - renders N seconds under CPython with real coordinates: no exceptions, not
   all black, estimated current never above the cap (amps)
 - deterministic: the same seed renders byte-identical frames twice
@@ -34,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 import effects  # noqa: E402
 import render  # noqa: E402
-from effects import _output  # noqa: E402
+from effects import _output, _util  # noqa: E402
 
 
 class Report:
@@ -54,7 +55,13 @@ def check_metadata(rep, name, mod):
     rep.check(isinstance(d, int) and d > 0, name, f"DURATION_MS must be a positive int, got {d!r}")
     rep.check(isinstance(getattr(mod, "NEEDS_COORDS", None), bool), name, "NEEDS_COORDS must be a bool")
     rep.check(hasattr(mod, "Effect"), name, "no Effect class")
+    rep.check(isinstance(getattr(mod, "AUTO", True), bool), name, "AUTO must be a bool")
     for k, spec in getattr(mod, "PARAMS", {}).items():
+        if isinstance(spec, tuple) and len(spec) == 4:
+            ok = (spec[3] == _util.RGB and spec[1:3] == (0, _util.RGB_MAX)
+                  and isinstance(spec[0], int) and not isinstance(spec[0], bool) and 0 <= spec[0] <= _util.RGB_MAX)
+            rep.check(ok, name, f"PARAMS[{k!r}]: a colour is (0xRRGGBB, 0, 0xFFFFFF, 'rgb') (_util.rgb_spec), got {spec!r}")
+            continue
         ok = (isinstance(spec, tuple) and len(spec) == 3
               and all(isinstance(v, (int, float)) for v in spec) and spec[1] <= spec[0] <= spec[2])
         rep.check(ok, name, f"PARAMS[{k!r}] must be (default, min, max) with min <= default <= max, got {spec!r}")

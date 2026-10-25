@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 
-from app import hw
+from app import fx as fxmod, hw
 from app.log import log
 
 # Retained topics the old single-file firmware published that nothing reads
@@ -58,7 +58,13 @@ def _entities(self):
         "schema": "json",
         "command_topic": self.t_set,
         "state_topic": self.t_state,
-        "supported_color_modes": ["brightness"],
+        # A colour sets the selected effect's "color" param, or selects
+        # "solid" (app.ha). Stated explicitly: HA keeps a key a newer config
+        # omits.
+        "supported_color_modes": ["rgb"],
+        # Brightness separately, not folded into the colour (HA scales the
+        # RGB by brightness and drops brightness without it).
+        "brightness": True,
         "brightness_scale": 255,
         # Explicit even though HA JSON lights default to supporting it.
         "transition": True,
@@ -134,6 +140,21 @@ def _entities(self):
     }
     for eff in names:
         for pname, spec in self.rt.fx.meta(eff)["params"].items():
+            if fxmod.is_rgb(spec):
+                # No colour picker entity besides a light (which "all
+                # lights" actions would switch): a #RRGGBB text.
+                yield "text", "param_%s_%s" % (eff, pname), {
+                    "name": "%s %s" % (_title(eff), pname.replace("_", " ")),
+                    "command_topic": "%s%s/%s/%s" % (self.t_cmd, "param", eff, pname),
+                    "state_topic": self.t_settings,
+                    "value_template": _param_template(eff, pname),
+                    "pattern": "^#[0-9A-Fa-f]{6}$",
+                    "min": 7,
+                    "max": 7,
+                    "icon": "mdi:palette",
+                    "entity_category": "config",
+                }
+                continue
             yield "number", "param_%s_%s" % (eff, pname), {
                 "name": "%s %s" % (_title(eff), pname.replace("_", " ")),
                 "command_topic": "%s%s/%s/%s" % (self.t_cmd, "param", eff, pname),
@@ -196,6 +217,20 @@ def _entities(self):
         "value_template": "{{ 'ON' if value_json.state != 'idle' else 'OFF' }}",
         "icon": "mdi:camera-metering-matrix",
         "entity_category": diag,
+    }
+    yield "binary_sensor", "takeover", {
+        "name": "Takeover",
+        "state_topic": self.t_tk_state,
+        "value_template": "{{ 'ON' if value_json.active else 'OFF' }}",
+        "json_attributes_topic": self.t_tk_state,
+        "json_attributes_template": "{{ (value_json.showing or {}) | tojson }}",
+        "icon": "mdi:flag-checkered",
+    }
+    yield "button", "end_takeover", {
+        "name": "End takeover",
+        "command_topic": self.t_cmd + "end_takeover",
+        "payload_press": "PRESS",
+        "icon": "mdi:flag-remove-outline",
     }
     yield "button", "reboot", {
         "name": "Reboot",
@@ -288,9 +323,11 @@ async def publish(self, force=False):
     # Remove entities for params that no longer exist.
     for obj in self.rt.state.get("ha_params"):
         if obj not in params:
-            if not await self.mqtt.publish(_config_topic(self, "number", obj), b"", retain=True):
-                log("ha: discovery cleanup interrupted; will retry on reconnect")
-                return False
+            # Number or (colour) text: clear both, harmless if absent.
+            for comp in ("number", "text"):
+                if not await self.mqtt.publish(_config_topic(self, comp, obj), b"", retain=True):
+                    log("ha: discovery cleanup interrupted; will retry on reconnect")
+                    return False
     self.rt.state.set_ha_params(params)
     self.discovered = digest
     self.discoveries += 1

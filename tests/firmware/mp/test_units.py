@@ -849,6 +849,7 @@ def l11_render_never_sees_the_clock_limit():
             slow = 0
             reload = False
             probing = False
+            tk = None
             out = None
             colour = None
 
@@ -1312,7 +1313,9 @@ def r3m3_interrupted_discovery_is_retried():
     assert asyncio.run(h.publish_discovery()) is True
     assert bus.sent[:2] == lead
     assert bus.sent[2:6] == [t for t, _j, _o in configs]
-    assert bus.sent[6:] == ["homeassistant/number/xmas_tree/param_old_gone/config"]  # stale param removed
+    # Stale param removed, as a number or a (colour) text entity.
+    assert bus.sent[6:] == ["homeassistant/number/xmas_tree/param_old_gone/config",
+                            "homeassistant/text/xmas_tree/param_old_gone/config"]
     assert h.discoveries == 1 and rt.state.params == ["param_e%d" % i for i in range(4)]
     # Complete and unchanged: nothing more to send.
     bus.sent = []

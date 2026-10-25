@@ -72,6 +72,56 @@ class Param:
         return self.value
 
 
+# Colour params. A param spec (default, 0, 0xFFFFFF, RGB) is a colour: its
+# value is a packed 0xRRGGBB int (a small int on MicroPython, so reading it
+# never allocates). Tools that only know (default, min, max) still see a
+# valid number range.
+RGB = "rgb"
+RGB_MAX = 0xFFFFFF
+
+
+def rgb(r, g, b):
+    """Pack 0-255 channels into a colour param value."""
+    return (int(r) & 255) << 16 | (int(g) & 255) << 8 | (int(b) & 255)
+
+
+def rgb_spec(r, g, b):
+    """PARAMS entry for a colour param defaulting to (r, g, b)."""
+    return (rgb(r, g, b), 0, RGB_MAX, RGB)
+
+
+def is_rgb(spec):
+    return len(spec) > 3 and spec[3] == RGB
+
+
+class ColorParam:
+    """A colour param, unpacked into r, g, b when its value changes.
+    update() returns True on a change (including the first call)."""
+
+    def __init__(self, ctx, name, default):
+        self.params = ctx.params
+        self.name = name
+        self.default = default
+        self.raw = None
+        self.value = -1
+        self.r = self.g = self.b = 0
+
+    def update(self):
+        v = self.params.get(self.name, self.default)
+        if v is self.raw:
+            return False
+        self.raw = v
+        if not isinstance(v, int) or not 0 <= v <= RGB_MAX:
+            v = self.default
+        if v == self.value:
+            return False
+        self.value = v
+        self.r = v >> 16
+        self.g = v >> 8 & 255
+        self.b = v & 255
+        return True
+
+
 class Phase:
     """Integer phase accumulator: returns 0..ONE-1, advancing one full cycle
     every period_ms at speed 1.0. Accumulating per-frame deltas keeps speed

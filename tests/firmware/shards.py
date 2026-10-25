@@ -17,17 +17,18 @@ HERE = Path(__file__).resolve().parent
 
 # Seconds per file on a GitHub-hosted ubuntu-latest runner (the shards'
 # --durations output, summed per file; measured 2026-10-23). The heap campaign
-# is split in two files, each ~12 s per registered effect (one 3-loop
-# auto-cycle phase each). Re-measure when a file grows a lot.
+# is split in two files, each ~12 s per auto-cycled effect (one 3-loop
+# auto-cycle phase each) plus ~4 s per AUTO = False effect, locked in turn. Re-measure when a file grows a lot.
 SECONDS = {
-    "test_heap.py": 255,
-    "test_heap_updated.py": 260,
+    "test_heap.py": 280,
+    "test_heap_updated.py": 285,
     "test_mqtt.py": 142,
     "test_updates.py": 105,
     "test_runtime.py": 89,
     "test_review1.py": 77,
     "test_recovery_compat.py": 61,
     "test_real_effects.py": 51,
+    "test_takeover.py": 45,
     "test_review2.py": 33,
     "test_calibration.py": 28,
     "test_resets.py": 28,

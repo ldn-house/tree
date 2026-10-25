@@ -17,6 +17,16 @@ Topics (prefix cfg.MQTT_PREFIX, default "xmas_tree"):
     <p>/update               firmware update entity state (JSON)
     <p>/cmd/...              number/button/update commands
     <p>/calibrate/set|state  calibration (docs/calibration-protocol.md, 7)
+    <p>/takeover/set         start/refresh/end a takeover (app.takeover)
+    <p>/takeover/state       active takeovers (retained, on change)
+
+The light is RGB: a colour sets the selected effect's "color" param when it
+has one, otherwise it selects the "solid" effect in that colour. A command
+that names an effect too (a scene being restored) selects that effect, and
+the colour only sets its "color" param, if it has one. While a
+takeover shows, the light reports what the tree shows (on, the takeover's
+effect and brightness); see app.takeover for how the user's own commands
+interact with it.
 
 The device's persisted state is the truth. Retained messages on command
 topics are ignored, so a stale retained "OFF" (or anything else) never
@@ -30,7 +40,7 @@ import time
 
 import asyncio
 
-from app import hw, trace
+from app import fx as fxmod, hw, trace
 from app.log import log
 
 DIAG_EVERY_MS = 30000
@@ -38,6 +48,9 @@ EFFECT_MIN_MS = 1000
 REDISCOVER_DELAY_MS = 3000
 ONLINE_AGAIN_MS = 1500  # re-assert "online" this long after connecting
 RETAINED_WAIT_MS = 1000  # for the broker to replay our retained availability
+SOLID = "solid"  # the effect a light colour selects when the effect has none
+
+
 class HA:
     def __init__(self, rt, mqtt):
         self.rt = rt
@@ -58,14 +71,18 @@ class HA:
         self.t_cmd = p + "/cmd/"
         self.t_cal_set = p + "/calibrate/set"
         self.t_cal_state = p + "/calibrate/state"
+        self.t_tk_set = p + "/takeover/set"
+        self.t_tk_state = p + "/takeover/state"
         self.t_ha_status = self.dp + "/status"
         mqtt.will = (self.t_avail, "offline", True)
         # Our own availability too: if the broker publishes the will of an
         # older session over this one's "online", put "online" back.
-        mqtt.subs = [self.t_set, self.t_cmd + "#", self.t_cal_set, self.t_ha_status, self.t_avail]
+        mqtt.subs = [self.t_set, self.t_cmd + "#", self.t_cal_set, self.t_tk_set, self.t_ha_status, self.t_avail]
         mqtt.on_connect = self.on_connect
         mqtt.on_message = self.on_message
-        self.dirty = {"light": False, "settings": False, "update": False, "calib": False, "diag": False}
+        self.dirty = {"light": False, "settings": False, "update": False, "calib": False, "diag": False,
+                      "takeover": False}
+        self.last_tk = -1
         self.effect_shown = None  # (label, mode) last published
         self.effect_at = None  # ticks of that publish
         self.ready = False  # discovery published for this session
@@ -91,6 +108,8 @@ class HA:
             self.dirty["settings"] = True
         if "colour_accuracy" in changed or "transition_style" in changed or "transition_s" in changed:
             self.dirty["settings"] = True
+        if "params" in changed:
+            self.dirty["light"] = True  # the light's colour is a param
 
     def mark(self, what):
         self.dirty[what] = True
@@ -120,6 +139,8 @@ class HA:
                 self._light(payload)
             elif topic == self.t_cal_set:
                 self._calibrate(payload)
+            elif topic == self.t_tk_set:
+                self._takeover(payload)
             elif topic.startswith(self.t_cmd):
                 self._command(topic[len(self.t_cmd) :], payload)
         except ValueError as e:
@@ -146,10 +167,42 @@ class HA:
             changes["brightness"] = cmd["brightness"]
         if "effect" in cmd:
             changes["effect"] = cmd["effect"]
+        if "color" in cmd:
+            c = cmd["color"]
+            if not isinstance(c, dict):
+                raise ValueError("color must be an object")
+            value = fxmod.parse_rgb([c.get("r"), c.get("g"), c.get("b")])
+            if "effect" in changes:
+                # A scene restore sends the effect with the colour the light
+                # reported: the effect wins.
+                eff = changes["effect"]
+                if self._has_color(eff):
+                    changes["params"] = {eff: {"color": value}}
+            else:
+                eff = self.rt.state.get("effect")
+                if not self._has_color(eff):
+                    eff = SOLID
+                    if not self._has_color(eff):
+                        raise ValueError("no effect takes a colour")
+                changes["effect"] = eff
+                changes["params"] = {eff: {"color": value}}
         self.dirty["light"] = True  # always echo the resulting state
         if changes.get("power") is False:
             self.rt.calib.unlock("power off from Home Assistant")
         self.rt.apply(changes, "mqtt")
+
+    def _has_color(self, eff):
+        if eff not in self.rt.fx.names():
+            return False
+        spec = self.rt.fx.meta(eff)["params"].get("color")
+        return spec is not None and fxmod.is_rgb(spec)
+
+    def _takeover(self, payload):
+        try:
+            cmd = json.loads(payload)
+        except ValueError:
+            raise ValueError("not JSON")
+        self.rt.takeovers.command(cmd, "mqtt")
 
     def _calibrate(self, payload):
         try:
@@ -180,7 +233,9 @@ class HA:
             parts = name.split("/")
             if len(parts) != 3:
                 raise ValueError("bad param topic")
-            self.rt.apply({"params": {parts[1]: {parts[2]: float(text)}}}, "mqtt")
+            spec = self.rt.param_specs(parts[1]).get(parts[2])
+            value = text if spec is not None and fxmod.is_rgb(spec) else float(text)
+            self.rt.apply({"params": {parts[1]: {parts[2]: value}}}, "mqtt")
         elif name == "reboot":
             self.rt.request_reboot("Home Assistant reboot button")
         elif name == "install":
@@ -190,6 +245,8 @@ class HA:
             self.dirty["update"] = True
         elif name == "check":
             self.rt.updates.check_soon()
+        elif name == "end_takeover":
+            self.rt.takeovers.command({"action": "end_all"}, "Home Assistant")
         else:
             raise ValueError("unknown command " + name)
         self.dirty["settings"] = True
@@ -216,13 +273,31 @@ class HA:
     # -- outgoing state --
 
     def light_payload(self):
+        """What the tree shows: a takeover reports on, with its effect and
+        brightness. The colour is the effect's "color" param, else the
+        colour "solid" would show."""
         st = self.rt.state
-        return {
-            "state": "ON" if st.get("power") else "OFF",
-            "brightness": st.get("brightness"),
-            "effect": st.get("effect"),
-            "color_mode": "brightness",
-        }
+        tko = self.rt.takeovers
+        tk = tko.current()
+        if tk is not None:
+            eff = tk.effect if tk.effect in self.rt.fx.names() else st.get("effect")
+            out = {"state": "ON", "brightness": tko.brightness(tk), "effect": eff}
+            color = tk.params.get("color")
+            if color is None and self._has_color(tk.effect):
+                color = self.rt.fx.meta(tk.effect)["params"]["color"][0]
+        else:
+            eff = st.get("effect")
+            out = {"state": "ON" if st.get("power") else "OFF", "brightness": st.get("brightness"), "effect": eff}
+            color = None
+        if color is None:
+            if not self._has_color(eff):
+                eff = SOLID
+            if self._has_color(eff):
+                color = st.param(eff, "color", self.rt.fx.meta(eff)["params"]["color"][0])
+        out["color_mode"] = "rgb"
+        if color is not None:
+            out["color"] = {"r": color >> 16, "g": color >> 8 & 255, "b": color & 255}
+        return out
 
     def settings_payload(self):
         st = self.rt.state
@@ -230,7 +305,12 @@ class HA:
         for eff in self.rt.fx.names():
             spec = self.rt.fx.meta(eff)["params"]
             if spec:
-                params[eff] = {k: st.param(eff, k, v[0]) for k, v in spec.items()}
+                vals = {}
+                for k, v in spec.items():
+                    x = st.param(eff, k, v[0])
+                    # Colours as "#rrggbb" (the text entities' format).
+                    vals[k] = "#%06x" % x if fxmod.is_rgb(v) else x
+                params[eff] = vals
         return {"transition_style": st.get("transition_style"), "transition_s": st.get("transition_s"), "speed": st.get("speed"), "auto_s": st.get("auto_s"), "floor": st.get("floor"),
                 "colour_accuracy": st.get("colour_accuracy"), "params": params}
 
@@ -246,6 +326,8 @@ class HA:
             await self.mqtt.publish(self.t_update, json.dumps(self.rt.updates.ha_payload()), retain=True)
         elif what == "calib":
             await self.mqtt.publish(self.t_cal_state, json.dumps(self.rt.calib.state_payload()), retain=True)
+        elif what == "takeover":
+            await self.mqtt.publish(self.t_tk_state, json.dumps(self.rt.takeovers.status()), retain=True)
         elif what == "diag":
             await self.mqtt.publish(self.t_diag, json.dumps(self.diag_payload()), retain=True)
             self.last_diag = time.ticks_ms()
@@ -263,7 +345,9 @@ class HA:
             return
         self.effect_shown = (label, mode)
         self.effect_at = now
-        attrs = {"mode": mode, "selected": self.rt.state.get("effect"), "next_switch_s": nxt}
+        tk = self.rt.engine.showing() if mode == "takeover" else None
+        attrs = {"mode": mode, "selected": self.rt.state.get("effect"), "next_switch_s": nxt,
+                 "takeover": tk.id if tk is not None else None}
         await self.mqtt.publish(self.t_effect_attr, json.dumps(attrs), retain=True)
         await self.mqtt.publish(self.t_effect, label, retain=True)
 
@@ -316,8 +400,12 @@ class HA:
                 self.dirty["calib"] = True
             if time.ticks_diff(now, self.last_diag) >= DIAG_EVERY_MS and not calib.playing():
                 self.dirty["diag"] = True
+            if self.rt.takeovers.version != self.last_tk:
+                self.last_tk = self.rt.takeovers.version
+                self.dirty["takeover"] = True
+                self.dirty["light"] = True
             await self._effect(now)
-            for what in ("light", "calib", "settings", "update", "diag"):
+            for what in ("light", "takeover", "calib", "settings", "update", "diag"):
                 if self.dirty[what]:
                     self.dirty[what] = False
                     await self._publish(what)

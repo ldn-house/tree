@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import effects  # noqa: E402
-from effects import _coords, _output  # noqa: E402
+from effects import _coords, _output, _util  # noqa: E402
 
 LED_COUNT = 500
 DEFAULT_COORDS = ("coordinates/coords.txt", "coordinates/coords_compact.txt")
@@ -76,6 +76,34 @@ def parse_value(text):
     return text
 
 
+def parse_rgb(v):
+    """A colour param value from an int, "#RRGGBB", "RRGGBB", "r,g,b" or an
+    (r, g, b) list. Raises ValueError otherwise."""
+    if isinstance(v, bool):
+        raise ValueError("not a colour")
+    if isinstance(v, int):
+        if not 0 <= v <= _util.RGB_MAX:
+            raise ValueError("colour out of range")
+        return v
+    if isinstance(v, float) and v == int(v):
+        return parse_rgb(int(v))
+    if isinstance(v, str):
+        t = v.strip()
+        if "," in t:
+            return parse_rgb([int(x) for x in t.split(",")])
+        if t[:1] == "#":
+            t = t[1:]
+        if len(t) != 6:
+            raise ValueError("colours are #RRGGBB")
+        return int(t, 16)
+    if isinstance(v, (list, tuple)) and len(v) == 3:
+        for c in v:
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or not 0 <= c <= 255:
+                raise ValueError("colour channels are 0-255")
+        return _util.rgb(v[0], v[1], v[2])
+    raise ValueError("not a colour")
+
+
 def build_params(module, overrides):
     """Merge --param overrides into the effect's defaults; returns
     (params, warnings)."""
@@ -83,7 +111,13 @@ def build_params(module, overrides):
     spec = getattr(module, "PARAMS", {})
     warnings = []
     for key, value in overrides.items():
-        if key in spec:
+        if key in spec and _util.is_rgb(spec[key]):
+            try:
+                value = parse_rgb(value)
+            except ValueError as e:
+                warnings.append(f"param {key}={value!r}: {e}")
+                continue
+        elif key in spec:
             lo, hi = spec[key][1], spec[key][2]
             if isinstance(value, (int, float)) and not lo <= value <= hi:
                 warnings.append(f"param {key}={value} outside [{lo}, {hi}]")
@@ -489,7 +523,7 @@ def parse_args(argv=None):
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--param", action="append", default=[], metavar="K=V",
-                    help="override an effect param (repeatable)")
+                    help="override an effect param (repeatable; colours as #RRGGBB or R,G,B)")
     ap.add_argument("--brightness", type=float, default=1.0,
                     help="0-1 (default 1); non-zero maps onto floor..1 as on the tree")
     ap.add_argument("--floor", type=float, default=_output.FLOOR_PCT,
