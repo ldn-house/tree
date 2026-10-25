@@ -32,6 +32,7 @@ SECONDS = {
     "test_review2.py": 33,
     "test_calibration.py": 28,
     "test_resets.py": 28,
+    "test_responsiveness.py": 10,
     "test_units.py": 1,
     "test_build_cache.py": 1,
     "test_output_copy.py": 1,
