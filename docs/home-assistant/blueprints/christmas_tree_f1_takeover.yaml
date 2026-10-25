@@ -297,7 +297,7 @@ actions:
               # 15 minutes at most, and not refreshed: a start that's put
               # off for longer gives the tree back until the next message.
               payload: >-
-                {{ {'id': 'f1', 'effect': 'off', 'priority': priority | int, 'ttl_s': 900} | tojson }}
+                {{ {'id': 'f1', 'effect': 'off', 'priority': priority | int, 'ttl_s': 900, 'transition': 'none'} | tojson }}
 
       # Chequered flag: the finish sequence, then hand the tree back.
       - conditions:
@@ -311,17 +311,25 @@ actions:
               winner: >-
                 {% set c = state_attr(top_three_p1, 'team_color_rgb') %}
                 {{ c if c is sequence and c | count == 3 else winner_fallback }}
+              # Read now: F1 Sensor goes unavailable soon after the flag.
+              # From its clock, not the calendar, which has moved on to the
+              # next event by the time a delayed or overrunning finish arrives.
+              finish_session: "{{ state_attr(session_clock, 'session_name') or '' }}"
           - action: mqtt.publish
             data:
               topic: "{{ topic }}"
               payload: >-
-                {{ {'id': 'f1', 'effect': 'f1_chequered', 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 60} | tojson }}
-          - delay: 15
-          # No winner after practice. The session name comes from F1
-          # Sensor's clock: by now the calendar can already show the next
-          # session (the finish comes after the slot plus the live delay).
-          - if: "{{ state_attr(session_clock, 'session_name') not in ['Practice 1', 'Practice 2', 'Practice 3'] }}"
+                {{ {'id': 'f1', 'effect': 'f1_chequered', 'brightness': brightness | int, 'priority': priority | int, 'ttl_s': 150, 'transition': 'none'} | tojson }}
+          # The flag stays out while the last cars finish their laps: about
+          # a minute in a race, up to two in practice and qualifying.
+          - delay: "{{ 45 if finish_session in ['Race', 'Sprint'] else 120 }}"
+          # No winner after practice.
+          - if: "{{ finish_session not in ['Practice 1', 'Practice 2', 'Practice 3'] }}"
             then:
+              # P1 again, in case it changed on the last laps (pole in
+              # qualifying); the colour from the flag if F1 Sensor has gone.
+              - variables:
+                  winner: "{% set c = state_attr(top_three_p1, 'team_color_rgb') %}{{ c if c is sequence and c | count == 3 else winner }}"
               - action: mqtt.publish
                 data:
                   topic: "{{ topic }}"
@@ -365,7 +373,8 @@ actions:
                       # restart replays the green sweep.
                       payload: >-
                         {{ {'id': 'f1', 'effect': flag.effect, 'params': flag.params, 'brightness': brightness | int,
-                            'priority': priority | int, 'ttl_s': ttl, 'restart': trigger.id == 'clock_start'} | tojson }}
+                            'priority': priority | int, 'ttl_s': ttl, 'restart': trigger.id == 'clock_start',
+                            'transition': 'none'} | tojson }}
               - conditions: "{{ owned and showing != 'off' }}"
                 sequence:
                   - action: mqtt.publish

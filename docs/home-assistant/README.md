@@ -33,6 +33,7 @@ Send a JSON command to the MQTT topic `xmas_tree/takeover/set` (not retained), o
 | `color` | Shorthand for `params.color`. |
 | `brightness` | 0-255. Default: the tree's brightness. |
 | `speed` | 0.1-5, default 1.0 (the tree's speed setting doesn't apply). |
+| `transition`, `transition_s` | How the tree changes into this takeover's effect and brightness: `none` (at once), `fade`, `wipe` or `dissolve`, over 0-60 s. Default: the tree's own transition settings. Ending a takeover changes back with the tree's settings. |
 | `priority` | 0-100, default 50. The highest active takeover shows; on a tie, the most recent. At most 4 at once. |
 | `ttl_s` | 1-3600, default 120. A dead man's switch: the takeover ends by itself unless it's refreshed, so a crashed Home Assistant never leaves the tree stuck. |
 | `restart` | `true` plays the effect from its start again even if it's already showing. |
@@ -65,10 +66,10 @@ What it does, only while the TV is on and the F1 calendar's current session is o
 | Lights-out, or the session clock starting | `f1_start`: a green sweep up the tree, then a steady green |
 | Track status CLEAR / YELLOW / VSC / SC | `f1_start` green / `f1_yellow` / amber `lighthouse` / faster orange `lighthouse` |
 | RED (session live or suspended) | `f1_red`, a slow red pulse |
-| Chequered flag (session finished) | `f1_chequered` for 15 s, `f1_winner` in P1's team colour for 60 s, `spiral_3d` in the team colour and white for 15 s, then back to what the tree was doing. After practice, only `f1_chequered` |
+| Chequered flag (session finished) | `f1_chequered` while the last cars finish (45 s after a race or sprint, 2 minutes otherwise), then in qualifying, sprint and race `f1_winner` in P1's team colour for 60 s and `spiral_3d` in the team colour and white for 15 s, then back to what the tree was doing |
 | TV off for a minute | Back to what the tree was doing |
 
-Flags (except red) only change while the session is live and its clock is running. When the clock starts again (lights-out, a restart after a red flag, the next part of qualifying) the current flag is applied again, and the green sweep replays. Otherwise the tree keeps what it last showed, and the automation refreshes it every minute (TTL 3 minutes).
+Flags, the formation-lap darkness and the chequered flag switch at once (`"transition": "none"`); the team colours, the spiral and the hand-back use the tree's own transitions. Flags (except red) only change while the session is live and its clock is running. When the clock starts again (lights-out, a restart after a red flag, the next part of qualifying) the current flag is applied again, and the green sweep replays. Otherwise the tree keeps what it last showed, and the automation refreshes it every minute (TTL 3 minutes).
 
 **Lights-out timing.** F1 Sensor turns `sensor.f1_session_status` to `live` at lights-out itself, not at the formation lap, so only lights-out can be timed exactly. Its one pre-start signal, `binary_sensor.f1_formation_start`, needs F1TV authentication and isn't delayed with the live delay. So the darkness starts at the session's scheduled start in the F1 calendar, which is the formation-lap time, plus F1 Sensor's live delay (`number.f1_live_delay`). Race-control messages containing "FORMATION LAP" (including "EXTRA FORMATION LAP", and the announcements of a delayed start) start it again. The darkness lasts until lights-out, 15 minutes at most.
 
