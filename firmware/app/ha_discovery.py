@@ -1,5 +1,6 @@
 """Home Assistant discovery, loaded for a pass and then released."""
 
+import asyncio
 import gc
 import hashlib
 import json
@@ -282,11 +283,12 @@ def _configs(self):
         yield _config_topic(self, comp, obj), json.dumps(cfg), obj
 
 
-def _digest(self):
+async def _digest(self):
     h = hashlib.sha256()
     for topic, js, _obj in _configs(self):
         h.update(topic)
         h.update(js)
+        await asyncio.sleep_ms(0)
     return h.digest()
 
 
@@ -298,7 +300,14 @@ async def publish(self, force=False):
     A pass only counts once every publish in it went out: if the session
     drops part-way, nothing is recorded and the next connect publishes
     it all again (review R3-M3). Returns True when a pass completed."""
-    digest = _digest(self)
+    # Cold overlay imports can be expensive, including effects without any
+    # params (which _entities would otherwise scan in one turn). Warm their
+    # metadata one effect per turn; settings and both config walks reuse it.
+    for name in self.rt.fx.names():
+        self.hb = time.ticks_ms()
+        self.rt.fx.meta(name)
+        await asyncio.sleep_ms(0)
+    digest = await _digest(self)
     if not force and digest == self.discovered:
         return False
     self.discovered = None  # until this pass completes
@@ -307,6 +316,7 @@ async def publish(self, force=False):
     if not await self.mqtt.publish(self.t_settings, json.dumps(self.settings_payload()), retain=True):
         log("ha: discovery interrupted; will retry on reconnect")
         return False
+    await asyncio.sleep_ms(0)
     for name in LEGACY_RETAINED:
         if not await self.mqtt.publish(self.p + "/" + name, b"", retain=True):
             log("ha: discovery interrupted; will retry on reconnect")
@@ -320,14 +330,19 @@ async def publish(self, force=False):
         if not await self.mqtt.publish(topic, js, retain=True):
             log("ha: discovery interrupted after %d entities; will retry on reconnect" % (n - 1))
             return False
+        # An await on a buffered MQTT write need not yield to other tasks.
+        await asyncio.sleep_ms(0)
     # Remove entities for params that no longer exist.
     for obj in self.rt.state.get("ha_params"):
+        self.hb = time.ticks_ms()
+        await asyncio.sleep_ms(0)
         if obj not in params:
             # Number or (colour) text: clear both, harmless if absent.
             for comp in ("number", "text"):
                 if not await self.mqtt.publish(_config_topic(self, comp, obj), b"", retain=True):
                     log("ha: discovery cleanup interrupted; will retry on reconnect")
                     return False
+                await asyncio.sleep_ms(0)
     self.rt.state.set_ha_params(params)
     self.discovered = digest
     self.discoveries += 1

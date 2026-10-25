@@ -127,6 +127,9 @@ class Effects:
                     self._meta[name] = m
             except Exception:
                 pass
+        # Bundled metadata must not hide an overlay already on disk at boot.
+        for name in self.overlays():
+            self._meta.pop(name, None)
         self._names = None
 
     def overlays(self):
@@ -167,7 +170,9 @@ class Effects:
         return "effects." + name
 
     def meta(self, name):
-        if self.overlay_file(name) is None and name in self._meta:
+        # Upload/delete calls forget(), so overlay metadata is valid until
+        # then too. Avoid filesystem probes and imports on every HA entity.
+        if name in self._meta:
             return self._meta[name]
         try:
             mod = self.load(name)
