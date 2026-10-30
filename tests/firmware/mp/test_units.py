@@ -1297,6 +1297,11 @@ def r3m3_interrupted_discovery_is_retried():
 
     rt = Rt()
     lead = ["xmas_tree/settings", "xmas_tree/attributes"]  # current settings, then the legacy topic cleared
+    class NoEffects:
+        def names(self):
+            return []  # this reproduction supplies configs directly
+
+    rt.fx = NoEffects()
     bus = Bus(fail_at=len(lead) + 2)
     h = ha.HA(rt, bus)
     h.settings_payload = lambda: {}

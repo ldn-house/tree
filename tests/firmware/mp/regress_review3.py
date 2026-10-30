@@ -149,6 +149,11 @@ try:
         cfg = Cfg()
         state = State()
 
+        class fx:
+            @staticmethod
+            def names():
+                return []  # this reproduction supplies configs directly
+
     class Bus:
         fail_at = 2
         sent = 0
