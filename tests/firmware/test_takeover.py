@@ -209,8 +209,10 @@ def test_bad_commands_change_nothing(device):
 
 def test_user_changes_during_a_takeover(device):
     d = device
-    assert state(d, power=True, brightness=255, effect="chase")[0] == 200
-    assert take(d, id="f1", effect="tint", color="#ff0000", brightness=255, ttl_s=60)[0] == 200
+    # No power fade or effect blend, so the first red seen is the full level,
+    # not a sample partway through a fade that the dimmed level could end up above.
+    assert state(d, power=True, brightness=255, effect="chase", transition=0)[0] == 200
+    assert take(d, id="f1", effect="tint", color="#ff0000", brightness=255, ttl_s=60, transition="none")[0] == 200
     wait_running(d, "tint")
     wait_for(lambda: pixel(d)[0] > 0, 10, what="red")
     high = pixel(d)[0]

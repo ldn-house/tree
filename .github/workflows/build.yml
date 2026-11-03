@@ -123,7 +123,14 @@ jobs:
 
       - name: Install mosquitto
         # Each shard runs its own brokers (the fixtures pick free ports).
-        run: sudo apt-get update && sudo apt-get install -y mosquitto && sudo systemctl stop mosquitto || true
+        run: |
+          sudo apt-get update && sudo apt-get install -y mosquitto && sudo systemctl stop mosquitto || true
+          # Ubuntu 26.04's package confines /usr/sbin/mosquitto with an
+          # AppArmor profile that only lets it read configs under
+          # /etc/mosquitto; the fixtures write theirs to pytest's tmp dir.
+          if [ -e /etc/apparmor.d/mosquitto ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/mosquitto
+          fi
 
       - name: Cache the MicroPython unix port
         id: mp-cache
