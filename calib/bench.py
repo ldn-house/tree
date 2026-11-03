@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .detect import FEATURES, detect_sequence
+from .detect import detect_sequence
 from .synth import load_truth
 
 CORRECT_PX = 4.0   # at 1080 px long side; scaled with image size
@@ -44,42 +44,6 @@ def score_view(result: dict, uv_true: np.ndarray, visible: np.ndarray, min_conf:
 def _run(args):
     root, view, method, lag, model = args
     return view, detect_sequence(Path(root) / view / "sequential", method, lag=lag, conf_model=model)
-
-
-def run_detectors(root: Path, methods: list[str], model: dict | None, lag: int = 0, workers: int = 8):
-    truth = load_truth(root / "truth.json")
-    views = [v["camera"].name for v in truth["views"]]
-    jobs = [(str(root), v, m, lag, model) for m in methods for v in views]
-    with ProcessPoolExecutor(workers) as ex:
-        results = list(ex.map(_run, jobs))
-    out = {}
-    for (rootv, view, method, _l, _m), (_v, res) in zip(jobs, results):
-        out[(method, view)] = res
-    return truth, views, out
-
-
-def feature_table(res: dict, uv_true: np.ndarray):
-    X, y = [], []
-    scale = max(res["image_size"]) / 1080
-    for i, d in res["detections"].items():
-        if d is None or not np.isfinite(uv_true[i]).all():
-            if d is not None:
-                X.append(d.features())
-                y.append(0)
-            continue
-        X.append(d.features())
-        y.append(float(np.hypot(d.x - uv_true[i, 0], d.y - uv_true[i, 1]) / scale <= CORRECT_PX))
-    return np.array(X), np.array(y)
-
-
-def wire_jumps(uv: np.ndarray, scale_px: float) -> dict:
-    """2D wire continuity for real data: jumps between consecutive detected LEDs."""
-    ok = np.isfinite(uv).all(1)
-    pairs = ok[:-1] & ok[1:]
-    d = np.linalg.norm(np.diff(uv, axis=0), axis=1)[pairs]
-    return {"pairs": int(pairs.sum()), "median_step_px": float(np.median(d)),
-            "jumps_gt_scale": int((d > scale_px).sum()),
-            "frac_jumps": float((d > scale_px).mean())}
 
 
 def _uv_from(res: dict, n: int, min_conf: float = 0.5):

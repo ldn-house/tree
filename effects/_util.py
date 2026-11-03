@@ -42,11 +42,6 @@ for _p in range(256):
     SIN[_p] = int(127.5 + 127.5 * math.sin(2 * math.pi * _p / 256) + 0.5)
 
 
-def fp(x):
-    """Float -> ONE-based fixed point int (for use in __init__)."""
-    return int(x * ONE + 0.5) if x >= 0 else -int(-x * ONE + 0.5)
-
-
 def param(ctx, name, default):
     v = ctx.params.get(name)
     return default if v is None else v

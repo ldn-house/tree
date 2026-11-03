@@ -11,7 +11,6 @@ wait_closed(). close_now() closes it immediately, so a dropped MQTT session
 or a finished HTTP fetch never keeps a socket (or TLS buffers) alive.
 """
 
-import asyncio
 
 CHUNK = 256
 
@@ -103,11 +102,3 @@ def close_now(stream):
             sock.close()
         except Exception:
             pass
-
-
-async def aclose(stream, timeout=2):
-    close_now(stream)
-    try:
-        await asyncio.wait_for(stream.wait_closed(), timeout)
-    except Exception:
-        pass
