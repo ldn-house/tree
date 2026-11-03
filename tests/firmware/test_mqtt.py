@@ -484,8 +484,12 @@ def test_first_connect_after_an_update_clears_legacy_state(make_device, bundles,
     entity never starts from a payload without its param, and clears the
     legacy topic."""
     bus.pub(P + "/attributes", json.dumps({"ip": "192.0.2.10", "wifi_rssi": -60}), retain=True)
-    bus.pub(P + "/settings", json.dumps({"speed": 1.0, "auto_s": 0, "params": {}}), retain=True)
+    stale = json.dumps({"speed": 1.0, "auto_s": 0, "params": {}})
+    bus.pub(P + "/settings", stale, retain=True)
     assert retained(broker, P + "/attributes")
+    # bus hears its own publishes; wait for that echo before t0, or a late
+    # one would be taken for the device's settings.
+    bus.wait(P + "/settings", lambda p: p == stale.encode(), 10)
     t0 = time.time()
     d = make_device(bundles["v1"], MQTT_BROKER="127.0.0.1", MQTT_PORT=broker.port, MQTT_KEEPALIVE=5)
     d.wait_http(30)
