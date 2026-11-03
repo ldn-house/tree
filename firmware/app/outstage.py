@@ -27,10 +27,6 @@ def channel_budget(n, limit_a, ma_per_channel, percent=None):
     return max(0, int(limit_a * 1000.0 * 255 / ma_per_channel))
 
 
-def estimated_ma(channel_sum, ma_per_channel):
-    return channel_sum * ma_per_channel // 255
-
-
 def estimated_a(channel_sum, ma_per_channel):
     return channel_sum * ma_per_channel / 255000
 
