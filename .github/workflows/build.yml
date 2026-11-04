@@ -38,7 +38,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
 
       - name: Compile-check the recovery layer
@@ -76,7 +76,7 @@ jobs:
       mode: ${{ steps.mode.outputs.mode }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Classify the change
         id: mode
         env:
@@ -118,7 +118,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4  # shallow: older firmware the tests compare with is vendored (tests/firmware/fixtures/history)
+      - uses: actions/checkout@v7  # shallow: older firmware the tests compare with is vendored (tests/firmware/fixtures/history)
       - uses: astral-sh/setup-uv@v6
 
       - name: Install mosquitto
@@ -185,7 +185,7 @@ jobs:
   web-export:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
 
       - name: Test web export and renderer parity
@@ -220,7 +220,7 @@ jobs:
       group: publish-firmware
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: firmware
