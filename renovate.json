@@ -1,0 +1,7 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>incognitojam/renovate-config",
+    "github>incognitojam/renovate-config:automerge"
+  ]
+}
