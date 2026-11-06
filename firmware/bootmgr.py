@@ -5,7 +5,7 @@ file, boot.py, main.py or safemode.py, and config.py only changes through
 the validated, signed config endpoint. That protects recovery against bad
 or truncated updates. It does NOT protect it against code you choose to run:
 firmware bundles and hot-pushed effects execute with full filesystem access,
-so only install code signed with your UPDATE_KEY (see docs in CLAUDE.md,
+so only install code signed with your UPDATE_KEY (see docs in AGENTS.md,
 "Trust model").
 
 Flash layout:

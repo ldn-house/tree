@@ -42,7 +42,7 @@ The [web export contract](docs/web-export.md) documents the manifest, binary pla
 
 ### Updates that can't brick the tree
 
-The firmware has two slots. An update is staged, verified (sizes, SHA-256 hashes, signature, an anti-replay generation, compile checks), only then copied over the unused slot, and booted as a trial; if it doesn't come up healthy it is rolled back automatically. A rejected update changes nothing. If nothing will boot, or the flash can't be written, the tree drops into a safe mode that still accepts a new bundle (or a fixed config) over Wi-Fi. The small recovery layer that does this is installed over USB and no update path writes it. Code you install yourself (firmware, hot-pushed effects) is trusted and runs with full access, so set `UPDATE_KEY` to require your signature on all of it. See CLAUDE.md, "Trust model".
+The firmware has two slots. An update is staged, verified (sizes, SHA-256 hashes, signature, an anti-replay generation, compile checks), only then copied over the unused slot, and booted as a trial; if it doesn't come up healthy it is rolled back automatically. A rejected update changes nothing. If nothing will boot, or the flash can't be written, the tree drops into a safe mode that still accepts a new bundle (or a fixed config) over Wi-Fi. The small recovery layer that does this is installed over USB and no update path writes it. Code you install yourself (firmware, hot-pushed effects) is trusted and runs with full access, so set `UPDATE_KEY` to require your signature on all of it. See AGENTS.md, "Trust model".
 
 ## Home Assistant Integration
 
