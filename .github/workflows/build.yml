@@ -134,7 +134,7 @@ jobs:
 
       - name: Cache the MicroPython unix port
         id: mp-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/micropython-bin
           key: micropython-unix-${{ env.MICROPYTHON_VERSION }}-32bit-gil
