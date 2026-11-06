@@ -88,6 +88,9 @@ class Clock:
 
 engine.time = Clock
 transitions.time = Clock
+# The colour analysis is paced by real time, which a busy machine stretches over
+# more frames. Finish it within one frame, so these frames depend only on the clock.
+engine.COLOUR_US = 0
 
 
 def run(commands, end):
@@ -156,8 +159,35 @@ def accurate(frames):
 frames = run([(100, {'power': False}), (1300, {'power': True})], 2450)
 assert any(not any(wire) for at, wire in frames if 1100 <= at < 1300)
 assert any(0 < sum(wire) < 10000 for at, wire in frames if 100 <= at < 1100)
-assert any(0 < sum(wire) < 10000 for at, wire in frames if 1300 <= at < 1700)
+on = [(at, wire) for at, wire in frames if at >= 1300]
+# The first ON frame is checked at the driver, before any polling can miss it.
+assert 0 < sum(on[0][1]) < sum(on[-1][1]) // 4
 print('normal OFF/ON every pixel/frame maximum drift:', accurate(frames))
+
+# Reversing a ramp continues from what's showing, in both directions.
+frames = run([(100, {'power': False}), (1300, {'power': True}), (1500, {'power': False}),
+              (1700, {'power': True})], 3000)
+around = [sum(wire) for at, wire in frames if 1400 <= at <= 1800]
+assert all(abs(b - a) < 2000 for a, b in zip(around, around[1:])), around
+rising = [sum(wire) for at, wire in frames if 1400 <= at <= 1500]
+falling = [sum(wire) for at, wire in frames if 1525 <= at <= 1700]
+assert all(a <= b for a, b in zip(rising, rising[1:])), rising
+assert all(a >= b for a, b in zip(falling, falling[1:])), falling
+assert falling[-1] < falling[0] < 47000 and sum(frames[-1][1]) > 47000
+
+# A command's own duration replaces the default 1 s power and brightness ramps.
+frames = run([(100, {'power': False, 'transition': .4}), (900, {'power': True, 'transition': .4})], 1600)
+assert any(sum(wire) for at, wire in frames if 400 <= at < 500)
+assert all(not any(wire) for at, wire in frames if 550 <= at < 900)
+on = [(at, sum(wire)) for at, wire in frames if at >= 900]
+assert 0 < on[0][1] < 15000
+assert all(n > 47000 for at, n in on if at >= 1350)
+assert any(n < 47000 for at, n in on if at >= 1200)
+frames = run([(100, {'brightness': 1, 'transition': 2})], 2300)
+middle = [sum(wire) for at, wire in frames if 1000 <= at <= 1200]
+assert middle and all(15000 < n < 33000 for n in middle), middle
+assert sum(frames[-1][1]) < 10000
+assert all(sum(wire) > sum(frames[-1][1]) for at, wire in frames if at < 1800)
 
 for style in ('fade', 'wipe', 'dissolve'):
     for interrupted in (False, True):

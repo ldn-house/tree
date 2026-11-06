@@ -35,6 +35,19 @@ def samples(d, seconds):
     return result
 
 
+def timed(d, until):
+    """(read started, read finished, level) up to a time.monotonic() deadline.
+    A frame read lies between the two times however late the test process
+    runs, so bound the ramp on one side of each, never on a single instant."""
+    result = []
+    while time.monotonic() < until:
+        before = time.monotonic()
+        n = level(d)
+        result.append((before, time.monotonic(), n))
+        time.sleep(.025)
+    return result
+
+
 def test_transition_maths_allocations_and_timing():
     r = subprocess.run([devsim.MICROPYTHON, str(devsim.ROOT / 'tools/transition_check.py')],
                        cwd=devsim.ROOT, capture_output=True, text=True)
@@ -71,10 +84,12 @@ def test_none_and_zero_cut_and_auto_blends(device):
         wait_for(lambda: sum(frame(d)[0::3]) == 0, .3)
         d.post('/state', {'effect': 'solid'})
         wait_for(lambda: level(d) > 47000, 3)
-    d.post('/state', {'effect': 'auto', 'auto_s': 1, 'transition_style': 'fade', 'transition_s': .5})
-    wait_for(lambda: d.get('/')[1]['effect']['running'] == 'chase', 5)
+    # Long enough for a late read to land inside the blend, and for the blend
+    # to finish inside the effect's turn.
+    d.post('/state', {'effect': 'auto', 'auto_s': 8, 'transition_style': 'fade', 'transition_s': 3})
+    wait_for(lambda: d.get('/')[1]['effect']['running'] == 'chase', 12)
     assert sum(frame(d)[1::3]) > 0  # frozen white survives the switch
-    wait_for(lambda: sum(frame(d)[1::3]) == 0, 1)
+    wait_for(lambda: sum(frame(d)[1::3]) == 0, 4)
 
 
 def test_power_fades_floor_and_reversal(device):
@@ -89,11 +104,13 @@ def test_power_fades_floor_and_reversal(device):
     wait_for(lambda: level(d) > 0, .3)
     up = samples(d, .45)
     assert all(b[1] >= a[1] for a, b in zip(up, up[1:]))
-    assert 1500 <= up[0][1] < full // 4  # effective floor, never sub-floor
-    before = level(d)
+    # HTTP can observe a later ramp frame on a busy runner. The virtual
+    # clock test checks the first frame; every observed lit frame must
+    # still respect the effective floor.
+    assert all(n >= 1500 for _, n in up)
+    # Reversing mid-ramp continues from what's showing: every frame around
+    # it is checked on the virtual clock (mp/transitions_colour.py).
     d.post('/state', {'power': False})
-    after = level(d)
-    assert abs(before - after) < 2000
     wait_for(lambda: level(d) == 0, 2)
     d.post('/state', {'power': True})
     wait_for(lambda: level(d) > full - 100, 2)
@@ -116,14 +133,19 @@ def test_ha_duration_discovery_and_persistence(mdev, bus):
     cfg = json.loads(bus.wait('homeassistant/select/xmas_tree/transition_style/config'))
     assert cfg['options'] == ['none', 'fade', 'wipe', 'dissolve']
     assert json.loads(bus.wait('homeassistant/number/xmas_tree/transition_s/config'))['unit_of_measurement'] == 's'
-    bus.pub('xmas_tree/set', '{"brightness":1,"transition":2}')
+    # HA's duration reaches the ramp: 3 s, not the 1 s a full sweep takes by
+    # default. The exact curve is checked on the virtual clock.
+    sent = time.monotonic()
+    bus.pub('xmas_tree/set', '{"brightness":1,"transition":3}')
     wait_for(lambda: d.get('/')[1]['state']['brightness'] == 1, 3)
     wait_for(lambda: json.loads(bus.last('xmas_tree/state'))['brightness'] == 1, 3)
-    vals = samples(d, 2.2)
-    start = vals[0][0]
-    middle = [n for t, n in vals if .8 <= t - start <= 1.1]
-    assert middle and all(15000 < n < 33000 for n in middle)
-    assert vals[-1][1] == 1500
+    applied = time.monotonic()
+    vals = timed(d, sent + 2.6)
+    finished_early = [n for _, done, n in vals if 1.2 <= done - sent <= 2.2]
+    assert finished_early and all(n > 5000 for n in finished_early), vals
+    started_late = [n for begun, _, n in vals if begun - applied >= 2.2]
+    assert all(n < 33000 for n in started_late), vals
+    wait_for(lambda: level(d) == 1500, 5)
     bus.pub('xmas_tree/cmd/transition_style', 'wipe')
     bus.pub('xmas_tree/cmd/transition_s', '1.5')
     wait_for(lambda: d.saved_state().get('transition_s') == 1.5, 6)
@@ -179,14 +201,20 @@ def test_small_brightness_change_settles_quickly(device):
 def test_ha_power_transition_override(mdev, bus):
     d = mdev
     setup(d)
-    bus.pub('xmas_tree/set', '{"state":"OFF","transition":0.4}')
-    wait_for(lambda: d.get('/')[1]['state']['power'] is False, 2, interval=.01)
-    assert level(d) > 0
-    wait_for(lambda: level(d) == 0, .65, interval=.01)
-    bus.pub('xmas_tree/set', '{"state":"ON","transition":0.4}')
-    wait_for(lambda: level(d) > 0, .3, interval=.01)
-    assert level(d) < 15000
-    wait_for(lambda: level(d) > 47000, .65, interval=.01)
+    # 3 s, not the 1 s default: a read finished between the two proves it was
+    # used however late it ran. The 0.4 s curve is on the virtual clock.
+    sent = time.monotonic()
+    bus.pub('xmas_tree/set', '{"state":"OFF","transition":3}')
+    vals = timed(d, sent + 2.2)
+    still_lit = [n for _, done, n in vals if done - sent >= 1.2]
+    assert still_lit and all(n > 0 for n in still_lit), vals
+    wait_for(lambda: level(d) == 0, 5)
+    sent = time.monotonic()
+    bus.pub('xmas_tree/set', '{"state":"ON","transition":3}')
+    vals = timed(d, sent + 2.2)
+    still_dim = [n for _, done, n in vals if done - sent >= 1.2]
+    assert still_dim and all(n < 47000 for n in still_dim), vals
+    wait_for(lambda: level(d) > 47000, 5)
 
 
 def test_power_off_during_long_effect_blend(device):
