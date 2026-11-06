@@ -78,41 +78,22 @@ def test_new_coordinates_reach_a_cached_coordinate_effect(make_device, bundle):
     coordinate effect renders from the new positions, not the cached ones."""
     d = make_device(bundle / "tree-firmware.bin")
     d.wait_http(40, pred=lambda s: not s["boot"]["trial"])
-    n = 500
-
-    def put(y):
-        body = ("0.1,%.2f,0.1\n" % y * n).encode()
+    # Spread the known LEDs over every height: some are always inside the
+    # plane, while unknown LEDs must stay black. Swap the two halves to
+    # prove both that new coordinates arrive and old cached tables go away.
+    d.post("/state", {"effect": "plane_sweep", "brightness": 255,
+                      "transition_style": "none"})
+    for half in (0, 1, 0):
+        known = ["0.1,%.4f,0.1\n" % (i / 249) for i in range(250)]
+        unknown = ["null\n"] * 250
+        body = "".join(known + unknown if half == 0 else unknown + known).encode()
         code, res = d.request("PUT", "/files/coords.txt", body=body)
-        assert code == 200 and res["known"] == n, res
+        assert code == 200 and res["known"] == 250, res
 
-    def lit():
-        f = base64.b64decode(d.get("/frame")[1]["frame"])
-        return sum(f)
+        def updated():
+            f = base64.b64decode(d.get("/frame")[1]["frame"])
+            halves = (sum(f[:750]), sum(f[750:]))
+            return halves[half] > 0 and halves[1 - half] == 0
 
-    # plane_sweep: one up-and-down sweep every 5.3 s (speed 1) starting at
-    # the bottom when the effect (re)starts, lighting LEDs within 0.03 of
-    # the plane. With every LED at one height the whole frame lights only
-    # when the plane passes it: ~0.1 s and ~5.2 s after the start for height
-    # 0.05, ~2.5-2.8 s for 0.95. Stale cached tables would keep the old timing.
-    import time
-
-    def first_lit(y):
-        put(y)  # reloads the effect: its clock starts again
-        t0 = time.time()
-        wait_for(lambda: d.get("/")[1]["effect"]["running"] == "plane_sweep", 10)
-        time.sleep(0.5)  # past the first pass of a low plane
-        while time.time() - t0 < 7:
-            if lit() > 0:
-                return time.time() - t0
-            time.sleep(0.05)
-        return None
-
-    # Observe coordinate-driven output, without a frozen switch frame.
-    d.post("/state", {"effect": "plane_sweep", "brightness": 255, "speed": 1, "transition_style": "none"})
-    low = first_lit(0.05)
-    high = first_lit(0.95)
-    low2 = first_lit(0.05)
-    assert low is not None and 4.3 < low < 6.5, low
-    assert high is not None and 1.8 < high < 3.6, high
-    assert low2 is not None and 4.3 < low2 < 6.5, low2
-    assert not d.get("/")[1]["effect"]["failed"]
+        wait_for(updated, 10, what="wire frame uses the new known positions")
+        assert not d.get("/")[1]["effect"]["failed"]

@@ -156,7 +156,9 @@ def accurate(frames):
 frames = run([(100, {'power': False}), (1300, {'power': True})], 2450)
 assert any(not any(wire) for at, wire in frames if 1100 <= at < 1300)
 assert any(0 < sum(wire) < 10000 for at, wire in frames if 100 <= at < 1100)
-assert any(0 < sum(wire) < 10000 for at, wire in frames if 1300 <= at < 1700)
+on = [(at, wire) for at, wire in frames if at >= 1300]
+# The first ON frame is checked at the driver, before any polling can miss it.
+assert 0 < sum(on[0][1]) < sum(on[-1][1]) // 4
 print('normal OFF/ON every pixel/frame maximum drift:', accurate(frames))
 
 for style in ('fade', 'wipe', 'dissolve'):

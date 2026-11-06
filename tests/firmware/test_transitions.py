@@ -89,7 +89,10 @@ def test_power_fades_floor_and_reversal(device):
     wait_for(lambda: level(d) > 0, .3)
     up = samples(d, .45)
     assert all(b[1] >= a[1] for a, b in zip(up, up[1:]))
-    assert 1500 <= up[0][1] < full // 4  # effective floor, never sub-floor
+    # HTTP can observe a later ramp frame on a busy runner. The virtual
+    # clock test checks the first frame; every observed lit frame must
+    # still respect the effective floor.
+    assert all(n >= 1500 for _, n in up)
     before = level(d)
     d.post('/state', {'power': False})
     after = level(d)
