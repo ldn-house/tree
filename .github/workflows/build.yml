@@ -56,7 +56,7 @@ jobs:
           uv run tools/build_firmware.py --out dist
           python3 -c "import json; m = json.load(open('dist/manifest.json')); print(m['version'], m['ref'], len(m['files']), 'files')"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: firmware
           path: dist/
@@ -202,7 +202,7 @@ jobs:
           uv run --python 3.12 export_web.py --out renders/web \
             --archive renders/tree-effects.tar.gz --sheet renders/web-sheet.png
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tree-web
           path: |
@@ -221,7 +221,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: firmware
           path: dist
@@ -265,7 +265,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tree-web
           path: web-dist
