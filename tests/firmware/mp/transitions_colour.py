@@ -88,6 +88,9 @@ class Clock:
 
 engine.time = Clock
 transitions.time = Clock
+# The colour analysis is paced by real time, which a busy machine stretches over
+# more frames. Finish it within one frame, so these frames depend only on the clock.
+engine.COLOUR_US = 0
 
 
 def run(commands, end):
