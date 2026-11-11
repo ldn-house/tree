@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Compile-check the recovery layer
         # Installed over USB only; mpy-cross catches syntax errors.
@@ -119,7 +119,7 @@ jobs:
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7  # shallow: older firmware the tests compare with is vendored (tests/firmware/fixtures/history)
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install mosquitto
         # Each shard runs its own brokers (the fixtures pick free ports).
@@ -186,7 +186,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Test web export and renderer parity
         run: |
